@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>آپلود دسته‌ای صنعتی | HMI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Vazirmatn', sans-serif; background-color: #0f172a; color: #f8fafc; overflow-x: hidden; }
+        .glass-card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        .upload-zone { border: 2px dashed #475569; transition: all 0.3s ease; background: rgba(15, 23, 42, 0.5); }
+        .upload-zone:hover { border-color: #3b82f6; background: rgba(59, 130, 246, 0.05); }
+        
+        /* استایل نوار پیشرفت */
+        .progress-container { width: 100%; background-color: #1e293b; border-radius: 999px; overflow: hidden; height: 1.5rem; border: 1px solid #334155; display: none; margin-top: 20px;}
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); width: 0%; transition: width 0.3s ease; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: bold; text-shadow: 0 1px 2px rgba(0,0,0,0.5); }
+        
+        .sidebar { width: 260px; height: 100vh; position: fixed; right: 0; top: 0; z-index: 50; background: #1e293b; border-left: 1px solid rgba(255,255,255,0.1); }
+        .main-content { margin-right: 260px; min-height: 100vh; }
+        @media (max-width: 1024px) { .sidebar { display: none; } .main-content { margin-right: 0; } }
+        .nav-item { cursor: pointer; transition: all 0.2s; border-right: 4px solid transparent; }
+        .nav-item:hover { background: rgba(59, 130, 246, 0.1); border-right-color: #3b82f6; color: #60a5fa; }
+    </style>
+</head>
+<body>
+
+<aside class="sidebar shadow-2xl flex flex-col">
+    <div class="p-6 border-b border-slate-700">
+        <h2 class="text-xl font-bold text-blue-400">منوی کنترل</h2>
+        <p class="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">Industrial System v3.8</p>
+    </div>
+    <nav class="flex-1 mt-4">
+        <a href="/" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50 text-slate-300 no-underline">
+            <span>📊</span><span class="font-medium">مانیتورینگ زنده</span>
+        </a>
+        <a href="/history" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50 text-slate-300 no-underline">
+            <span>📜</span><span class="font-medium">تاریخچه داده‌ها</span>
+        </a>
+        <a href="/upload_dat" class="nav-item p-4 flex items-center gap-3 bg-slate-700/50 border-r-4 border-blue-500 text-blue-400">
+            <span>📂</span><span class="font-medium">بارگذاری فایل (Batch)</span>
+        </a>
+    </nav>
+</aside>
+
+<div class="main-content p-4 md:p-8">
+    <header class="mb-8 flex justify-between items-center bg-slate-800/50 p-4 rounded-2xl border-r-4 border-emerald-500 shadow-lg">
+        <div>
+            <h1 class="text-xl md:text-2xl font-bold text-emerald-400">سیستم آپلود دسته‌ای (Batch Uploader)</h1>
+            <p class="text-slate-400 text-xs mt-1">مدیریت حجم بالای داده با الگوریتم تقسیم بار</p>
+        </div>
+        <div class="text-2xl">📦</div>
+    </header>
+
+    <div class="max-w-4xl mx-auto">
+        <div class="glass-card p-8 rounded-3xl shadow-2xl">
+            
+            <div class="text-center mb-8">
+                <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-slate-700 mb-4">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                </div>
+                <h3 class="text-lg font-bold text-white">انتخاب پوشه فایل‌های DAT</h3>
+                <p class="text-slate-400 text-sm mt-2">فایل‌ها به صورت خودکار به بسته‌های <span class="text-emerald-400 font-bold">50 تایی</span> تقسیم شده و ارسال می‌شوند.</p>
+            </div>
+
+            <div class="upload-zone rounded-2xl p-10 text-center cursor-pointer relative group">
+                <input type="file" id="fileInput" webkitdirectory directory multiple class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10">
+                
+                <div class="space-y-2 pointer-events-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="mx-auto h-12 w-12 text-slate-500 group-hover:text-blue-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                    </svg>
+                    <p class="text-slate-300 font-bold group-hover:text-white" id="drop-text">کلیک کنید یا پوشه را اینجا رها کنید</p>
+                    <p id="file-count" class="text-sm text-emerald-400 font-mono mt-4 font-bold"></p>
+                </div>
+            </div>
+
+            <div id="progressContainer" class="progress-container">
+                <div id="progressBar" class="progress-bar">0%</div>
+            </div>
+
+            <div id="statusLog" class="mt-4 text-xs font-mono text-slate-400 h-24 overflow-y-auto p-2 bg-slate-900/50 rounded-lg hidden"></div>
+
+            <button id="startUploadBtn" onclick="startBatchUpload()" class="w-full mt-6 bg-slate-700 text-slate-500 py-4 rounded-xl font-bold text-lg shadow-lg cursor-not-allowed transition-all" disabled>
+                منتظر انتخاب فایل...
+            </button>
+
+        </div>
+    </div>
+</div>
+
+<script>
+    const fileInput = document.getElementById('fileInput');
+    const startBtn = document.getElementById('startUploadBtn');
+    const fileCountLabel = document.getElementById('file-count');
+    const progressBar = document.getElementById('progressBar');
+    const progressContainer = document.getElementById('progressContainer');
+    const statusLog = document.getElementById('statusLog');
+    
+    let allFiles = [];
+    const BATCH_SIZE = 50; // سایز هر بسته: 50 فایل (برای جلوگیری از خطای سرور)
+
+    fileInput.addEventListener('change', (e) => {
+        allFiles = Array.from(e.target.files).filter(f => 
+            f.name.toLowerCase().endsWith('.dat') || 
+            f.name.toLowerCase().endsWith('.txt')
+        );
+        
+        if (allFiles.length > 0) {
+            fileCountLabel.innerText = `${allFiles.length} فایل معتبر (.dat/.txt) شناسایی شد.`;
+            startBtn.disabled = false;
+            startBtn.classList.remove('bg-slate-700', 'text-slate-500', 'cursor-not-allowed');
+            startBtn.classList.add('bg-emerald-600', 'text-white', 'hover:bg-emerald-500');
+            startBtn.innerText = `شروع پردازش ${allFiles.length} فایل`;
+        } else {
+            fileCountLabel.innerText = "هیچ فایل معتبری یافت نشد.";
+        }
+    });
+
+    async function startBatchUpload() {
+        if (allFiles.length === 0) return;
+
+        // قفل کردن UI
+        startBtn.disabled = true;
+        startBtn.innerText = "⏳ در حال پردازش دسته‌ای...";
+        progressContainer.style.display = 'block';
+        statusLog.style.display = 'block';
+        fileInput.disabled = true;
+
+        let processed = 0;
+        let total = allFiles.length;
+        let batchCount = Math.ceil(total / BATCH_SIZE);
+
+        log(`شروع عملیات: ${total} فایل در ${batchCount} دسته.`);
+
+        for (let i = 0; i < total; i += BATCH_SIZE) {
+            const chunk = allFiles.slice(i, i + BATCH_SIZE);
+            const formData = new FormData();
+            
+            chunk.forEach(file => {
+                formData.append('folder_upload', file);
+            });
+
+            try {
+                // ارسال درخواست به بک‌اند
+                const response = await fetch('/upload_dat', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    processed += chunk.length;
+                    // آپدیت درصد
+                    const percent = Math.round((processed / total) * 100);
+                    progressBar.style.width = `${percent}%`;
+                    progressBar.innerText = `${percent}% (${processed}/${total})`;
+                    
+                    log(`✅ دسته ${(i/BATCH_SIZE)+1}/${batchCount}: ${result.processed} رکورد ذخیره شد.`);
+                } else {
+                    log(`⚠️ خطا در دسته ${(i/BATCH_SIZE)+1}: ${result.message}`);
+                }
+
+            } catch (error) {
+                console.error(error);
+                log(`❌ خطای شبکه در دسته ${(i/BATCH_SIZE)+1}`);
+            }
+        }
+
+        // پایان عملیات
+        startBtn.classList.remove('bg-emerald-600');
+        startBtn.classList.add('bg-blue-600');
+        startBtn.innerText = "عملیات تمام شد | بارگذاری مجدد";
+        startBtn.disabled = false;
+        startBtn.onclick = () => window.location.reload();
+        log("🎉 پایان تمام مراحل.");
+    }
+
+    function log(msg) {
+        const time = new Date().toLocaleTimeString('fa-IR');
+        statusLog.innerHTML += `<div>[${time}] ${msg}</div>`;
+        statusLog.scrollTop = statusLog.scrollHeight;
+    }
+</script>
+
+</body>
+</html>

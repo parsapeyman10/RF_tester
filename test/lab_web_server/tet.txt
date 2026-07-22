@@ -1,0 +1,300 @@
+# -*- coding: utf-8 -*-
+"""
+  Project: Flask WebServer Robust Industrial AP Receiver – Version 2.0
+  Feature: Enhanced Chart-Ready APIs, Auto-Connect COM9 & Master/Daily DB Sync
+  Engineer: [Peyman parsa] - Electronic Perspective
+"""
+
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response
+from flask_sqlalchemy import SQLAlchemy
+import datetime 
+import io
+import csv 
+import pytz 
+import serial
+import threading
+import time
+import serial.tools.list_ports 
+import os
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'industrial_secret_key_2024' 
+
+# --- تنظیمات دیتابیس پویا و مانیتورینگ صنعتی ---
+TEHRAN_TZ = pytz.timezone('Asia/Tehran')
+
+def get_current_date_str():
+    """دریافت تاریخ جاری برای نام‌گذاری دیتابیس روزانه"""
+    return datetime.datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
+
+# تعریف نام دیتابیس روزانه و جامع (Master)
+current_db_name = f"{get_current_date_str()}.db"
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{current_db_name}'
+app.config['SQLALCHEMY_BINDS'] = {
+    'master': 'sqlite:///master_industrial.db'
+}
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False 
+
+db = SQLAlchemy(app)
+
+# --- مدل داده‌ها (سخت‌گیرانه برای هر دو دیتابیس) ---
+class SensorReading(db.Model):
+    id = db.Column(db.Integer, primary_key=True) 
+    num_value = db.Column(db.Integer, nullable=True) 
+    nbcm_selected = db.Column(db.String(100), nullable=True) 
+    humidity = db.Column(db.String(50), nullable=True)
+    temp = db.Column(db.String(50), nullable=True)
+    time = db.Column(db.String(50), nullable=True) 
+    date = db.Column(db.String(50), nullable=True) 
+    timestamp = db.Column(db.DateTime, nullable=False) 
+    formatted_log = db.Column(db.String(500), nullable=True) 
+
+    def __repr__(self):
+        return f"<SensorReading {self.num_value}>"
+
+class MasterReading(db.Model):
+    __bind_key__ = 'master'
+    id = db.Column(db.Integer, primary_key=True) 
+    num_value = db.Column(db.Integer, nullable=True) 
+    nbcm_selected = db.Column(db.String(100), nullable=True) 
+    humidity = db.Column(db.String(50), nullable=True)
+    temp = db.Column(db.String(50), nullable=True)
+    time = db.Column(db.String(50), nullable=True) 
+    date = db.Column(db.String(50), nullable=True) 
+    timestamp = db.Column(db.DateTime, nullable=False) 
+    formatted_log = db.Column(db.String(500), nullable=True)
+
+# --- اشیاء مدیریت سریال (Global) ---
+ser = None 
+serial_thread = None 
+stop_event = threading.Event()
+active_serial_port = None 
+active_baud_rate = 115200 
+last_captured_payload = None 
+
+# پورت پیش‌فرض صنعتی
+DEFAULT_PORT = "COM9"
+
+def safe_int(val, default=0):
+    """تبدیل امن رشته به عدد با فیلتر کاراکترهای نویزی"""
+    try:
+        if val is None: return default
+        clean_val = str(val).strip()
+        numeric_filter = "".join(filter(str.isdigit, clean_val))
+        return int(numeric_filter) if numeric_filter else default
+    except (ValueError, TypeError):
+        return default
+
+def save_sensor_data(data_source):
+    """ذخیره‌سازی همزمان در دیتابیس روزانه و دیتابیس جامع"""
+    try:
+        if hasattr(data_source, 'getlist'): 
+            nbcm_checked_list = data_source.getlist('nbcm')
+            num_val_raw = data_source.get('num_value')
+        else: 
+            nbcm_checked_list = data_source.get('nbcm', []) 
+            num_val_raw = data_source.get('num_value') 
+
+        num_int = safe_int(num_val_raw)
+        all_nbcms_ids = ['NBCM1', 'NBCM2', 'NBCM3', 'NBCM4']
+        nbcm_statuses_parts = [f"Nbcm {i.replace('NBCM','')}:{'active' if i in nbcm_checked_list else 'notactive'}" for i in all_nbcms_ids]
+
+        humidity_val = data_source.get('humidity') or '0'
+        temp_val = data_source.get('temp') or '0'
+        
+        now_tehran = datetime.datetime.now(TEHRAN_TZ)
+        input_time = data_source.get('time') or now_tehran.strftime('%H:%M:%S')
+        input_date = data_source.get('date') or now_tehran.strftime('%Y-%m-%d')
+
+        log_str = f"NUM:{num_int}," + ",".join(nbcm_statuses_parts) + f",H:{humidity_val},T:{temp_val}"
+
+        new_reading = SensorReading(
+            num_value=num_int,
+            nbcm_selected=",".join(nbcm_checked_list),
+            humidity=str(humidity_val),
+            temp=str(temp_val),
+            time=input_time,
+            date=input_date,
+            timestamp=now_tehran,
+            formatted_log=log_str
+        )
+        
+        master_reading = MasterReading(
+            num_value=num_int,
+            nbcm_selected=",".join(nbcm_checked_list),
+            humidity=str(humidity_val),
+            temp=str(temp_val),
+            time=input_time,
+            date=input_date,
+            timestamp=now_tehran,
+            formatted_log=log_str
+        )
+
+        db.session.add(new_reading)
+        db.session.add(master_reading)
+        db.session.commit()
+        return True
+    except Exception as e:
+        db.session.rollback()
+        print(f"[DB_ERROR] Failed to sync data: {e}")
+        return False
+
+def parse_industrial_line(line):
+    """تجزیه رشته دریافتی بر اساس پروتکل NUM"""
+    try:
+        if "NUM=" in line:
+            clean_line = line[line.find("NUM="):]
+            parts = {p.split('=')[0].strip(): p.split('=')[1].strip() for p in clean_line.split(',') if '=' in p}
+            return {
+                'num_value': parts.get('NUM'),
+                'nbcm': [f'NBCM{i}' for i in range(1, 5) if parts.get(f'NBCM{i}') == 'OK'],
+                'temp': parts.get('Temp', '0'),
+                'humidity': parts.get('Humidity', '0'),
+                'date': parts.get('Date', 'N/A'),
+                'time': parts.get('Time', 'N/A')
+            }
+    except: return None
+
+def read_serial_worker():
+    """پردازشگر پس‌زمینه پورت سریال با قابلیت چاپ دیتای خام"""
+    global ser, active_serial_port, active_baud_rate, last_captured_payload
+    print(f"[SYSTEM] Monitoring started on {active_serial_port}")
+    
+    while not stop_event.is_set():
+        if not active_serial_port:
+            time.sleep(1); continue
+        try:
+            if ser is None or not ser.is_open:
+                ser = serial.Serial(active_serial_port, active_baud_rate, timeout=1)
+                print(f"[SERIAL] Successfully opened {active_serial_port}")
+
+            if ser.in_waiting > 0:
+                raw_data = ser.readline().decode('utf-8', errors='ignore').strip()
+                if not raw_data: continue
+
+                # --- چاپ دیتای اصلی در کنسول برای مانیتورینگ فیزیکی ---
+                print(f"[INCOMING] RAW_DATA: {raw_data}")
+
+                if "NUM=" in raw_data:
+                    last_captured_payload = parse_industrial_line(raw_data)
+                
+                if "Handshake Complete" in raw_data and last_captured_payload:
+                    with app.app_context():
+                        save_sensor_data(last_captured_payload)
+                    last_captured_payload = None
+            
+            time.sleep(0.01)
+        except Exception as e:
+            print(f"[SERIAL_ERROR] {e}")
+            if ser: 
+                try: ser.close()
+                except: pass
+            ser = None
+            time.sleep(5)
+
+# --- Routes & API ---
+
+@app.route('/')
+def home():
+    last_reading = SensorReading.query.order_by(SensorReading.timestamp.desc()).first()
+    return render_template('index.html', last_data=last_reading)
+
+@app.route('/api/sensor_data')
+def get_sensor_data():
+    """API دیتای روزانه - بهینه‌سازی شده برای نمودار با سورت NUM"""
+    readings = SensorReading.query.order_by(SensorReading.num_value.asc()).all()
+    output = []
+    for r in readings:
+        nbcm_map = {f"NBCM{i}": ("active" if f"NBCM{i}" in (r.nbcm_selected or "") else "notactive") for i in range(1, 5)}
+        output.append({
+            'num_value': r.num_value,
+            'temp': r.temp,
+            'humidity': r.humidity,
+            'time': r.time,
+            'date': r.date,
+            'timestamp': r.timestamp.isoformat(), # اضافه شده برای پایداری نمودار
+            'nbcm_statuses': nbcm_map
+        })
+    return jsonify(output)
+
+@app.route('/api/master_data')
+def get_master_data():
+    """API دیتای جامع - نمایش تمام رکوردهای تاریخچه با سورت NUM"""
+    readings = MasterReading.query.order_by(MasterReading.num_value.asc()).all()
+    output = []
+    for r in readings:
+        output.append({
+            'num_value': r.num_value,
+            'temp': r.temp,
+            'humidity': r.humidity,
+            'date': r.date,
+            'time': r.time,
+            'timestamp': r.timestamp.isoformat()
+        })
+    return jsonify(output)
+
+@app.route('/api/serial_ports')
+def list_serial_ports():
+    ports = [port.device for port in serial.tools.list_ports.comports()]
+    return jsonify({
+        'available_ports': ports,
+        'active_port': active_serial_port,
+        'connection_status': 'Connected' if (ser and ser.is_open) else 'Disconnected'
+    })
+
+@app.route('/api/set_serial_config', methods=['POST'])
+def set_serial_config():
+    global active_serial_port, active_baud_rate, serial_thread
+    data = request.get_json()
+    stop_event.set()
+    if ser: ser.close()
+    if serial_thread: serial_thread.join(timeout=2)
+    active_serial_port = data.get('port')
+    active_baud_rate = data.get('baud_rate', 115200)
+    stop_event.clear()
+    serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
+    serial_thread.start()
+    return jsonify({'status': 'success'})
+
+@app.route('/submit_form', methods=['POST'])
+def submit_form():
+    save_sensor_data(request.form)
+    return redirect(url_for('home'))
+
+@app.route('/plot_display')
+def plot_display():
+    """نمایش صفحه نمودارها"""
+    return render_template('plot_display.html')
+
+@app.route('/history')
+def history():
+    all_readings = SensorReading.query.order_by(SensorReading.num_value.asc()).all()
+    return render_template('history.html', readings=all_readings)
+
+@app.route('/export_excel')
+def export_excel():
+    all_readings = SensorReading.query.order_by(SensorReading.num_value.asc()).all()
+    si = io.StringIO()
+    cw = csv.writer(si)
+    cw.writerow(['Timestamp', 'NUM', 'NBCM_List', 'Temp', 'Humidity'])
+    for r in all_readings:
+        cw.writerow([r.timestamp, r.num_value, r.nbcm_selected, r.temp, r.humidity])
+    return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report_{get_current_date_str()}.csv"})
+
+if __name__ == '__main__':
+    with app.app_context():
+        # مقداردهی اولیه تمامی دیتابیس‌ها
+        db.create_all() 
+    
+    # --- اتصال خودکار به COM9 در استارت‌آپ ---
+    available_ports = [p.device.upper() for p in serial.tools.list_ports.comports()]
+    if DEFAULT_PORT.upper() in available_ports:
+        print(f"[BOOT] Default port {DEFAULT_PORT} detected. Initializing auto-connect...")
+        active_serial_port = DEFAULT_PORT
+        stop_event.clear()
+        serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
+        serial_thread.start()
+    else:
+        print(f"[BOOT] Warning: {DEFAULT_PORT} not found. System waiting for manual config.")
+    
+    app.run(debug=True, port=5000, use_reloader=False)

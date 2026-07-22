@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sensor Data Form & Curve</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  /* Apply Inter font and basic styling */
+  body {
+    font-family: "Inter", sans-serif;
+    margin: 20px;
+    background-color: #f4f7f6;
+    color: #333;
+    /* Allow body to scroll if content exceeds viewport height */
+    overflow-y: auto; 
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  h1 {
+    color: #007bff;
+    text-align: center;
+    margin-bottom: 10px;
+  }
+  .form-section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    border-bottom: 2px solid #007bff;
+    padding-bottom: 5px;
+  }
+  .form-section-header h2 {
+    color: #007bff;
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+  .toggle-button {
+    background-color: #6c757d; /* Gray color */
+    color: white;
+    padding: 8px 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1rem;
+    transition: background-color 0.3s ease;
+  }
+  .toggle-button:hover {
+    background-color: #5a6268;
+  }
+
+  .form-container {
+    display: flex;
+    flex-direction: column; /* Stack children (rows) vertically */
+    gap: 20px; /* Space between the form rows */
+    border: 1px solid #eee;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  }
+
+  /* New style for general form rows */
+  .form-row {
+    display: flex;
+    flex-wrap: wrap; /* Allow items to wrap within the row */
+    gap: 20px; /* Default space between items in a row */
+    justify-content: center; /* Center items horizontally */
+  }
+
+  /* Specific styles for the checkbox group within a form row */
+  .checkbox-group {
+    display: flex; /* Make it a flex container */
+    /* Removed flex-wrap: wrap; to keep checkboxes in a single line */
+    gap: 15px; /* Space between individual checkboxes */
+    justify-content: center; /* Center checkboxes horizontally */
+  }
+
+  .checkbox-group label {
+    font-weight: bold;
+    color: #555;
+    display: flex; /* Ensure label content (checkbox + text) is a flex item */
+    align-items: center;
+  }
+  .checkbox-group input[type="checkbox"] {
+    margin-right: 5px; /* Space between checkbox and label text */
+  }
+
+  .input-field {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  input[type="text"] {
+    border: 1px solid #ccc;
+    padding: 8px;
+    min-width: 150px;
+    border-radius: 4px;
+    font-size: 14px;
+  }
+  /* Updated button style */
+  button[type="submit"] { /* Target specifically the submit button */
+    background-color: #4CAF50; /* Green color */
+    color: white;
+    padding: 12px 25px; /* Match history link padding */
+    border: none;
+    border-radius: 5px; /* Match history link border-radius */
+    cursor: pointer;
+    font-size: 18px; /* Match history link font size */
+    margin-top: 10px;
+    transition: background-color 0.3s ease;
+    text-decoration: none; /* Ensure no underline if it acts like a link */
+    display: inline-block; /* Ensure it behaves like a block for padding/margin */
+  }
+  button[type="submit"]:hover {
+    background-color: #45a049; /* Darker green on hover */
+  }
+  .history-link-container {
+    text-align: center;
+    display: flex; /* Use flexbox to align buttons */
+    justify-content: center; /* Center the buttons */
+    gap: 15px; /* Space between buttons */
+    margin-top: 20px; /* Space above buttons */
+  }
+  .history-link, .export-button {
+    display: inline-block;
+    color: white;
+    padding: 12px 25px;
+    border-radius: 5px;
+    text-decoration: none;
+    font-size: 18px;
+    transition: background-color 0.3s ease;
+  }
+  .history-link {
+    background-color: #007bff;
+  }
+  .history-link:hover {
+    background-color: #0056b3;
+  }
+  .export-button {
+    background-color: #ff8c00; /* Orange color */
+  }
+  .export-button:hover {
+    background-color: #cc7000; /* Darker orange on hover */
+  }
+
+  /* Styling for the curve drawing section */
+  .curve-section {
+      width: 100%;
+      background-color: #ffffff;
+      border-radius: 1rem;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-top: 20px;
+  }
+
+  .curve-section h2 {
+      color: #1a202c;
+      margin-bottom: 1rem;
+      font-size: 1.5rem;
+      font-weight: 600;
+      text-align: center; /* Ensure heading is centered */
+  }
+
+  /* Styles for the iframe to ensure it expands vertically */
+  .plot-iframe {
+      width: 100%;
+      /* Set a min-height initially, but height will be adjusted by JS */
+      min-height: 650px; /* Adjusted to account for two plots + padding/margins */
+      border: none; /* Remove iframe border */
+      /* overflow: hidden; /* This is important for preventing iframe's internal scroll */
+      /* Note: We will rely on JS to set height dynamically for external scroll */
+  }
+
+  /* --- Enhanced Styling for the Last Status Box --- */
+  .last-status-box {
+    background: linear-gradient(145deg, #e0f7fa, #b2ebf2); /* Soft blue gradient */
+    border: 1px solid #80deea; /* Light blue border */
+    border-radius: 1.25rem; /* More rounded corners */
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15); /* Stronger, softer shadow */
+    padding: 2rem; /* Increased padding */
+    margin-bottom: 25px; /* More space below */
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 20px; /* Increased space between internal rows */
+  }
+
+  .last-status-box h2 {
+    color: #00796b; /* Teal heading color */
+    margin-top: 0;
+    margin-bottom: 1rem;
+    font-size: 1.8rem; /* Larger heading */
+    font-weight: 700; /* Bolder heading */
+    border-bottom: 2px solid #4db6ac; /* More prominent separator */
+    padding-bottom: 0.75rem;
+    text-align: center; /* Center the heading */
+  }
+
+  /* Styles for the last status NBCM row */
+  .last-status-nbcm-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 25px; /* Even more space between NBCM status items */
+    justify-content: center; /* Center items */
+    padding-bottom: 15px; /* More padding at the bottom */
+    border-bottom: 1px dashed #a7d9e0; /* Lighter dashed separator */
+  }
+
+  .last-status-nbcm-item {
+    font-size: 1.2rem; /* Larger font for NBCM items */
+    color: #263238; /* Darker text for better contrast */
+    font-weight: 600; /* Bolder font */
+    display: flex;
+    align-items: center;
+  }
+  .last-status-nbcm-item .icon {
+    font-size: 1.5em; /* Larger icon size */
+    margin-right: 8px; /* Space between icon and text */
+  }
+  .last-status-nbcm-item .status-text {
+    font-weight: normal; /* Make status text less bold */
+  }
+  .last-status-nbcm-item .active-status {
+    color: #28a745; /* Green for active */
+  }
+  .last-status-nbcm-item .not-active-status {
+    color: #dc3545; /* Red for not active */
+  }
+
+  /* New styles for the display rows within last-status-box */
+  .last-status-display-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px; /* Space between items in this row */
+    justify-content: center; /* Center items horizontally */
+  }
+
+  .last-status-display-item {
+    display: flex;
+    align-items: center;
+    gap: 5px; /* Space between label and value */
+    font-size: 1.1rem;
+    color: #4a5568;
+    background-color: #f0f8ff; /* Light background for each item */
+    padding: 10px 15px;
+    border-radius: 8px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    min-width: 200px; /* Give them some minimum width */
+    justify-content: center; /* Center content within the item */
+  }
+
+  .last-status-item strong { /* This targets strong tags within .last-status-item */
+    color: #1a202c;
+    font-size: 1.1em;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Sensor Data Entry</h1>
+
+  {% if last_data %}
+  <div class="last-status-box">
+    <h2>Last Sensor Reading</h2>
+      <div class="last-status-nbcm-row">
+        {% if last_data.nbcm_selected %}
+          {% for nbcm_id in ['NBCM1', 'NBCM2', 'NBCM3', 'NBCM4', 'NBCM5'] %}
+            <span class="last-status-nbcm-item">
+              {% if nbcm_id in last_data.nbcm_selected %}
+                <span class="icon active-status">&#9745;</span>
+                <span class="status-text">{{ nbcm_id }} (Active)</span>
+              {% else %}
+                <span class="icon not-active-status">&#9744;</span>
+                <span class="status-text">{{ nbcm_id }} (Not Active)</span>
+              {% endif %}
+            </span>
+          {% endfor %}
+        {% else %}
+          <div class="last-status-item">NBCM Statuses: N/A</div>
+        {% endif %}
+      </div>
+
+      <div class="last-status-display-row">
+          <div class="last-status-display-item"><strong>Humidity:</strong> <span>{{ last_data.humidity if last_data.humidity is not none else 'N/A' }}</span></div>
+          <div class="last-status-display-item"><strong>Temperature:</strong> <span>{{ last_data.temp if last_data.temp is not none else 'N/A' }}</span></div>
+      </div>
+      <div class="last-status-display-row">
+          <div class="last-status-display-item"><strong>Time:</strong> <span>{{ last_data.time if last_data.time is not none else 'N/A' }}</span></div>
+          <div class="last-status-display-item"><strong>Date:</strong> <span>{{ last_data.date if last_data.date is not none else 'N/A' }}</span></div>
+      </div>
+  </div>
+  {% endif %}
+
+  <div class="form-section-header">
+    <h2>Enter Manually data</h2>
+    <button id="toggleFormButton" class="toggle-button">Show Form</button>
+  </div>
+
+  <form class="form-container" id="manualEntryForm" method="POST" action="/submit_form" style="display: none;">
+    <div class="form-row">
+      <div class="checkbox-group">
+        <label><input type="checkbox" name="nbcm" value="NBCM1"> NBCM1</label>
+        <label><input type="checkbox" name="nbcm" value="NBCM2"> NBCM2</label>
+        <label><input type="checkbox" name="nbcm" value="NBCM3"> NBCM3</label>
+        <label><input type="checkbox" name="nbcm" value="NBCM4"> NBCM4</label>
+        <label><input type="checkbox" name="nbcm" value="NBCM5"> NBCM5</label>
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="input-field">
+        <label for="humidity">Humidity:</label>
+        <input type="text" id="humidity" name="humidity">
+      </div>
+
+      <div class="input-field">
+        <label for="temp">Temp:</label>
+        <input type="text" id="temp" name="temp">
+      </div>
+    </div>
+
+    <div class="form-row">
+      <div class="input-field">
+        <label for="time">Time:</label>
+        <input type="text" id="time" name="time">
+      </div>
+
+      <div class="input-field">
+        <label for="date">Date:</label>
+        <input type="text" id="date" name="date">
+      </div>
+    </div>
+
+    <button type="submit">Submit Data</button>
+  </form>
+
+  <div class="history-link-container">
+    <a href="/history" class="history-link">View Data History</a>
+    <a href="/export_excel" class="export-button">Export to Excel</a>
+  </div>
+
+  <div class="curve-section">
+      <!-- iframe to load the plot from plot_display.html -->
+      <iframe id="plotIframe" src="/plot_display" class="plot-iframe" title="Sensor Data Plot"></iframe>
+  </div>
+
+</div>
+
+<script>
+    // Toggle form visibility
+    const toggleFormButton = document.getElementById('toggleFormButton');
+    const manualEntryForm = document.getElementById('manualEntryForm');
+    const plotIframe = document.getElementById('plotIframe');
+
+
+    // Set initial state to hidden
+    manualEntryForm.style.display = 'none';
+    toggleFormButton.textContent = 'Show Form';
+
+    toggleFormButton.addEventListener('click', () => {
+        if (manualEntryForm.style.display === 'none') {
+            manualEntryForm.style.display = 'flex';
+            toggleFormButton.textContent = 'Hide Form';
+        } else {
+            manualEntryForm.style.display = 'none';
+            toggleFormButton.textContent = 'Show Form';
+        }
+    });
+
+    // Listener for messages from the iframe to resize it
+    window.addEventListener('message', (event) => {
+        // Ensure the message is from the expected origin if deploying to a different domain
+        // For local development, 'http://127.0.0.1:5000' is typically fine.
+        if (event.data.type === 'setIframeHeight' && event.source === plotIframe.contentWindow) {
+            plotIframe.style.height = `${event.data.height}px`;
+        }
+    });
+
+</script>
+
+</body>
+</html>

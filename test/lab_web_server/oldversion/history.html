@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Sensor Data History</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  body {
+    font-family: "Inter", sans-serif;
+    margin: 20px;
+    background-color: #f4f7f6;
+    color: #333;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  }
+  .history-box {
+    margin-top: 20px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    background-color: #f9f9f9;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  }
+  .history-box h1 {
+    color: #007bff;
+    margin-top: 0;
+    border-bottom: 2px solid #007bff;
+    padding-bottom: 10px;
+    margin-bottom: 20px;
+  }
+  .history-item {
+    background-color: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    padding: 15px;
+    margin-bottom: 15px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .history-item strong {
+    color: #555;
+  }
+  .history-item p {
+    margin: 0;
+    word-wrap: break-word; /* Ensure long strings wrap */
+  }
+  .no-data-message {
+    text-align: center;
+    color: #666;
+    padding: 30px;
+    font-size: 1.1em;
+    border: 1px dashed #ccc;
+    border-radius: 8px;
+    margin-top: 20px;
+    background-color: #f0f0f0;
+  }
+
+  .button-group {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  }
+  .back-button {
+    background-color: #6c757d;
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1em;
+    text-decoration: none;
+    display: inline-block;
+    transition: background-color 0.3s ease;
+  }
+  .back-button:hover {
+    background-color: #5a6268;
+  }
+  .clear-button {
+    background-color: #dc3545; /* Red color */
+    color: white;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1em;
+    transition: background-color 0.3s ease;
+  }
+  .clear-button:hover {
+    background-color: #c82333;
+  }
+  .flash-message {
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    font-weight: bold;
+    text-align: center;
+  }
+  .flash-message.success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+  }
+  .flash-message.error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+  }
+
+  /* Modal Styles */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background-color: #fff;
+    padding: 30px;
+    border-radius: 10px;
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+    text-align: center;
+    max-width: 400px;
+    width: 90%;
+    transform: scale(0.95);
+    transition: transform 0.2s ease-out;
+  }
+
+  .modal-content h3 {
+    margin-top: 0;
+    color: #dc3545;
+    font-size: 1.5em;
+    margin-bottom: 20px;
+  }
+
+  .modal-content p {
+    margin-bottom: 25px;
+    font-size: 1.1em;
+    color: #555;
+  }
+
+  .modal-buttons {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+  }
+
+  .modal-button {
+    padding: 10px 25px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 1em;
+    font-weight: bold;
+    transition: background-color 0.2s ease, transform 0.1s ease;
+  }
+
+  .modal-button.confirm {
+    background-color: #dc3545;
+    color: white;
+  }
+
+  .modal-button.confirm:hover {
+    background-color: #c82333;
+    transform: translateY(-2px);
+  }
+
+  .modal-button.cancel {
+    background-color: #e0e0e0;
+    color: #333;
+  }
+
+  .modal-button.cancel:hover {
+    background-color: #d0d0d0;
+    transform: translateY(-2px);
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="button-group">
+    <a href="/" class="back-button">← Back to Form</a>
+    <button type="button" class="clear-button" id="clearAllDataButton">Clear All Data</button>
+  </div>
+
+  {# Display Flash Messages #}
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <ul class="flashes" style="list-style-type: none; padding: 0;">
+        {% for category, message in messages %}
+          <li class="flash-message {{ category }}">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+
+  <div class="history-box">
+    <h1>Sensor Data History</h1>
+    {% if readings %}
+      {% for reading in readings %}
+        <div class="history-item">
+          <p><strong>ID:</strong> {{ reading.id }}</p>
+          <p><strong>NBCM Selected:</strong> {{ reading.nbcm_selected if reading.nbcm_selected is not none else 'N/A' }}</p>
+          <p><strong>Humidity:</strong> {{ reading.humidity if reading.humidity is not none else 'N/A' }}</p>
+          <p><strong>Temperature:</strong> {{ reading.temp if reading.temp is not none else 'N/A' }}</p>
+          <p><strong>Time:</strong> {{ reading.time if reading.time is not none else 'N/A' }}</p>
+          <p><strong>Date:</strong> {{ reading.date if reading.date is not none else 'N/A' }}</p>
+          <p><strong>Formatted Log:</strong> {{ reading.formatted_log if reading.formatted_log is not none else 'N/A' }}</p>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="no-data-message">No sensor data recorded yet. Submit data from the form!</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Custom Confirmation Modal -->
+<div class="modal-overlay" id="confirmationModal" style="display: none;">
+  <div class="modal-content">
+    <h3>Confirm Deletion</h3>
+    <p>Are you sure you want to clear ALL data from history? This action cannot be undone.</p>
+    <div class="modal-buttons">
+      <button class="modal-button confirm" id="confirmClear">Clear All Data</button>
+      <button class="modal-button cancel" id="cancelClear">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const clearAllDataButton = document.getElementById('clearAllDataButton');
+    const confirmationModal = document.getElementById('confirmationModal');
+    const confirmClearButton = document.getElementById('confirmClear');
+    const cancelClearButton = document.getElementById('cancelClear');
+
+    // Show the modal when "Clear All Data" button is clicked
+    clearAllDataButton.addEventListener('click', function() {
+      confirmationModal.style.display = 'flex'; // Show modal
+    });
+
+    // Hide the modal when "Cancel" is clicked
+    cancelClearButton.addEventListener('click', function() {
+      confirmationModal.style.display = 'none'; // Hide modal
+    });
+
+    // Handle the actual form submission when "Confirm" is clicked
+    confirmClearButton.addEventListener('click', function() {
+      // Create a form element dynamically
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '{{ url_for("clear_history") }}';
+
+      // Append the form to the body and submit it
+      document.body.appendChild(form);
+      form.submit();
+    });
+  });
+
+  // Since the user asked for refresh on click, and Flask always serves fresh data
+  // when navigating to /history, the previous meta refresh tag is not strictly needed
+  // and can interfere with a smooth user experience.
+  // Removing it allows Flask to control the "refresh" by serving fresh data on each request.
+</script>
+
+</body>
+</html>

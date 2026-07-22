@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sensor Data Plot</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%; 
+    font-family: "Inter", sans-serif;
+    background-color: #f4f7f6; /* Match main body background */
+    display: flex;
+    flex-direction: column; /* Stack canvases vertically */
+    align-items: center;
+    justify-content: flex-start; /* Align to top */
+    padding: 10px; /* Small padding inside iframe */
+    gap: 20px; /* Space between the two canvases */
+    overflow-y: auto; /* Allow scrolling within the iframe if content exceeds height */
+  }
+
+  canvas {
+      display: block;
+      border: 1px solid #e2e8f0;
+      background-color: #ffffff;
+      border-radius: 0.75rem;
+      /* width will be set dynamically for NBCM canvas, but 100% for temp/hum */
+      height: 400px; /* Increased height for stretched appearance */
+      touch-action: none; /* Disable default touch actions */
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08); /* Consistent shadow */
+  }
+
+  .plot-container {
+      width: 100%; /* Occupy full available width */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem; /* Match curve-section padding from index.html */
+      background-color: #ffffff; /* Match background */
+      border-radius: 1rem;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.08);
+      position: relative; /* مهم: برای موقعیت‌دهی مطلق اطلاعات هاور */
+  }
+
+  .plot-container h2 {
+      color: #1a202c;
+      margin-bottom: 1rem;
+      font-size: 1.5rem;
+      font-weight: 600;
+      text-align: center;
+  }
+
+  /* New wrapper for NBCM canvas to enable horizontal scrolling */
+  .nbcm-scroll-wrapper {
+      width: 100%; /* Take full width of parent .plot-container */
+      overflow-x: auto; /* Enable horizontal scrolling */
+      /* No max-height here, allow content to define height */
+  }
+  .nbcm-scroll-wrapper canvas {
+      /* The canvas itself will have a calculated width, potentially larger than its wrapper. */
+      /* min-width: 100%; ensures it's at least as wide as its container */
+      min-width: 100%; 
+  }
+
+  /* Styles for the hover info box */
+  #temp-hum-hover-info, #nbcm-hover-info {
+    font-family: "Inter", sans-serif;
+    font-size: 14px;
+    color: #333;
+    text-align: center;
+    padding: 8px 15px;
+    background-color: rgba(224, 247, 250, 0.95); /* Light blue background with slight transparency */
+    border: 1px solid #b2ebf2; /* Light blue border */
+    border-radius: 8px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.1); /* Slightly more prominent shadow */
+    display: none; /* Hidden by default */
+    width: fit-content;
+    white-space: nowrap; /* Prevent text wrapping */
+    position: absolute; /* مهم: موقعیت‌دهی مطلق برای جلوگیری از اسکرول ناخواسته */
+    z-index: 100; /* اطمینان از نمایش روی سایر عناصر */
+    pointer-events: none; /* اجازه می‌دهد ماوس از روی آن عبور کند و به بوم زیرین برسد */
+    transform: translate(-50%, -100%); /* برای قرار گرفتن بالای نقطه ماوس */
+  }
+</style>
+</head>
+<body>
+
+<div class="plot-container">
+    <h2>Live Sensor Temperature & Humidity Over Time</h2>
+    <canvas id="tempHumCanvas"></canvas>
+    <div id="temp-hum-hover-info"></div> <!-- New div for hover info -->
+</div>
+
+<div class="plot-container">
+    <h2>Live NBCM Status Over Time</h2>
+    <div class="nbcm-scroll-wrapper">
+        <canvas id="nbcmCanvas"></canvas>
+    </div>
+    <div id="nbcm-hover-info"></div> <!-- New div for NBCM hover info -->
+</div>
+
+<script>
+    const tempHumCanvas = document.getElementById('tempHumCanvas');
+    const tempHumCtx = tempHumCanvas.getContext('2d');
+    const tempHumHoverInfo = document.getElementById('temp-hum-hover-info');
+
+    const nbcmCanvas = document.getElementById('nbcmCanvas');
+    const nbcmCtx = nbcmCanvas.getContext('2d');
+    const nbcmHoverInfo = document.getElementById('nbcm-hover-info');
+
+
+    // Global object to store plot context (data and common dimensions)
+    let commonPlotContext = {
+        sensorData: [], // Stores original fetched data
+        xPadding: null,
+        plotWidth: null,
+    };
+
+    // Specific contexts for each plot
+    let tempHumPlotContext = {
+        minId: null,
+        maxId: null,
+        effectiveMinId: null,
+        effectiveMaxId: null,
+        effectiveIdRange: null,
+        minCombinedY: null,
+        maxCombinedY: null,
+        effectiveMinY: null,
+        effectiveMaxY: null,
+        effectiveYRange: null,
+        yPadding: null,
+        plotHeight: null,
+        curveColors: {
+            temperature: '#ef4444', // Red (Tailwind 'red-500')
+            humidity: '#3b82f6'      // Blue (Tailwind 'blue-500')
+        },
+        plottedPoints: { // Only for temp/hum for hover
+            temperature: [],
+            humidity: []
+        }
+    };
+
+    let nbcmPlotContext = {
+        minId: null,
+        maxId: null,
+        effectiveMinId: null,
+        effectiveMaxId: null,
+        effectiveIdRange: null,
+        nbcmMinY: 0.5, // Y for NBCM1 is 1, so range is 0.5 to 5.5
+        nbcmMaxY: 5.5,
+        yPadding: null,
+        plotHeight: null,
+        nbcmActiveColor: '#28a745', // Green for active NBCM points
+        nbcmNotActiveColor: '#dc3545', // Red for not active NBCM points
+        nbcmPointRadius: 4,
+        plottedPoints: [] // Store NBCM points for hover
+    };
+
+    let currentHoveredData = null; // For temp/hum plot
+    let currentHoveredNBCMData = null; // For NBCM plot
+    const HOVER_RADIUS = 12; // pixels - Increased for easier hover detection
+
+    // Helper to calculate dimensions and set canvas size
+    function setCanvasDimensions(canvas, desiredWidth, desiredHeight) {
+        const style = getComputedStyle(canvas);
+        const width = desiredWidth !== undefined ? desiredWidth : parseInt(style.width, 10);
+        const height = desiredHeight !== undefined ? desiredHeight : parseInt(style.height, 10);
+        canvas.width = width;
+        canvas.height = height;
+        return { width, height };
+    }
+
+    // Function to calculate canvas X coordinate from data ID
+    function dataIdToCanvasX(id, width, xPadding, plotWidth, effectiveMinId, effectiveIdRange) {
+        if (effectiveIdRange === 0) {
+            return xPadding + plotWidth / 2; // Center if all IDs are the same
+        } else {
+            return xPadding + (id - effectiveMinId) / effectiveIdRange * plotWidth;
+        }
+    }
+
+    // Function to calculate canvas Y coordinate from data value
+    function dataValueToCanvasY(value, height, yPadding, plotHeight, effectiveMinY, effectiveYRange) {
+        if (effectiveYRange === 0) {
+            return (height - yPadding) - plotHeight / 2; // Center if all Y values are the same
+        } else {
+            return (height - yPadding) - (value - effectiveMinY) / effectiveYRange * plotHeight;
+        }
+    }
+
+    // Function to find data points within the hover radius of mouse coordinates (for temp/hum plot)
+    function getHoveredDataPoints(mouseX, mouseY) {
+        const hoveredPoints = [];
+
+        tempHumPlotContext.plottedPoints.temperature.forEach(p => {
+            const distance = Math.sqrt(Math.pow(mouseX - p.x_canvas, 2) + Math.pow(mouseY - p.y_canvas, 2));
+            if (distance <= HOVER_RADIUS) {
+                hoveredPoints.push({
+                    data: { id: p.data_id, temp: p.temp_val, humidity: p.humidity_val, time: p.time_val },
+                    type: 'temperature',
+                    x_canvas: p.x_canvas,
+                    y_canvas: p.y_canvas
+                });
+            }
+        });
+
+        tempHumPlotContext.plottedPoints.humidity.forEach(p => {
+            const distance = Math.sqrt(Math.pow(mouseX - p.x_canvas, 2) + Math.pow(mouseY - p.y_canvas, 2));
+            if (distance <= HOVER_RADIUS) {
+                hoveredPoints.push({
+                    data: { id: p.data_id, temp: p.temp_val, humidity: p.humidity_val, time: p.time_val },
+                    type: 'humidity',
+                    x_canvas: p.x_canvas,
+                    y_canvas: p.y_canvas
+                });
+            }
+        });
+        return hoveredPoints;
+    }
+
+    // Function to find NBCM data points within the hover radius of mouse coordinates (for NBCM plot)
+    function getHoveredNBCMPoints(mouseX, mouseY) {
+        const hoveredPoints = [];
+        nbcmPlotContext.plottedPoints.forEach(p => {
+            const distance = Math.sqrt(Math.pow(mouseX - p.x_canvas, 2) + Math.pow(mouseY - p.y_canvas, 2));
+            if (distance <= HOVER_RADIUS) {
+                hoveredPoints.push({
+                    data: { id: p.data_id, time: p.time_val, nbcm_status: p.nbcm_status, nbcm_number: p.nbcm_number },
+                    x_canvas: p.x_canvas,
+                    y_canvas: p.y_canvas
+                });
+            }
+        });
+        return hoveredPoints;
+    }
+
+
+    // Function to send content height to parent
+    function sendHeightToParent() {
+        const body = document.body;
+        const html = document.documentElement;
+        // Get the maximum scrollable height
+        const height = Math.max(body.scrollHeight, body.offsetHeight, html.clientHeight, html.scrollHeight, html.offsetHeight);
+        if (window.parent) {
+            window.parent.postMessage({ type: 'setIframeHeight', height: height }, '*');
+        }
+    }
+
+
+    // Main function to draw both plots
+    async function drawAllPlots() {
+        try {
+            const apiUrl = 'http://127.0.0.1:5000/api/sensor_data';
+            // Clear content and show loading for both canvases immediately before fetch
+            tempHumCtx.clearRect(0, 0, tempHumCanvas.width, tempHumCanvas.height);
+            tempHumCtx.font = '20px "Inter"';
+            tempHumCtx.fillStyle = '#666';
+            tempHumCtx.textAlign = 'center';
+            tempHumCtx.fillText('Loading sensor data...', tempHumCanvas.width / 2, tempHumCanvas.height / 2);
+
+            nbcmCtx.clearRect(0, 0, nbcmCanvas.width, nbcmCanvas.height);
+            nbcmCtx.font = '20px "Inter"';
+            nbcmCtx.fillStyle = '#666';
+            nbcmCtx.textAlign = 'center';
+            nbcmCtx.fillText('Loading NBCM data...', nbcmCanvas.width / 2, nbcmCanvas.height / 2);
+
+
+            const response = await fetch(apiUrl);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            commonPlotContext.sensorData = await response.json();
+
+            if (commonPlotContext.sensorData.length === 0) {
+                tempHumCtx.clearRect(0, 0, tempHumCanvas.width, tempHumCanvas.height);
+                tempHumCtx.font = '20px "Inter"';
+                tempHumCtx.fillStyle = '#666';
+                tempHumCtx.textAlign = 'center';
+                tempHumCtx.fillText('No sensor data available to plot.', tempHumCanvas.width / 2, tempHumCanvas.height / 2);
+
+                nbcmCtx.clearRect(0, 0, nbcmCanvas.width, nbcmCanvas.height);
+                nbcmCtx.font = '20px "Inter"';
+                nbcmCtx.fillStyle = '#666';
+                nbcmCtx.textAlign = 'center';
+                nbcmCtx.fillText('No NBCM data available to plot.', nbcmCanvas.width / 2, nbcmCanvas.height / 2);
+                sendHeightToParent();
+                return;
+            }
+
+            // Update canvas dimensions and common paddings
+            const tempHumDims = setCanvasDimensions(tempHumCanvas); // Will use CSS width for temp/hum
+            
+            // For NBCM, calculate desired width based on data before setting dimensions
+            const allNBCMIdsForCalc = commonPlotContext.sensorData.map(d => d.id);
+            const minNBCMIdForCalc = Math.min(...allNBCMIdsForCalc);
+            const maxNBCMIdForCalc = Math.max(...allNBCMIdsForCalc);
+            const nbcmIdRangeForCalc = maxNBCMIdForCalc - minNBCMIdForCalc;
+
+            const pixelsPerId = 50; // How many pixels each ID unit takes on NBCM x-axis
+            const minPlotAreaWidth = (nbcmIdRangeForCalc + 1) * pixelsPerId; // Add 1 for single point case
+            
+            // Get the width of the parent wrapper to ensure canvas is at least that wide
+            const nbcmWrapper = document.querySelector('.nbcm-scroll-wrapper');
+            const nbcmVisibleWidth = nbcmWrapper ? nbcmWrapper.clientWidth : 0; // Fallback to 0 if wrapper not found
+
+            // Calculate the effective width for the NBCM canvas
+            const effectiveNBCMCanvasWidth = Math.max(nbcmVisibleWidth, minPlotAreaWidth + 2 * commonPlotContext.xPadding);
+            
+            const nbcmDims = setCanvasDimensions(nbcmCanvas, effectiveNBCMCanvasWidth, 400); // Pass desired width and height for NBCM
+
+            // General padding setup for both
+            commonPlotContext.xPadding = tempHumDims.width * 0.1; // Using tempHumDims for general xPadding
+            commonPlotContext.plotWidth = tempHumDims.width - 2 * commonPlotContext.xPadding;
+
+            tempHumPlotContext.yPadding = tempHumDims.height * 0.1;
+            tempHumPlotContext.plotHeight = tempHumDims.height - 2 * tempHumPlotContext.yPadding;
+
+            nbcmPlotContext.yPadding = nbcmDims.height * 0.1;
+            nbcmPlotContext.plotHeight = nbcmDims.height - 2 * nbcmPlotContext.yPadding;
+
+            // Now draw individual plots
+            drawTemperatureHumidityPlot(tempHumDims, tempHumCtx, commonPlotContext.sensorData);
+            drawNBCMPlot(nbcmDims, nbcmCtx, commonPlotContext.sensorData);
+            sendHeightToParent();
+
+        } catch (error) {
+            console.error('Error fetching sensor data for plots:', error);
+            tempHumCtx.clearRect(0, 0, tempHumCanvas.width, tempHumCanvas.height);
+            tempHumCtx.font = '16px "Inter"';
+            tempHumCtx.fillStyle = '#dc3545';
+            tempHumCtx.textAlign = 'center';
+            if (error instanceof TypeError && error.message === 'Failed to fetch') {
+                tempHumCtx.fillText('Failed to connect to Flask server.', tempHumCanvas.width / 2, tempHumCanvas.height / 2 - 20);
+                tempHumCtx.fillText('Ensure app.py is running at http://127.0.0.1:5000.', tempHumCanvas.width / 2, tempHumCanvas.height / 2 + 10);
+            } else {
+                tempHumCtx.fillText('Failed to load sensor data.', tempHumCanvas.width / 2, tempHumCanvas.height / 2 - 20);
+                tempHumCtx.fillText('Check console for details.', tempHumCanvas.width / 2, tempHumCanvas.height / 2 + 10);
+            }
+
+            nbcmCtx.clearRect(0, 0, nbcmCanvas.width, nbcmCanvas.height);
+            nbcmCtx.font = '16px "Inter"';
+            nbcmCtx.fillStyle = '#dc3545';
+            nbcmCtx.textAlign = 'center';
+            if (error instanceof TypeError && error.message === 'Failed to fetch') {
+                nbcmCtx.fillText('Failed to connect to Flask server.', nbcmCanvas.width / 2, nbcmCanvas.height / 2 - 20);
+                nbcmCtx.fillText('Ensure app.py is running at http://127.0.0.1:5000.', nbcmCanvas.width / 2, nbcmCanvas.height / 2 + 10);
+            } else {
+                nbcmCtx.fillText('Failed to load NBCM data.', nbcmCanvas.width / 2, nbcmCanvas.height / 2 - 20);
+                nbcmCtx.fillText('Check console for details.', nbcmCanvas.width / 2, nbcmCanvas.height / 2 + 10);
+            }
+            sendHeightToParent();
+        }
+    }
+
+
+    function drawTemperatureHumidityPlot(dims, ctx, sensorData) {
+        ctx.clearRect(0, 0, dims.width, dims.height); 
+
+        const plotData = {
+            temperature: [],
+            humidity: []
+        };
+        sensorData.forEach(d => {
+            const parsedTemp = (d.temp !== null && !isNaN(parseFloat(d.temp))) ? parseFloat(d.temp) : null;
+            const parsedHumidity = (d.humidity !== null && !isNaN(parseFloat(d.humidity))) ? parseFloat(d.humidity) : null;
+
+            if (parsedTemp !== null) {
+                plotData.temperature.push({ x: d.id, y: parsedTemp, data_id: d.id, temp_val: parsedTemp, humidity_val: parsedHumidity, time_val: d.time, date_val: d.date });
+            }
+            if (parsedHumidity !== null) {
+                plotData.humidity.push({ x: d.id, y: parsedHumidity, data_id: d.id, temp_val: parsedTemp, humidity_val: parsedHumidity, time_val: d.time, date_val: d.date });
+            }
+        });
+
+        const activePlots = Object.keys(plotData).filter(key => plotData[key].length >= 2);
+
+        if (activePlots.length === 0) {
+            ctx.font = '20px "Inter"';
+            ctx.fillStyle = '#666';
+            ctx.textAlign = 'center';
+            ctx.fillText('Not enough valid temp/hum data to draw curves.', dims.width / 2, dims.height / 2);
+            return;
+        }
+
+        // Calculate plot-specific min/max IDs for X-axis
+        const allTempHumIds = [];
+        activePlots.forEach(key => plotData[key].forEach(p => allTempHumIds.push(p.x)));
+        tempHumPlotContext.minId = Math.min(...allTempHumIds);
+        tempHumPlotContext.maxId = Math.max(...allTempHumIds);
+        const tempHumIdRange = tempHumPlotContext.maxId - tempHumPlotContext.minId;
+
+        // Set X-axis origin for temperature/humidity plot to 0
+        const xBufferFactor = 0.05;
+        tempHumPlotContext.effectiveMinId = 0; // Explicitly set origin to 0
+        tempHumPlotContext.effectiveMaxId = Math.max(tempHumPlotContext.maxId + tempHumIdRange * xBufferFactor, tempHumPlotContext.effectiveMinId + 1);
+        tempHumPlotContext.effectiveIdRange = tempHumPlotContext.effectiveMaxId - tempHumPlotContext.effectiveMinId;
+
+
+        const allYValues = [];
+        activePlots.forEach(key => plotData[key].forEach(p => allYValues.push(p.y)));
+
+        tempHumPlotContext.minCombinedY = Math.min(...allYValues);
+        tempHumPlotContext.maxCombinedY = Math.max(...allYValues);
+
+        const yRange = tempHumPlotContext.maxCombinedY - tempHumPlotContext.minCombinedY;
+        // Set Y-axis origin for temperature/humidity plot to -60
+        tempHumPlotContext.effectiveMinY = -60; // Explicitly set origin to -60
+        tempHumPlotContext.effectiveMaxY = tempHumPlotContext.maxCombinedY + yRange * 0.1; // Add 10% buffer to max Y
+        if (tempHumPlotContext.effectiveMaxY <= tempHumPlotContext.effectiveMinY) {
+            tempHumPlotContext.effectiveMaxY = tempHumPlotContext.effectiveMinY + 1;
+        }
+        tempHumPlotContext.effectiveYRange = tempHumPlotContext.effectiveMaxY - tempHumPlotContext.effectiveMinY;
+
+
+        // Draw X and Y axes
+        ctx.strokeStyle = '#cccccc';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(commonPlotContext.xPadding, dims.height - tempHumPlotContext.yPadding);
+        ctx.lineTo(dims.width - commonPlotContext.xPadding, dims.height - tempHumPlotContext.yPadding);
+        ctx.moveTo(commonPlotContext.xPadding, dims.height - tempHumPlotContext.yPadding);
+        ctx.lineTo(commonPlotContext.xPadding, tempHumPlotContext.yPadding);
+        ctx.stroke();
+
+        tempHumPlotContext.plottedPoints.temperature = [];
+        tempHumPlotContext.plottedPoints.humidity = [];
+
+        activePlots.forEach(key => {
+            const dataPoints = plotData[key];
+            ctx.strokeStyle = tempHumPlotContext.curveColors[key];
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+
+            dataPoints.forEach((point, index) => {
+                const x_scaled = dataIdToCanvasX(point.x, dims.width, commonPlotContext.xPadding, commonPlotContext.plotWidth, tempHumPlotContext.effectiveMinId, tempHumPlotContext.effectiveIdRange);
+                const y_scaled = dataValueToCanvasY(point.y, dims.height, tempHumPlotContext.yPadding, tempHumPlotContext.plotHeight, tempHumPlotContext.effectiveMinY, tempHumPlotContext.effectiveYRange);
+
+                tempHumPlotContext.plottedPoints[key].push({
+                    x_canvas: x_scaled,
+                    y_canvas: y_scaled,
+                    data_id: point.x,
+                    temp_val: point.temp_val,
+                    humidity_val: point.humidity_val,
+                    time_val: point.time_val,
+                    date_val: point.date_val
+                });
+
+                if (index === 0) {
+                    ctx.moveTo(x_scaled, y_scaled);
+                } else {
+                    ctx.lineTo(x_scaled, y_scaled);
+                }
+            });
+            ctx.stroke();
+
+            tempHumPlotContext.plottedPoints[key].forEach(p => {
+                ctx.fillStyle = tempHumPlotContext.curveColors[key];
+                ctx.beginPath();
+                ctx.arc(p.x_canvas, p.y_canvas, 4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        });
+
+        // Add Y-axis main label
+        ctx.save();
+        ctx.translate(commonPlotContext.xPadding / 4, dims.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('مقدار (دما °C / رطوبت %)', 0, 0);
+        ctx.restore();
+
+        // The hover info drawing is now handled by the HTML div, not directly on canvas
+    }
+
+
+    function drawNBCMPlot(dims, ctx, sensorData) {
+        ctx.clearRect(0, 0, dims.width, dims.height);
+
+        if (sensorData.length === 0) {
+            ctx.font = '20px "Inter"';
+            ctx.fillStyle = '#666';
+            ctx.textAlign = 'center';
+            ctx.fillText('No NBCM data available to plot.', dims.width / 2, dims.height / 2);
+            return;
+        }
+
+        // Calculate plot-specific min/max IDs for X-axis for NBCM plot
+        const allNBCMIds = sensorData.map(d => d.id);
+        nbcmPlotContext.minId = Math.min(...allNBCMIds);
+        nbcmPlotContext.maxId = Math.max(...allNBCMIds);
+        const nbcmIdRange = nbcmPlotContext.maxId - nbcmPlotContext.minId;
+
+        const xBufferFactor = 0.05; // Consistent buffer
+        nbcmPlotContext.effectiveMinId = nbcmIdRange === 0 ? nbcmPlotContext.minId - 1 : nbcmPlotContext.minId - nbcmIdRange * xBufferFactor;
+        nbcmPlotContext.effectiveMaxId = nbcmIdRange === 0 ? nbcmPlotContext.maxId + 1 : nbcmPlotContext.maxId + nbcmIdRange * xBufferFactor;
+        nbcmPlotContext.effectiveIdRange = nbcmPlotContext.effectiveMaxId - nbcmPlotContext.effectiveMinId;
+
+        const nbcmYRange = nbcmPlotContext.nbcmMaxY - nbcmPlotContext.nbcmMinY;
+
+        // Draw X and Y axes for NBCM plot
+        ctx.strokeStyle = '#cccccc';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(commonPlotContext.xPadding, dims.height - nbcmPlotContext.yPadding);
+        ctx.lineTo(dims.width - commonPlotContext.xPadding, dims.height - nbcmPlotContext.yPadding);
+        ctx.moveTo(commonPlotContext.xPadding, dims.height - nbcmPlotContext.yPadding);
+        ctx.lineTo(commonPlotContext.xPadding, nbcmPlotContext.yPadding);
+        ctx.stroke();
+
+        nbcmPlotContext.plottedPoints = []; // Clear previous points
+
+        // Draw NBCM points
+        sensorData.forEach(d => {
+            const x_scaled = dataIdToCanvasX(d.id, dims.width, commonPlotContext.xPadding, commonPlotContext.plotWidth, nbcmPlotContext.effectiveMinId, nbcmPlotContext.effectiveIdRange);
+
+            const nbcmStatuses = d.nbcm_statuses || {}; 
+
+            for (let i = 1; i <= 5; i++) {
+                const nbcmKey = `NBCM${i}`;
+                let status;
+
+                if (nbcmStatuses[nbcmKey]) {
+                    status = nbcmStatuses[nbcmKey];
+                } else if (d.nbcm_selected) {
+                    const selectedNBCMs = d.nbcm_selected.split(',').map(s => s.trim());
+                    status = selectedNBCMs.includes(nbcmKey) ? 'active' : 'notactive';
+                } else {
+                    status = 'notactive';
+                }
+                
+                const nbcmValue = i;
+                const y_scaled = dataValueToCanvasY(nbcmValue, dims.height, nbcmPlotContext.yPadding, nbcmPlotContext.plotHeight, nbcmPlotContext.nbcmMinY, nbcmYRange);
+
+                if (status === 'active') {
+                    ctx.fillStyle = nbcmPlotContext.nbcmActiveColor;
+                } else {
+                    ctx.fillStyle = nbcmPlotContext.nbcmNotActiveColor;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(x_scaled, y_scaled, nbcmPlotContext.nbcmPointRadius, 0, Math.PI * 2);
+                ctx.fill();
+
+                nbcmPlotContext.plottedPoints.push({
+                    x_canvas: x_scaled,
+                    y_canvas: y_scaled,
+                    data_id: d.id,
+                    time_val: d.time,
+                    nbcm_status: status,
+                    nbcm_number: i
+                });
+            }
+        });
+
+        // Add Y-axis labels for NBCMs
+        ctx.fillStyle = '#333';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        for (let i = 1; i <= 5; i++) {
+            const nbcmValue = i;
+            const y_scaled = dataValueToCanvasY(nbcmValue, dims.height, nbcmPlotContext.yPadding, nbcmPlotContext.plotHeight, nbcmPlotContext.nbcmMinY, nbcmYRange);
+            ctx.fillText(`NBCM${i}`, commonPlotContext.xPadding - 10, y_scaled);
+        }
+        // Add main Y-axis label
+        ctx.save();
+        ctx.translate(commonPlotContext.xPadding / 4, dims.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('وضعیت NBCM', 0, 0); // NBCM Status in Persian
+        ctx.restore();
+
+        // The hover info drawing is now handled by the HTML div, not directly on canvas
+    }
+
+
+    // Add mouse event listeners to the TEMP/HUM canvas for hover effect
+    tempHumCanvas.addEventListener('mousemove', (event) => {
+        if (!commonPlotContext.sensorData || commonPlotContext.sensorData.length === 0) {
+            return;
+        }
+
+        const rect = tempHumCanvas.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        if (mouseX < 0 || mouseX > tempHumCanvas.width || mouseY < 0 || mouseY > tempHumCanvas.height) {
+             if (currentHoveredData && currentHoveredData.length > 0) {
+                currentHoveredData = null;
+                tempHumHoverInfo.style.display = 'none'; // Hide the info box
+            }
+            return;
+        }
+
+        const newHoveredData = getHoveredDataPoints(mouseX, mouseY);
+
+        if (JSON.stringify(newHoveredData) !== JSON.stringify(currentHoveredData)) {
+            currentHoveredData = newHoveredData;
+
+            if (currentHoveredData && currentHoveredData.length > 0) {
+                const uniqueHoveredPoint = currentHoveredData[0].data;
+                const tempValue = (uniqueHoveredPoint.temp !== null && !isNaN(uniqueHoveredPoint.temp)) ? uniqueHoveredPoint.temp : 'N/A';
+                const humidityValue = (uniqueHoveredPoint.humidity !== null && !isNaN(uniqueHoveredPoint.humidity)) ? uniqueHoveredPoint.humidity : 'N/A';
+                let combinedText = `temp:${tempValue}°C, humidity:${humidityValue}%, time:${uniqueHoveredPoint.time || 'N/A'}, NUMofTEST:${uniqueHoveredPoint.id}`;
+                
+                // Set position of the info box relative to the canvas
+                tempHumHoverInfo.style.left = `${mouseX}px`;
+                tempHumHoverInfo.style.top = `${mouseY}px`;
+                tempHumHoverInfo.textContent = combinedText;
+                tempHumHoverInfo.style.display = 'block'; // Show the info box
+            } else {
+                tempHumHoverInfo.style.display = 'none'; // Hide the info box
+            }
+        }
+    });
+
+    tempHumCanvas.addEventListener('mouseout', () => {
+        currentHoveredData = null;
+        tempHumHoverInfo.style.display = 'none'; // Hide the info box
+    });
+
+    // Add mouse event listeners to the NBCM canvas for hover effect
+    nbcmCanvas.addEventListener('mousemove', (event) => {
+        if (!commonPlotContext.sensorData || commonPlotContext.sensorData.length === 0) {
+            return;
+        }
+
+        const rect = nbcmCanvas.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        if (mouseX < 0 || mouseX > nbcmCanvas.width || mouseY < 0 || mouseY > nbcmCanvas.height) {
+            if (currentHoveredNBCMData && currentHoveredNBCMData.length > 0) {
+                currentHoveredNBCMData = null;
+                nbcmHoverInfo.style.display = 'none'; // Hide the info box
+            }
+            return;
+        }
+
+        const newHoveredNBCMData = getHoveredNBCMPoints(mouseX, mouseY);
+
+        if (JSON.stringify(newHoveredNBCMData) !== JSON.stringify(currentHoveredNBCMData)) {
+            currentHoveredNBCMData = newHoveredNBCMData;
+            
+            if (currentHoveredNBCMData && currentHoveredNBCMData.length > 0) {
+                const uniqueHoveredPoint = currentHoveredNBCMData[0].data; 
+                let combinedText = `Time:${uniqueHoveredPoint.time || 'N/A'}     NUMofTEST:${uniqueHoveredPoint.id}`;
+                
+                // Set position of the info box relative to the canvas
+                nbcmHoverInfo.style.left = `${mouseX}px`;
+                nbcmHoverInfo.style.top = `${mouseY}px`;
+                nbcmHoverInfo.textContent = combinedText;
+                nbcmHoverInfo.style.display = 'block'; // Show the info box
+            } else {
+                nbcmHoverInfo.style.display = 'none'; // Hide the info box
+            }
+        }
+    });
+
+    nbcmCanvas.addEventListener('mouseout', () => {
+        currentHoveredNBCMData = null;
+        nbcmHoverInfo.style.display = 'none'; // Hide the info box
+    });
+
+
+    // Initial draw and redraw on resize
+    window.onload = function() {
+        drawAllPlots();
+        sendHeightToParent();
+    };
+
+    window.addEventListener('resize', () => {
+        drawAllPlots();
+        sendHeightToParent();
+    });
+</script>
+
+</body>
+</html>

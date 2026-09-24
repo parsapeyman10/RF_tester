@@ -280,6 +280,62 @@ def read_serial_worker():
 # --- افزودن کتابخانه مورد نیاز برای امنیت فایل (در بالای فایل ایمپورت شود بهتر است اما اینجا هم کار می‌کند) ---
 from werkzeug.utils import secure_filename
 
+# =====================================================================
+#  پارسر فرمت فشرده RFC سمت ESP32 (رکورد 8 بایتی + هدر 20 بایتی)
+#  هر فایل .rfc = یک روز کامل پایش؛ جایگزین فایل‌های پراکنده .dat
+# =====================================================================
+RFC_MAGIC = 0x31464352  # "RCF1"
+RFC_HEADER_FMT = '<IHHIHBBBBBB'  # 4+2+2+4+2+6 = 20
+RFC_REC_FMT = '<HhHBB'           # 2+2+2+1+1 = 8
+RFC_HEADER_SIZE = struct.calcsize(RFC_HEADER_FMT)
+RFC_REC_SIZE = struct.calcsize(RFC_REC_FMT)
+
+def _rfc_epoch_to_dt(y, mo, d, h, mi, s):
+    try:
+        return datetime.datetime(y, mo, d, h, mi, s)
+    except Exception:
+        return None
+
+def parse_rfc_bytes(file_bytes):
+    """تبدیل فایل فشرده ESP32 به لیست رکورد سازگار با مسیر قدیمی."""
+    out = []
+    if not file_bytes or len(file_bytes) < RFC_HEADER_SIZE:
+        return out
+    (magic, ver, rec_size, first_num,
+     year, month, day, hour, minute, second, _pad) = struct.unpack_from(RFC_HEADER_FMT, file_bytes, 0)
+    if magic != RFC_MAGIC or ver < 1:
+        return out
+
+    epoch = _rfc_epoch_to_dt(year, month, day, hour, minute, second)
+    if epoch is None:
+        epoch = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+    num = int(first_num)
+
+    off = RFC_HEADER_SIZE
+    total = len(file_bytes)
+    first = True
+    while off + RFC_REC_SIZE <= total:
+        dt_s, temp01, hum01, nbcm, dnum = struct.unpack_from(RFC_REC_FMT, file_bytes, off)
+        off += RFC_REC_SIZE
+        if not first:
+            epoch = epoch + datetime.timedelta(seconds=int(dt_s))
+            num += int(dnum)
+        first = False
+
+        temp = round(max(-100.0, min(155.0, temp01 / 10.0)), 1)
+        hum = round(max(0.0, min(100.0, hum01 / 10.0)), 1)
+        nbcm_list = [f'NBCM{i + 1}' for i in range(4) if (nbcm & (1 << i))]
+        out.append({
+            'num_value': num,
+            'temp': temp,
+            'humidity': hum,
+            'nbcm': nbcm_list,
+            'date': epoch.strftime('%Y-%m-%d'),
+            'time': epoch.strftime('%H:%M:%S'),
+            'sensor_dt': epoch,
+        })
+    return out
+
 
 # --- نسخه نهایی اصلاح شده: تفکیک زمان ثبت و زمان سنسور ---
 @app.route('/upload_dat', methods=['GET', 'POST'])
@@ -289,8 +345,6 @@ def upload_dat_page():
             return jsonify({'status': 'error', 'message': 'No files received'}), 400
         
         uploaded_files = request.files.getlist('folder_upload')
-        STRUCT_FORMAT = '<iff????iBBBBB'
-        EXPECTED_SIZE = 25
         
         master_buffer = []
         daily_buffer_map = {} 
@@ -302,10 +356,52 @@ def upload_dat_page():
 
         for file in uploaded_files:
             filename = secure_filename(file.filename)
-            if not filename.lower().endswith('.dat'): continue
+            fl = filename.lower()
+            if not (fl.endswith('.dat') or fl.endswith('.rfc')):
+                continue
             
             try:
                 file_bytes = file.read()
+
+                # ---------- فایل فشرده روزانه (.rfc) ----------
+                if fl.endswith('.rfc'):
+                    records = parse_rfc_bytes(file_bytes)
+                    if not records:
+                        fail_count += 1
+                        continue
+                    for rec in records:
+                        temp_str = str(rec['temp'])
+                        hum_str = str(rec['humidity'])
+                        nbcm_str = ','.join(rec['nbcm'])
+                        device_date_str = rec['date']
+                        device_time_str = rec['time']
+                        sensor_dt = rec['sensor_dt']
+                        num_val = rec['num_value']
+                        formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
+
+                        master_obj = MasterReading(
+                            num_value=num_val,
+                            nbcm_selected=nbcm_str,
+                            humidity=hum_str,
+                            temp=temp_str,
+                            time=device_time_str,
+                            date=device_date_str,
+                            timestamp=upload_time_server,
+                            formatted_log=formatted_log
+                        )
+                        master_buffer.append(master_obj)
+                        if device_date_str not in daily_buffer_map:
+                            daily_buffer_map[device_date_str] = []
+                        daily_buffer_map[device_date_str].append(
+                            (num_val, nbcm_str, temp_str, hum_str, device_date_str, device_time_str, sensor_dt)
+                        )
+                        success_count += 1
+                    continue
+
+                # ---------- فایل قدیمی 25 بایتی (.dat) ----------
+                STRUCT_FORMAT = '<iff????iBBBBB'
+                EXPECTED_SIZE = 25
+
                 if len(file_bytes) > 0 and len(file_bytes) % EXPECTED_SIZE == 0:
                     for i in range(0, len(file_bytes), EXPECTED_SIZE):
                         chunk = file_bytes[i : i + EXPECTED_SIZE]

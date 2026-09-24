@@ -130,6 +130,75 @@ struct WifiData {
 };
 #pragma pack()
 
+// =====================================================================
+//  RFC — فرمت ذخیره‌سازی فشرده (Compact Record File)
+//  هدف: بیشترین فشرده‌سازی بدون از‌دست‌رفتن دقتِ لازم
+//   - یک فایل در روز (/data/YYYYMMDD.rfc)  به‌جای یک فایل به‌ازای هر رکورد
+//     (حذف سربار FAT: قبلاً ~512 بایت کلاستر برای هر 25 بایت داده!)
+//   - رکورد 8 بایت (قبلاً 25 بایت + سربار فایل):
+//       dt_s   u16  فاصله ثانیه با رکورد قبل (تایم کامل ذخیره نمی‌شود)
+//       temp01 s16  دما × 10   (0.01→0.1 دقت کافی صنعتی)
+//       hum01  u16  رطوبت × 10
+//       nbcm   u8   بیت‌فیلد NBCM1..4
+//       dnum   u8   اختلاف شماره سیکل (معمولاً 1)
+//   - هدر 20 بایت فقط یک‌بار در ابتدای فایل روز
+//  حجم مؤثر: ~8 بایت/رکورد  (۶۸٪ کوچک‌تر از قبل، عملاً ~۹۸٪ با حذف سربار FAT)
+// =====================================================================
+#define RFC_MAGIC   0x31464352u  // "RCF1" در حافظه little-endian
+#define RFC_VERSION 1
+#define RFC_REC_SIZE 8
+#define RFC_HEADER_SIZE 20
+
+#pragma pack(1)
+struct RfcHeader {
+  uint32_t magic;      // RFC_MAGIC
+  uint16_t version;    // RFC_VERSION
+  uint16_t rec_size;   // 8
+  int32_t  first_num;  // NUM رکورد اول
+  uint16_t year;       // تاریخ/ساعت رکورد اول (دقیق)
+  uint8_t  month, day, hour, minute, second, _pad;
+};
+
+struct RfcRec {
+  uint16_t dt_s;     // ثانیه از رکورد قبل (رکورد اول: 0)
+  int16_t  temp01;   // دما × 10
+  uint16_t hum01;    // رطوبت × 10
+  uint8_t  nbcm;     // bit0..3 = NBCM1..4
+  uint8_t  dnum;     // افزایش NUM نسبت به رکورد قبل
+};
+#pragma pack()
+
+// روزهای میلادی از 1970-01-01 (الگوریتم Hinnant) برای محاسبه dt
+static int32_t rfcDaysFromCivil(int y, unsigned m, unsigned d) {
+  y -= (m <= 2);
+  const int era = (y >= 0 ? y : y - 399) / 400;
+  const unsigned yoe = (unsigned)(y - era * 400);
+  const unsigned doy = (153 * (m + (m > 2 ? (unsigned)-3 : 9)) + 2) / 5 + d - 1;
+  const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + (int)doe - 719468;
+}
+
+static int64_t rfcEpoch(int y, int mo, int d, int h, int mi, int s) {
+  return (int64_t)rfcDaysFromCivil(y, (unsigned)mo, (unsigned)d) * 86400
+       + (int64_t)h * 3600 + (int64_t)mi * 60 + s;
+}
+
+static uint8_t rfcMaskFromWifi(const WifiData &d) {
+  uint8_t m = 0;
+  if (d.NBCM1) m |= 0x01;
+  if (d.NBCM2) m |= 0x02;
+  if (d.NBCM3) m |= 0x04;
+  if (d.NBCM4) m |= 0x08;
+  return m;
+}
+
+static void rfcExpandMask(uint8_t m, WifiData &d) {
+  d.NBCM1 = m & 0x01;
+  d.NBCM2 = m & 0x02;
+  d.NBCM3 = m & 0x04;
+  d.NBCM4 = m & 0x08;
+}
+
 enum WiFiOperationMode {
   MODE_CLIENT_UPLOAD = 0,  // حالت نرمال: اتصال به مودم و آپلود
   MODE_HOTSPOT_VIEW = 1    // حالت دیباگ: هات‌اسپات و نمایش دیتا
@@ -188,10 +257,14 @@ void interactiveClockSetup();
 void saveToSD(const WifiData &data);
 int getNextPersistentID();
 void saveNextPersistentID(int id);
+int rfcScanLastNum();
 void TaskRelayControl(void *pvParameters);
 void TaskReadSHT(void *pvParameters);
 void TaskDigitalRead(void *pvParameters);
 void TaskInternalWiFiConnection(void *pvParameters);
+bool uploadRfcToServer(const String &fPath);
+bool uploadLegacyDatToServer(const String &fPath, File &file);
+void sendLastRecordOnly(WiFiClient &cl, String filePath);
 
 void setup() {
   Serial.begin(115200);
@@ -234,6 +307,11 @@ void setup() {
         }
         root.close();
       }
+
+      // آخرین NUM از فایل‌های فشرده روزانه (.rfc)
+      int rfcNum = rfcScanLastNum();
+      if (rfcNum > maxFileID) maxFileID = rfcNum;
+      if (rfcNum > 0) filesFound = true;
 
       if (!filesFound) {
         currentGlobalID = 0;
@@ -804,14 +882,74 @@ void TaskReadSHT(void *pvParameters) {
   }
 }
 
-// تابع کمکی برای ارسال محتویات یک فایل دیتای خاص به کلاینت متصل
+// تابع کمکی: آخرین NUM ذخیره‌شده در فایل‌های فشرده روزانه
+int rfcScanLastNum() {
+  int best = 0;
+  File root = SD.open("/data");
+  if (!root) return 0;
+  File entry = root.openNextFile();
+  while (entry) {
+    String fn = String(entry.name());
+    if (fn.endsWith(".rfc")) {
+      String path = fn.startsWith("/") ? fn : ("/data/" + fn);
+      File f = SD.open(path, FILE_READ);
+      if (f) {
+        RfcHeader hdr;
+        if (f.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr) && hdr.magic == RFC_MAGIC) {
+          int num = hdr.first_num;
+          RfcRec rec;
+          while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
+            num += rec.dnum;
+          }
+          if (num > best) best = num;
+        }
+        f.close();
+      }
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+  return best;
+}
+
+// بازسازی WifiData از وضعیت جاری + رکورد فشرده
+static void rfcFillOut(int num, int64_t epoch, const RfcRec &rec, WifiData &out) {
+  out.NUM = num;
+  out.Temp = rec.temp01 / 10.0f;
+  out.Hum = rec.hum01 / 10.0f;
+  rfcExpandMask(rec.nbcm, out);
+  int64_t days = epoch / 86400;
+  int64_t rem = epoch - days * 86400;
+  if (rem < 0) { rem += 86400; days--; }
+  out.Hour = (uint8_t)(rem / 3600);
+  out.Minute = (uint8_t)((rem % 3600) / 60);
+  out.Second = (uint8_t)(rem % 60);
+  // civil_from_days (Hinnant)
+  int z = (int)days + 719468;
+  int era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int y = (int)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned m = mp + (mp < 10 ? 3 : 9);
+  y += (m <= 2);
+  out.Year = y;
+  out.Month = (uint8_t)m;
+  out.Day = (uint8_t)d;
+}
+
+// ارسال محتویات فایل به کلاینت هات‌اسپات (.rfc یا .dat قدیمی)
 void sendDataFile(WiFiClient &cl, String filePath) {
   File f = SD.open(filePath, FILE_READ);
-  if (f) {
+  if (!f) return;
+
+  if (filePath.endsWith(".dat")) {
     WifiData d;
     if (f.read((uint8_t *)&d, sizeof(WifiData)) == sizeof(WifiData)) {
       char buf[200];
-      // فرمت خروجی JSON برای اپلیکیشن
       snprintf(buf, sizeof(buf),
                "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
                d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
@@ -819,6 +957,284 @@ void sendDataFile(WiFiClient &cl, String filePath) {
       cl.println(buf);
     }
     f.close();
+    return;
+  }
+
+  RfcHeader hdr;
+  if (f.read((uint8_t *)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != RFC_MAGIC) {
+    f.close();
+    return;
+  }
+  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
+  int num = hdr.first_num;
+  bool any = false;
+  RfcRec rec;
+  while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
+    if (any) {
+      epoch += rec.dt_s;
+      num += rec.dnum;
+    }
+    any = true;
+    WifiData d;
+    rfcFillOut(num, epoch, rec, d);
+    char buf[200];
+    snprintf(buf, sizeof(buf),
+             "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+             d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
+             d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+    cl.println(buf);  // هر رکورد یک خط (sync10 با ویرگول/آرایه سمت کلاینت)
+  }
+  f.close();
+}
+
+// فقط آخرین رکورد فایل (دستور sync)
+void sendLastRecordOnly(WiFiClient &cl, String filePath) {
+  File f = SD.open(filePath, FILE_READ);
+  if (!f) return;
+
+  if (filePath.endsWith(".dat")) {
+    sendDataFile(cl, filePath);
+    f.close();
+    return;
+  }
+
+  RfcHeader hdr;
+  if (f.read((uint8_t *)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != RFC_MAGIC) {
+    f.close();
+    return;
+  }
+  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
+  int num = hdr.first_num;
+  RfcRec rec, last;
+  bool any = false;
+  while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
+    if (any) {
+      epoch += rec.dt_s;
+      num += rec.dnum;
+    }
+    last = rec;
+    any = true;
+  }
+  f.close();
+  if (!any) return;
+
+  WifiData d;
+  rfcFillOut(num, epoch, last, d);
+  char buf[200];
+  snprintf(buf, sizeof(buf),
+           "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+           d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
+           d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+  cl.println(buf);
+}
+
+// آپلود فایل فشرده به سرور (هر رکورد یک خط NUM=؛ حذف فقط پس از ACK کامل)
+bool uploadRfcToServer(const String &fPath) {
+  File file = SD.open(fPath, FILE_READ);
+  if (!file) return false;
+
+  RfcHeader hdr;
+  if (file.read((uint8_t *)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != RFC_MAGIC) {
+    file.close();
+    return false;
+  }
+  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
+  int num = hdr.first_num;
+
+  if (!client.connect(serverIP, serverPort)) {
+    file.close();
+    return false;
+  }
+
+  RfcRec rec;
+  bool first = true;
+  bool allAck = true;
+  while (file.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
+    if (!first) {
+      epoch += rec.dt_s;
+      num += rec.dnum;
+    }
+    first = false;
+
+    WifiData d;
+    rfcFillOut(num, epoch, rec, d);
+
+    char buf[300];
+    snprintf(buf, sizeof(buf),
+             "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+             d.NUM,
+             d.NBCM1 ? "OK" : "NOK",
+             d.NBCM2 ? "OK" : "NOK",
+             d.NBCM3 ? "OK" : "NOK",
+             d.NBCM4 ? "OK" : "NOK",
+             d.Temp, d.Hum,
+             d.Year, d.Month, d.Day,
+             d.Hour, d.Minute, d.Second);
+    client.println(buf);
+
+    unsigned long t = millis();
+    bool ack = false;
+    while (millis() - t < 3000) {
+      if (client.available() && client.readStringUntil('\n').indexOf("OK") != -1) {
+        ack = true;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    if (!ack) {
+      allAck = false;
+      break;
+    }
+  }
+
+  file.close();
+  client.stop();
+  if (allAck) {
+    SD.remove(fPath);
+    DEBUG_PRINTLN("[CLIENT] RFC file fully ACKed. Deleted.");
+  }
+  return allAck;
+}
+
+// آپلود فایل قدیمی تک‌رکوردی (سازگاری با فرمت قبلی)
+bool uploadLegacyDatToServer(const String &fPath, File &file) {
+  WifiData stored;
+  if (file.read((uint8_t *)&stored, sizeof(WifiData)) != sizeof(WifiData)) {
+    file.close();
+    return false;
+  }
+  file.close();
+
+  if (!client.connect(serverIP, serverPort)) return false;
+
+  char buf[300];
+  snprintf(buf, sizeof(buf),
+           "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+           stored.NUM,
+           stored.NBCM1 ? "OK" : "NOK",
+           stored.NBCM2 ? "OK" : "NOK",
+           stored.NBCM3 ? "OK" : "NOK",
+           stored.NBCM4 ? "OK" : "NOK",
+           stored.Temp, stored.Hum,
+           stored.Year, stored.Month, stored.Day,
+           stored.Hour, stored.Minute, stored.Second);
+  client.println(buf);
+
+  unsigned long t = millis();
+  bool ack = false;
+  while (millis() - t < 3000) {
+    if (client.available() && client.readStringUntil('\n').indexOf("OK") != -1) {
+      ack = true;
+      break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  client.stop();
+  if (ack) {
+    SD.remove(fPath);
+    DEBUG_PRINTLN("[CLIENT] Legacy ACK RX. File Deleted.");
+  }
+  return ack;
+}
+
+// ذخیره فشرده: یک فایل روزانه + رکورد 8 بایتی
+void saveToSD(const WifiData &data) {
+  static bool hasLast = false;
+  static int64_t lastEpoch = 0;
+  static int lastNum = 0;
+
+  char filename[40];
+  snprintf(filename, sizeof(filename), "/data/%04d%02d%02d.rfc",
+           data.Year, data.Month, data.Day);
+
+  int64_t nowE = rfcEpoch(data.Year, data.Month, data.Day,
+                          data.Hour, data.Minute, data.Second);
+
+  if (!SD.exists(filename)) {
+    File hf = SD.open(filename, FILE_WRITE);
+    if (!hf) {
+      DEBUG_PRINTLN("[RFC] Critical: could not create daily file!");
+      return;
+    }
+    RfcHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = RFC_MAGIC;
+    hdr.version = RFC_VERSION;
+    hdr.rec_size = RFC_REC_SIZE;
+    hdr.first_num = data.NUM;
+    hdr.year = (uint16_t)data.Year;
+    hdr.month = data.Month;
+    hdr.day = data.Day;
+    hdr.hour = data.Hour;
+    hdr.minute = data.Minute;
+    hdr.second = data.Second;
+    hdr._pad = 0;
+    hf.write((const uint8_t *)&hdr, sizeof(hdr));
+    hf.close();
+    hasLast = false;
+  }
+
+  // بازیابی زنجیره بعد از ریست دستگاه (فایل از قبل وجود دارد)
+  if (!hasLast) {
+    File rf = SD.open(filename, FILE_READ);
+    if (rf) {
+      RfcHeader hdr;
+      if (rf.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr) && hdr.magic == RFC_MAGIC) {
+        lastEpoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
+        lastNum = hdr.first_num;
+        RfcRec tmp;
+        bool any = false;
+        while (rf.read((uint8_t *)&tmp, sizeof(tmp)) == sizeof(tmp)) {
+          if (any) {
+            lastEpoch += tmp.dt_s;
+            lastNum += tmp.dnum;
+          }
+          any = true;
+        }
+        hasLast = any;
+        // اگر فقط هدر بود (بدون رکورد)، NUM/زمان از هدر و اولین رکورد dt=0 می‌گیرد
+        if (!any) hasLast = false;
+      }
+      rf.close();
+    }
+  }
+
+  RfcRec rec;
+  memset(&rec, 0, sizeof(rec));
+  rec.temp01 = (int16_t)lroundf(data.Temp * 10.0f);
+  uint32_t hu = (uint32_t)lroundf(data.Hum * 10.0f);
+  if (hu > 1000) hu = 1000;
+  rec.hum01 = (uint16_t)hu;
+  rec.nbcm = rfcMaskFromWifi(data);
+
+  if (!hasLast) {
+    rec.dt_s = 0;
+    rec.dnum = 0;
+  } else {
+    int64_t dt = nowE - lastEpoch;
+    if (dt < 0) dt = 0;
+    if (dt > 65535) dt = 65535;
+    rec.dt_s = (uint16_t)dt;
+    int dn = data.NUM - lastNum;
+    if (dn < 0) dn = 0;
+    if (dn > 255) dn = 255;
+    rec.dnum = (uint8_t)dn;
+  }
+
+  File f = SD.open(filename, FILE_APPEND);
+  if (f) {
+    size_t w = f.write((const uint8_t *)&rec, sizeof(rec));
+    f.close();
+    if (w == sizeof(rec)) {
+      hasLast = true;
+      lastEpoch = nowE;
+      lastNum = data.NUM;
+      DEBUG_PRINTF("[RFC] Appended %s (NUM=%d, %.1fC)\n", filename, data.NUM, data.Temp);
+    } else {
+      DEBUG_PRINTLN("[RFC] Short write!");
+    }
+  } else {
+    DEBUG_PRINTLN("[RFC] Critical: Could not append record!");
   }
 }
 
@@ -862,57 +1278,26 @@ void TaskInternalWiFiConnection(void *pvParameters) {
             }
           }
 
-          // ب) آپلود و حذف (Store and Forward)
+          // ب) آپلود و حذف (Store and Forward) — اولویت با فایل‌های فشرده روزانه
           if (WiFi.status() == WL_CONNECTED) {
             if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(50))) {
               File root = SD.open("/data");
               if (root) {
                 File file = root.openNextFile();
                 if (file) {
-                  String fPath = "/data/" + String(file.name());
-                  if (fPath.endsWith(".dat")) {
-                    WifiData stored;
-                    if (file.read((uint8_t *)&stored, sizeof(WifiData)) == sizeof(WifiData)) {
+                  String fPath = String(file.name());
+                  if (!fPath.startsWith("/")) fPath = "/data/" + fPath;
+                  file.close();
 
-                      if (client.connect(serverIP, serverPort)) {
-                        // مهم: این خط باید دقیقاً با فرمت sscanf سمت ESP8266 یکی باشد
-                        // (13 فیلد: NUM,NBCM1..4,Temp,Humidity,Date,Time) وگرنه parseData()
-                        // شکست می‌خورد، هیچ‌وقت "OK" برنمی‌گردد و رکورد از SD پاک نمی‌شود.
-                        char buf[300];
-                        snprintf(buf, sizeof(buf),
-                                 "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
-                                 stored.NUM,
-                                 stored.NBCM1 ? "OK" : "NOK",
-                                 stored.NBCM2 ? "OK" : "NOK",
-                                 stored.NBCM3 ? "OK" : "NOK",
-                                 stored.NBCM4 ? "OK" : "NOK",
-                                 stored.Temp, stored.Hum,
-                                 stored.Year, stored.Month, stored.Day,
-                                 stored.Hour, stored.Minute, stored.Second);
-                        client.println(buf);
-
-                        // انتظار برای ACK (با vTaskDelay برای رفع خطر Watchdog روی این تسک)
-                        unsigned long t = millis();
-                        bool ack = false;
-                        while (millis() - t < 3000) {
-                          if (client.available() && client.readStringUntil('\n').indexOf("OK") != -1) {
-                            ack = true;
-                            break;
-                          }
-                          vTaskDelay(pdMS_TO_TICKS(5));
-                        }
-
-                        file.close();
-                        if (ack) {
-                          SD.remove(fPath);  // حذف فقط در این مود انجام می‌شود
-                          DEBUG_PRINTLN("[CLIENT] ACK RX. File Deleted.");
-                        }
-                        client.stop();
-                      } else {
-                        file.close();
-                      }
-                    } else file.close();
-                  } else file.close();
+                  if (fPath.endsWith(".rfc")) {
+                    // فایل فشرده روزانه: همه رکوردها روی یک اتصال، سپس حذف
+                    uploadRfcToServer(fPath);
+                  } else if (fPath.endsWith(".dat")) {
+                    File lf = SD.open(fPath, FILE_READ);
+                    if (lf) {
+                      uploadLegacyDatToServer(fPath, lf);
+                    }
+                  }
                 }
                 root.close();
               }
@@ -948,22 +1333,20 @@ void TaskInternalWiFiConnection(void *pvParameters) {
                 if (cmd.equalsIgnoreCase("sync")) {
                   DEBUG_PRINTLN("[CMD] Sync Last Requested.");
                   if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
-                    // پیدا کردن آخرین فایل
+                    // اولویت: جدیدترین فایل .rfc سپس .dat قدیمی
                     File root = SD.open("/data");
                     String lastFile = "";
-                    int maxID = -1;
-
-                    // در C++ استاندارد ESP32 برای حلقه دایرکتوری، این روش امن‌تر است
+                    String bestName = "";
                     File entry = root.openNextFile();
                     while (entry) {
-                      String fn = entry.name();
-                      if (fn.endsWith(".dat")) {
-                        // استخراج ID از نام فایل (فرمت: date_ID.dat)
-                        int uIdx = fn.lastIndexOf('_');
-                        int id = fn.substring(uIdx + 1, fn.length() - 4).toInt();
-                        if (id > maxID) {
-                          maxID = id;
-                          lastFile = "/data/" + fn;
+                      String fn = String(entry.name());
+                      bool isRfc = fn.endsWith(".rfc");
+                      bool isDat = fn.endsWith(".dat");
+                      if (isRfc || isDat) {
+                        // ترتیب الفبایی: YYYYMMDD.rfc یا YYYYMMDD_ID.dat
+                        if (fn > bestName) {
+                          bestName = fn;
+                          lastFile = fn.startsWith("/") ? fn : ("/data/" + fn);
                         }
                       }
                       entry.close();
@@ -972,7 +1355,7 @@ void TaskInternalWiFiConnection(void *pvParameters) {
                     root.close();
 
                     if (lastFile != "") {
-                      sendDataFile(remoteClient, lastFile);
+                      sendLastRecordOnly(remoteClient, lastFile);
                     } else {
                       remoteClient.println("NO_DATA");
                     }
@@ -991,9 +1374,11 @@ void TaskInternalWiFiConnection(void *pvParameters) {
 
                     File entry = root.openNextFile();
                     while (entry) {
-                      String fn = "/data/" + String(entry.name());
-                      if (fn.endsWith(".dat")) {
-                        last10[count % 10] = fn;  // بافر چرخشی
+                      String fn = String(entry.name());
+                      bool ok = fn.endsWith(".dat") || fn.endsWith(".rfc");
+                      if (ok) {
+                        String full = fn.startsWith("/") ? fn : ("/data/" + fn);
+                        last10[count % 10] = full;
                         count++;
                       }
                       entry.close();
@@ -1001,7 +1386,7 @@ void TaskInternalWiFiConnection(void *pvParameters) {
                     }
                     root.close();
 
-                    // ارسال ۱۰ مورد (یا کمتر)
+                    // ارسال ۱۰ مورد (یا کمتر) — هر فایل ممکن است چند رکورد داشته باشد
                     int start = (count > 10) ? (count % 10) : 0;
                     int itemsToSend = (count > 10) ? 10 : count;
 
@@ -1009,8 +1394,9 @@ void TaskInternalWiFiConnection(void *pvParameters) {
                     for (int i = 0; i < itemsToSend; i++) {
                       int idx = (start + i) % 10;
                       if (last10[idx].length() > 0) {
+                        // حداکثر ۱۰ رکورد کل: از هر فایل همه رکوردها (فرمت خطی)
                         sendDataFile(remoteClient, last10[idx]);
-                        if (i < itemsToSend - 1) remoteClient.print(",");  // جداکننده
+                        if (i < itemsToSend - 1) remoteClient.print(",\n");
                       }
                     }
                     remoteClient.println("]");  // پایان آرایه
@@ -1028,19 +1414,6 @@ void TaskInternalWiFiConnection(void *pvParameters) {
 
     // تاخیر کلی برای جلوگیری از درگیری CPU
     vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-void saveToSD(const WifiData &data) {
-  char filename[32];
-  sprintf(filename, "/data/%04d%02d%02d_%d.dat", data.Year, data.Month, data.Day, data.NUM);
-  File f = SD.open(filename, FILE_WRITE);
-  if (f) {
-    f.write((const uint8_t *)&data, sizeof(WifiData));
-    f.close();
-    DEBUG_PRINTF("[SD] Logged %s\n", filename);
-  } else {
-    DEBUG_PRINTLN("[SD] Critical: Could not write file!");
   }
 }
 

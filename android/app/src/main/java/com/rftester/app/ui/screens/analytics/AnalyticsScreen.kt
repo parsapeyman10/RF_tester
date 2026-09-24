@@ -262,14 +262,14 @@ fun AnalyticsScreen(vm: RfViewModel) {
                 }
             }
 
-            // ---- کانال‌ها ----
-            SectionTitle("وضعیت کانال‌های NBCM", "از ${ch.total} رکورد")
+            // ---- کانال‌ها (فقط دو NBCM واقعی) ----
+            SectionTitle("وضعیت دو کانال NBCM", "از ${ch.total} رکورد")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (i in 0..3) {
+                for (i in 0..1) {
                     val pct = if (ch.total == 0) 0f
                     else ch.ch[i] * 100f / ch.total
                     StatTile(
-                        title = "N${i + 1}",
+                        title = "NBCM${i + 1}",
                         value = "%.0f%%".format(pct),
                         subtitle = "${ch.ch[i]} فعال",
                         accent = if (pct > 50f) Mint else Amber,

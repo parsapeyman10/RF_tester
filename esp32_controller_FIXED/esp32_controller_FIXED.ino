@@ -131,42 +131,147 @@ struct WifiData {
 #pragma pack()
 
 // =====================================================================
-//  RFC — فرمت ذخیره‌سازی فشرده (Compact Record File)
-//  هدف: بیشترین فشرده‌سازی بدون از‌دست‌رفتن دقتِ لازم
-//   - یک فایل در روز (/data/YYYYMMDD.rfc)  به‌جای یک فایل به‌ازای هر رکورد
-//     (حذف سربار FAT: قبلاً ~512 بایت کلاستر برای هر 25 بایت داده!)
-//   - رکورد 8 بایت (قبلاً 25 بایت + سربار فایل):
-//       dt_s   u16  فاصله ثانیه با رکورد قبل (تایم کامل ذخیره نمی‌شود)
-//       temp01 s16  دما × 10   (0.01→0.1 دقت کافی صنعتی)
-//       hum01  u16  رطوبت × 10
-//       nbcm   u8   بیت‌فیلد NBCM1..4
-//       dnum   u8   اختلاف شماره سیکل (معمولاً 1)
-//   - هدر 20 بایت فقط یک‌بار در ابتدای فایل روز
-//  حجم مؤثر: ~8 بایت/رکورد  (۶۸٪ کوچک‌تر از قبل، عملاً ~۹۸٪ با حذف سربار FAT)
+//  RFC v2 — ذخیره‌سازی فشرده با «تضمین حفظ زمان»
+//  ---------------------------------------------------------------
+//  یک فایل در روز: /data/YYYYMMDD.rfc
+//
+//  هر رکورد = 6 بایت (بسته‌بندی بیتی):
+//    sod  17 bit  ثانیهٔ روز از RTC (0..86399) — لحظه‌ای و مستقل
+//                  (نه زنجیره‌ای/jمعتمد بر رکورد قبل → بدون خطای انباشت)
+//    temp  8 bit  دما صحیح °C (int8)       ← بدون اعشار
+//    hum   7 bit  رطوبت صحیح % (0..100)    ← بدون اعشار
+//    nbcm  4 bit  وضعیت NBCM1..4
+//    dnum  8 bit  اختلاف شماره سیکل NUM
+//    rsvd  4 bit  رزرو
+//  = 48 bit = 6 بایت
+//
+//  تاریخ (Y/M/D) در هدر فایل روز + نام فایل (دو نسخه).
+//  v1 (رکورد 8 بایتی قدیمی) همچنان قابل خواندن است.
 // =====================================================================
-#define RFC_MAGIC   0x31464352u  // "RCF1" در حافظه little-endian
-#define RFC_VERSION 1
-#define RFC_REC_SIZE 8
+#define RFC_MAGIC   0x31464352u  // "RCF1"
+#define RFC_VERSION 2
+#define RFC_REC_SIZE_V1 8
+#define RFC_REC_SIZE_V2 6
 #define RFC_HEADER_SIZE 20
 
 #pragma pack(1)
 struct RfcHeader {
-  uint32_t magic;      // RFC_MAGIC
-  uint16_t version;    // RFC_VERSION
-  uint16_t rec_size;   // 8
-  int32_t  first_num;  // NUM رکورد اول
-  uint16_t year;       // تاریخ/ساعت رکورد اول (دقیق)
+  uint32_t magic;
+  uint16_t version;
+  uint16_t rec_size;
+  int32_t  first_num;
+  uint16_t year;
   uint8_t  month, day, hour, minute, second, _pad;
 };
 
-struct RfcRec {
-  uint16_t dt_s;     // ثانیه از رکورد قبل (رکورد اول: 0)
-  int16_t  temp01;   // دما × 10
-  uint16_t hum01;    // رطوبت × 10
-  uint8_t  nbcm;     // bit0..3 = NBCM1..4
-  uint8_t  dnum;     // افزایش NUM نسبت به رکورد قبل
+struct RfcRecV1 {
+  uint16_t dt_s;
+  int16_t  temp01;
+  uint16_t hum01;
+  uint8_t  nbcm;
+  uint8_t  dnum;
 };
 #pragma pack()
+
+struct RfcState {
+  bool first;
+  int num;
+};
+
+static void rfcStateInit(RfcState &st, const RfcHeader &hdr) {
+  st.first = true;
+  st.num = hdr.first_num;
+}
+
+// forward declarations (ترتیب کامپایل)
+static int32_t rfcDaysFromCivil(int y, unsigned m, unsigned d);
+static int64_t rfcEpoch(int y, int mo, int d, int h, int mi, int s);
+static uint8_t rfcMaskFromWifi(const WifiData &d);
+static void rfcExpandMask(uint8_t m, WifiData &d);
+
+static void rfc2Pack(uint16_t sod, int8_t tempC, uint8_t humPct,
+                     uint8_t nbcm, uint8_t dnum, uint8_t out[6]) {
+  if (sod > 86399) sod = 86399;
+  if (humPct > 100) humPct = 100;
+  uint64_t v = 0;
+  v |= (uint64_t)(sod & 0x1FFFFu);
+  v |= ((uint64_t)(uint8_t)tempC) << 17;
+  v |= ((uint64_t)(humPct & 0x7Fu)) << 25;
+  v |= ((uint64_t)(nbcm & 0x0Fu)) << 32;
+  v |= ((uint64_t)dnum) << 36;
+  for (int i = 0; i < 6; i++) out[i] = (uint8_t)((v >> (8 * i)) & 0xFFu);
+}
+
+// خواندن رکورد v2 — زمان مستقل هر رکورد + تاریخ از هدر
+static bool rfcNextV2(File &f, const RfcHeader &hdr, RfcState &st, WifiData &out) {
+  uint8_t b[6];
+  if (f.read(b, 6) != 6) return false;
+  uint64_t v = 0;
+  for (int i = 0; i < 6; i++) v |= ((uint64_t)b[i]) << (8 * i);
+  uint16_t sod = (uint16_t)(v & 0x1FFFFu);
+  int8_t tempC = (int8_t)((v >> 17) & 0xFFu);
+  uint8_t humPct = (uint8_t)((v >> 25) & 0x7Fu);
+  uint8_t nbcm = (uint8_t)((v >> 32) & 0x0Fu);
+  uint8_t dnum = (uint8_t)((v >> 36) & 0xFFu);
+
+  if (st.first) {
+    st.num = hdr.first_num;
+    st.first = false;
+  } else {
+    st.num += dnum;
+  }
+
+  memset(&out, 0, sizeof(out));
+  out.NUM = st.num;
+  out.Temp = (float)tempC;
+  out.Hum = (float)humPct;
+  rfcExpandMask(nbcm, out);
+  out.Year = hdr.year;
+  out.Month = hdr.month;
+  out.Day = hdr.day;
+  out.Hour = (uint8_t)(sod / 3600);
+  out.Minute = (uint8_t)((sod % 3600) / 60);
+  out.Second = (uint8_t)(sod % 60);
+  return true;
+}
+
+// خواندن رکورد v1 قدیمی (dt تجمعی) — سازگاری عقب‌رو
+static bool rfcNextV1(File &f, const RfcHeader &hdr, int64_t *epoch,
+                      RfcState &st, WifiData &out) {
+  RfcRecV1 rec;
+  if (f.read((uint8_t *)&rec, sizeof(rec)) != sizeof(rec)) return false;
+  if (st.first) {
+    st.num = hdr.first_num;
+    st.first = false;
+    *epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
+  } else {
+    *epoch += rec.dt_s;
+    st.num += rec.dnum;
+  }
+  memset(&out, 0, sizeof(out));
+  out.NUM = st.num;
+  out.Temp = rec.temp01 / 10.0f;
+  out.Hum = rec.hum01 / 10.0f;
+  rfcExpandMask(rec.nbcm, out);
+  int64_t days = *epoch / 86400;
+  int64_t rem = *epoch - days * 86400;
+  if (rem < 0) { rem += 86400; days--; }
+  out.Hour = (uint8_t)(rem / 3600);
+  out.Minute = (uint8_t)((rem % 3600) / 60);
+  out.Second = (uint8_t)(rem % 60);
+  int z = (int)days + 719468;
+  int era = (z >= 0 ? z : z - 146096) / 146097;
+  unsigned doe = (unsigned)(z - era * 146097);
+  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int y = (int)yoe + era * 400;
+  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  unsigned mp = (5 * doy + 2) / 153;
+  unsigned d = doy - (153 * mp + 2) / 5 + 1;
+  unsigned m = mp + (mp < 10 ? 3 : 9);
+  y += (m <= 2);
+  out.Year = y; out.Month = (uint8_t)m; out.Day = (uint8_t)d;
+  return true;
+}
 
 // روزهای میلادی از 1970-01-01 (الگوریتم Hinnant) برای محاسبه dt
 static int32_t rfcDaysFromCivil(int y, unsigned m, unsigned d) {
@@ -896,12 +1001,16 @@ int rfcScanLastNum() {
       if (f) {
         RfcHeader hdr;
         if (f.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr) && hdr.magic == RFC_MAGIC) {
-          int num = hdr.first_num;
-          RfcRec rec;
-          while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
-            num += rec.dnum;
+          RfcState st;
+          rfcStateInit(st, hdr);
+          int64_t epoch = 0;
+          WifiData d;
+          if (hdr.version >= 2) {
+            while (rfcNextV2(f, hdr, st, d)) { }
+          } else {
+            while (rfcNextV1(f, hdr, &epoch, st, d)) { }
           }
-          if (num > best) best = num;
+          if (st.num > best) best = st.num;
         }
         f.close();
       }
@@ -913,33 +1022,7 @@ int rfcScanLastNum() {
   return best;
 }
 
-// بازسازی WifiData از وضعیت جاری + رکورد فشرده
-static void rfcFillOut(int num, int64_t epoch, const RfcRec &rec, WifiData &out) {
-  out.NUM = num;
-  out.Temp = rec.temp01 / 10.0f;
-  out.Hum = rec.hum01 / 10.0f;
-  rfcExpandMask(rec.nbcm, out);
-  int64_t days = epoch / 86400;
-  int64_t rem = epoch - days * 86400;
-  if (rem < 0) { rem += 86400; days--; }
-  out.Hour = (uint8_t)(rem / 3600);
-  out.Minute = (uint8_t)((rem % 3600) / 60);
-  out.Second = (uint8_t)(rem % 60);
-  // civil_from_days (Hinnant)
-  int z = (int)days + 719468;
-  int era = (z >= 0 ? z : z - 146096) / 146097;
-  unsigned doe = (unsigned)(z - era * 146097);
-  unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-  int y = (int)yoe + era * 400;
-  unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-  unsigned mp = (5 * doy + 2) / 153;
-  unsigned d = doy - (153 * mp + 2) / 5 + 1;
-  unsigned m = mp + (mp < 10 ? 3 : 9);
-  y += (m <= 2);
-  out.Year = y;
-  out.Month = (uint8_t)m;
-  out.Day = (uint8_t)d;
-}
+// (rfcFillOut حذف شد — بازسازی با rfcNextV2 / rfcNextV1)
 
 // ارسال محتویات فایل به کلاینت هات‌اسپات (.rfc یا .dat قدیمی)
 void sendDataFile(WiFiClient &cl, String filePath) {
@@ -951,7 +1034,7 @@ void sendDataFile(WiFiClient &cl, String filePath) {
     if (f.read((uint8_t *)&d, sizeof(WifiData)) == sizeof(WifiData)) {
       char buf[200];
       snprintf(buf, sizeof(buf),
-               "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+               "{\"ID\":%d,\"T\":%.0f,\"H\":%.0f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
                d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
                d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
       cl.println(buf);
@@ -965,24 +1048,28 @@ void sendDataFile(WiFiClient &cl, String filePath) {
     f.close();
     return;
   }
-  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
-  int num = hdr.first_num;
-  bool any = false;
-  RfcRec rec;
-  while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
-    if (any) {
-      epoch += rec.dt_s;
-      num += rec.dnum;
+  RfcState st;
+  rfcStateInit(st, hdr);
+  int64_t epoch = 0;
+  WifiData d;
+  if (hdr.version >= 2) {
+    while (rfcNextV2(f, hdr, st, d)) {
+      char buf[200];
+      snprintf(buf, sizeof(buf),
+               "{\"ID\":%d,\"T\":%.0f,\"H\":%.0f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+               d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
+               d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+      cl.println(buf);
     }
-    any = true;
-    WifiData d;
-    rfcFillOut(num, epoch, rec, d);
-    char buf[200];
-    snprintf(buf, sizeof(buf),
-             "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
-             d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
-             d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
-    cl.println(buf);  // هر رکورد یک خط (sync10 با ویرگول/آرایه سمت کلاینت)
+  } else {
+    while (rfcNextV1(f, hdr, &epoch, st, d)) {
+      char buf[200];
+      snprintf(buf, sizeof(buf),
+               "{\"ID\":%d,\"T\":%.0f,\"H\":%.0f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+               d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
+               d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+      cl.println(buf);
+    }
   }
   f.close();
 }
@@ -993,8 +1080,8 @@ void sendLastRecordOnly(WiFiClient &cl, String filePath) {
   if (!f) return;
 
   if (filePath.endsWith(".dat")) {
-    sendDataFile(cl, filePath);
     f.close();
+    sendDataFile(cl, filePath);
     return;
   }
 
@@ -1003,28 +1090,24 @@ void sendLastRecordOnly(WiFiClient &cl, String filePath) {
     f.close();
     return;
   }
-  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
-  int num = hdr.first_num;
-  RfcRec rec, last;
+  RfcState st;
+  rfcStateInit(st, hdr);
+  int64_t epoch = 0;
+  WifiData d, last;
   bool any = false;
-  while (f.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
-    if (any) {
-      epoch += rec.dt_s;
-      num += rec.dnum;
-    }
-    last = rec;
-    any = true;
+  if (hdr.version >= 2) {
+    while (rfcNextV2(f, hdr, st, d)) { last = d; any = true; }
+  } else {
+    while (rfcNextV1(f, hdr, &epoch, st, d)) { last = d; any = true; }
   }
   f.close();
   if (!any) return;
 
-  WifiData d;
-  rfcFillOut(num, epoch, last, d);
   char buf[200];
   snprintf(buf, sizeof(buf),
-           "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
-           d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
-           d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+           "{\"ID\":%d,\"T\":%.0f,\"H\":%.0f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+           last.NUM, last.Temp, last.Hum, last.NBCM1, last.NBCM2,
+           last.Year, last.Month, last.Day, last.Hour, last.Minute, last.Second);
   cl.println(buf);
 }
 
@@ -1038,62 +1121,61 @@ bool uploadRfcToServer(const String &fPath) {
     file.close();
     return false;
   }
-  int64_t epoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
-  int num = hdr.first_num;
 
   if (!client.connect(serverIP, serverPort)) {
     file.close();
     return false;
   }
 
-  RfcRec rec;
-  bool first = true;
+  RfcState st;
+  rfcStateInit(st, hdr);
+  int64_t epoch = 0;
+  WifiData d;
   bool allAck = true;
-  while (file.read((uint8_t *)&rec, sizeof(rec)) == sizeof(rec)) {
-    if (!first) {
-      epoch += rec.dt_s;
-      num += rec.dnum;
-    }
-    first = false;
+  bool any = false;
 
-    WifiData d;
-    rfcFillOut(num, epoch, rec, d);
-
+  auto sendOne = [&](const WifiData &rec) -> bool {
     char buf[300];
     snprintf(buf, sizeof(buf),
-             "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
-             d.NUM,
-             d.NBCM1 ? "OK" : "NOK",
-             d.NBCM2 ? "OK" : "NOK",
-             d.NBCM3 ? "OK" : "NOK",
-             d.NBCM4 ? "OK" : "NOK",
-             d.Temp, d.Hum,
-             d.Year, d.Month, d.Day,
-             d.Hour, d.Minute, d.Second);
+             "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.0f,Humidity=%.0f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+             rec.NUM,
+             rec.NBCM1 ? "OK" : "NOK",
+             rec.NBCM2 ? "OK" : "NOK",
+             rec.NBCM3 ? "OK" : "NOK",
+             rec.NBCM4 ? "OK" : "NOK",
+             rec.Temp, rec.Hum,
+             rec.Year, rec.Month, rec.Day,
+             rec.Hour, rec.Minute, rec.Second);
     client.println(buf);
-
     unsigned long t = millis();
-    bool ack = false;
     while (millis() - t < 3000) {
       if (client.available() && client.readStringUntil('\n').indexOf("OK") != -1) {
-        ack = true;
-        break;
+        return true;
       }
       vTaskDelay(pdMS_TO_TICKS(5));
     }
-    if (!ack) {
-      allAck = false;
-      break;
+    return false;
+  };
+
+  if (hdr.version >= 2) {
+    while (rfcNextV2(file, hdr, st, d)) {
+      any = true;
+      if (!sendOne(d)) { allAck = false; break; }
+    }
+  } else {
+    while (rfcNextV1(file, hdr, &epoch, st, d)) {
+      any = true;
+      if (!sendOne(d)) { allAck = false; break; }
     }
   }
 
   file.close();
   client.stop();
-  if (allAck) {
+  if (allAck && any) {
     SD.remove(fPath);
     DEBUG_PRINTLN("[CLIENT] RFC file fully ACKed. Deleted.");
   }
-  return allAck;
+  return allAck && any;
 }
 
 // آپلود فایل قدیمی تک‌رکوردی (سازگاری با فرمت قبلی)
@@ -1137,18 +1219,29 @@ bool uploadLegacyDatToServer(const String &fPath, File &file) {
   return ack;
 }
 
-// ذخیره فشرده: یک فایل روزانه + رکورد 8 بایتی
+// ذخیره فشرده v2: فایل روزانه + رکورد 6 بایتی (زمان لحظه‌ای RTC)
 void saveToSD(const WifiData &data) {
   static bool hasLast = false;
-  static int64_t lastEpoch = 0;
   static int lastNum = 0;
+
+  float tRaw = data.Temp;
+  float hRaw = data.Hum;
+  if (isnan(tRaw) || isinf(tRaw)) tRaw = 0.0f;
+  if (isnan(hRaw) || isinf(hRaw)) hRaw = 0.0f;
+
+  int tempI = (int)lroundf(tRaw);
+  if (tempI < -128) tempI = -128;
+  if (tempI > 127) tempI = 127;
+  int humI = (int)lroundf(hRaw);
+  if (humI < 0) humI = 0;
+  if (humI > 100) humI = 100;
+
+  uint16_t sod = (uint16_t)((int)data.Hour * 3600 + (int)data.Minute * 60 + (int)data.Second);
+  if (sod > 86399) sod = 86399;
 
   char filename[40];
   snprintf(filename, sizeof(filename), "/data/%04d%02d%02d.rfc",
            data.Year, data.Month, data.Day);
-
-  int64_t nowE = rfcEpoch(data.Year, data.Month, data.Day,
-                          data.Hour, data.Minute, data.Second);
 
   if (!SD.exists(filename)) {
     File hf = SD.open(filename, FILE_WRITE);
@@ -1160,7 +1253,7 @@ void saveToSD(const WifiData &data) {
     memset(&hdr, 0, sizeof(hdr));
     hdr.magic = RFC_MAGIC;
     hdr.version = RFC_VERSION;
-    hdr.rec_size = RFC_REC_SIZE;
+    hdr.rec_size = RFC_REC_SIZE_V2;
     hdr.first_num = data.NUM;
     hdr.year = (uint16_t)data.Year;
     hdr.month = data.Month;
@@ -1174,62 +1267,47 @@ void saveToSD(const WifiData &data) {
     hasLast = false;
   }
 
-  // بازیابی زنجیره بعد از ریست دستگاه (فایل از قبل وجود دارد)
   if (!hasLast) {
     File rf = SD.open(filename, FILE_READ);
     if (rf) {
       RfcHeader hdr;
       if (rf.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr) && hdr.magic == RFC_MAGIC) {
-        lastEpoch = rfcEpoch(hdr.year, hdr.month, hdr.day, hdr.hour, hdr.minute, hdr.second);
-        lastNum = hdr.first_num;
-        RfcRec tmp;
-        bool any = false;
-        while (rf.read((uint8_t *)&tmp, sizeof(tmp)) == sizeof(tmp)) {
-          if (any) {
-            lastEpoch += tmp.dt_s;
-            lastNum += tmp.dnum;
-          }
-          any = true;
+        RfcState st;
+        rfcStateInit(st, hdr);
+        int64_t ep = 0;
+        WifiData tmp;
+        if (hdr.version >= 2) {
+          while (rfcNextV2(rf, hdr, st, tmp)) { }
+        } else {
+          while (rfcNextV1(rf, hdr, &ep, st, tmp)) { }
         }
-        hasLast = any;
-        // اگر فقط هدر بود (بدون رکورد)، NUM/زمان از هدر و اولین رکورد dt=0 می‌گیرد
-        if (!any) hasLast = false;
+        lastNum = st.num;
+        hasLast = (st.first == false);
       }
       rf.close();
     }
   }
 
-  RfcRec rec;
-  memset(&rec, 0, sizeof(rec));
-  rec.temp01 = (int16_t)lroundf(data.Temp * 10.0f);
-  uint32_t hu = (uint32_t)lroundf(data.Hum * 10.0f);
-  if (hu > 1000) hu = 1000;
-  rec.hum01 = (uint16_t)hu;
-  rec.nbcm = rfcMaskFromWifi(data);
-
-  if (!hasLast) {
-    rec.dt_s = 0;
-    rec.dnum = 0;
-  } else {
-    int64_t dt = nowE - lastEpoch;
-    if (dt < 0) dt = 0;
-    if (dt > 65535) dt = 65535;
-    rec.dt_s = (uint16_t)dt;
+  uint8_t dnum = 0;
+  if (hasLast) {
     int dn = data.NUM - lastNum;
     if (dn < 0) dn = 0;
     if (dn > 255) dn = 255;
-    rec.dnum = (uint8_t)dn;
+    dnum = (uint8_t)dn;
   }
+
+  uint8_t buf[6];
+  rfc2Pack(sod, (int8_t)tempI, (uint8_t)humI, rfcMaskFromWifi(data), dnum, buf);
 
   File f = SD.open(filename, FILE_APPEND);
   if (f) {
-    size_t w = f.write((const uint8_t *)&rec, sizeof(rec));
+    size_t w = f.write(buf, 6);
     f.close();
-    if (w == sizeof(rec)) {
+    if (w == 6) {
       hasLast = true;
-      lastEpoch = nowE;
       lastNum = data.NUM;
-      DEBUG_PRINTF("[RFC] Appended %s (NUM=%d, %.1fC)\n", filename, data.NUM, data.Temp);
+      DEBUG_PRINTF("[RFC] Appended %s (NUM=%d, %dC, %d%%)\n",
+                   filename, data.NUM, tempI, humI);
     } else {
       DEBUG_PRINTLN("[RFC] Short write!");
     }

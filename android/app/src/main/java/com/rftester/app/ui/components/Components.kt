@@ -177,10 +177,9 @@ fun NodeCard(
                 Spacer(Modifier.height(6.dp))
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    StatusChip("N1", reading.n1)
-                    StatusChip("N2", reading.n2)
-                    StatusChip("N3", reading.n3)
-                    StatusChip("N4", reading.n4)
+                    // پنل دو NBCM (دو کانال واقعی سیستم)
+                    StatusChip("NBCM1", reading.n1)
+                    StatusChip("NBCM2", reading.n2)
                     if (reading.syncPending) {
                         SuggestionChip(
                             onClick = {},

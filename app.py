@@ -281,20 +281,34 @@ def read_serial_worker():
 from werkzeug.utils import secure_filename
 
 # =====================================================================
-#  پارسر فرمت فشرده RFC سمت ESP32 (رکورد 8 بایتی + هدر 20 بایتی)
-#  هر فایل .rfc = یک روز کامل پایش؛ جایگزین فایل‌های پراکنده .dat
+#  پارسر فرمت فشرده RFC سمت ESP32
+#  v2 (تولید فعلی): رکورد 6 بایتی بسته‌بندی بیتی — زمان لحظه‌ای + دما/رطوبت صحیح
+#  v1 (قدیمی):      رکورد 8 بایتی با dt تجمعی
 # =====================================================================
 RFC_MAGIC = 0x31464352  # "RCF1"
 RFC_HEADER_FMT = '<IHHIHBBBBBB'  # 4+2+2+4+2+6 = 20
-RFC_REC_FMT = '<HhHBB'           # 2+2+2+1+1 = 8
 RFC_HEADER_SIZE = struct.calcsize(RFC_HEADER_FMT)
-RFC_REC_SIZE = struct.calcsize(RFC_REC_FMT)
+RFC_REC_FMT_V1 = '<HhHBB'        # 8 bytes
+RFC_REC_SIZE_V1 = 8
+RFC_REC_SIZE_V2 = 6
 
 def _rfc_epoch_to_dt(y, mo, d, h, mi, s):
     try:
         return datetime.datetime(y, mo, d, h, mi, s)
     except Exception:
         return None
+
+def _rfc2_unpack(buf: bytes):
+    """باز کردن رکورد 6 بایتی v2 → (sod, temp, hum, nbcm, dnum)"""
+    v = int.from_bytes(buf[:6], 'little')
+    sod = v & 0x1FFFF
+    temp = (v >> 17) & 0xFF
+    if temp >= 128:
+        temp -= 256  # int8
+    hum = (v >> 25) & 0x7F
+    nbcm = (v >> 32) & 0x0F
+    dnum = (v >> 36) & 0xFF
+    return sod, temp, hum, nbcm, dnum
 
 def parse_rfc_bytes(file_bytes):
     """تبدیل فایل فشرده ESP32 به لیست رکورد سازگار با مسیر قدیمی."""
@@ -306,17 +320,48 @@ def parse_rfc_bytes(file_bytes):
     if magic != RFC_MAGIC or ver < 1:
         return out
 
-    epoch = _rfc_epoch_to_dt(year, month, day, hour, minute, second)
-    if epoch is None:
-        epoch = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
     num = int(first_num)
-
     off = RFC_HEADER_SIZE
     total = len(file_bytes)
     first = True
-    while off + RFC_REC_SIZE <= total:
+
+    if ver >= 2 and rec_size == RFC_REC_SIZE_V2:
+        # v2: تاریخ از هدر فایل روز، ساعت از هر رکورد (مستقل — بدون انباشت)
+        base_date = _rfc_epoch_to_dt(year, month, day, 0, 0, 0)
+        if base_date is None:
+            base_date = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+        day0 = base_date.date()
+        while off + RFC_REC_SIZE_V2 <= total:
+            sod, temp, hum, nbcm, dnum = _rfc2_unpack(file_bytes[off:off + 6])
+            off += RFC_REC_SIZE_V2
+            if not first:
+                num += int(dnum)
+            first = False
+            dt = datetime.datetime(
+                day0.year, day0.month, day0.day,
+                sod // 3600, (sod % 3600) // 60, sod % 60
+            )
+            nbcm_list = [f'NBCM{i + 1}' for i in range(4) if (nbcm & (1 << i))]
+            out.append({
+                'num_value': num,
+                'temp': float(max(-100, min(155, temp))),  # صحیح
+                'humidity': float(max(0, min(100, hum))),
+                'nbcm': nbcm_list,
+                'date': dt.strftime('%Y-%m-%d'),
+                'time': dt.strftime('%H:%M:%S'),
+                'sensor_dt': dt,
+            })
+        return out
+
+    # ---- v1: dt تجمعی ----
+    epoch = _rfc_epoch_to_dt(year, month, day, hour, minute, second)
+    if epoch is None:
+        epoch = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+
+    RFC_REC_FMT = RFC_REC_FMT_V1
+    while off + RFC_REC_SIZE_V1 <= total:
         dt_s, temp01, hum01, nbcm, dnum = struct.unpack_from(RFC_REC_FMT, file_bytes, off)
-        off += RFC_REC_SIZE
+        off += RFC_REC_SIZE_V1
         if not first:
             epoch = epoch + datetime.timedelta(seconds=int(dt_s))
             num += int(dnum)

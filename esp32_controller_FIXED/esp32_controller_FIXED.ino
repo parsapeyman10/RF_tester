@@ -346,6 +346,7 @@ static void rfePack(const RfcEvent &e, uint8_t out[4]) {
 }
 
 // خواندن RTC فعلی به RfcEvent (بدون اعتبارسنجی سخت — caller تصمیم می‌گیرد)
+// نکته: فراخواننده باید xI2CMutex را گرفته باشد
 static void rtcReadEvent(uint8_t ch, uint8_t state, uint8_t valid, RfcEvent &out) {
   out.year = (uint16_t)(2000 + rtc.getYear());
   out.month = rtc.getMonth();
@@ -424,6 +425,8 @@ static bool ntpSyncRtc(uint32_t timeoutMs) {
   localtime_r(&now, &tmv);
   int y = tmv.tm_year + 1900;
   if (y < 2024 || y > 2099) return false;
+
+  if (!xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(2000))) return false;
   // مقایسه با RTC و اصلاح فقط اگر بیش از ۱ ثانیه اختلاف باشد
   rtc.formatDate();
   rtc.formatTime();
@@ -442,6 +445,7 @@ static bool ntpSyncRtc(uint32_t timeoutMs) {
   } else {
     DEBUG_PRINTLN("[NTP] RTC already within 1s of NTP.");
   }
+  xSemaphoreGive(xI2CMutex);
   g_lastNtpMs = millis();
   g_ntpEverOk = true;
   return true;
@@ -463,6 +467,8 @@ QueueHandle_t xDataQueue;
 QueueHandle_t xEventQueue;   // صف رویدادهای سوییچ (نوشتن غیرمسدودکننده)
 SemaphoreHandle_t xSDMutex;
 SemaphoreHandle_t xGlobalStateMutex;  // ADDED: Mutex for global state protection
+SemaphoreHandle_t xI2CMutex;          // حفاظت Wire (RTC + SHT از چند تسک)
+portMUX_TYPE noteMux = portMUX_INITIALIZER_UNLOCKED;  // وضعیت لبهٔ NBCM بین تسک‌ها
 EventGroupHandle_t xDoorEvents;
 
 #define RELAY_OPEN_DOORS_PIN 2
@@ -539,9 +545,13 @@ void setup() {
   xEventQueue = xQueueCreate(64, sizeof(RfcEvent));
   xSDMutex = xSemaphoreCreateMutex();
   xGlobalStateMutex = xSemaphoreCreateMutex();  // ADDED: Init global mutex
+  xI2CMutex = xSemaphoreCreateMutex();
   xDoorEvents = xEventGroupCreate();
 
-  rtc.initClock();
+  if (xSemaphoreTake(xI2CMutex, portMAX_DELAY)) {
+    rtc.initClock();
+    xSemaphoreGive(xI2CMutex);
+  }
 
   if (xSemaphoreTake(xSDMutex, portMAX_DELAY)) {
     DEBUG_PRINTLN("[DEBUG] Accessing SD Card for ID initialization...");
@@ -689,9 +699,14 @@ void interactiveClockSetup() {
       if (!timeConfigured) {
         c.println("--- INDUSTRIAL CONTROLLER V1.7 ---");
         c.print("System Time: ");
-        c.print(rtc.formatDate());
-        c.print(" ");
-        c.println(rtc.formatTime());
+        if (xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(1000))) {
+          c.print(rtc.formatDate());
+          c.print(" ");
+          c.println(rtc.formatTime());
+          xSemaphoreGive(xI2CMutex);
+        } else {
+          c.println("RTC busy");
+        }
         c.println("Is this correct? (ok/nok):");
       }
 
@@ -753,9 +768,12 @@ void interactiveClockSetup() {
                 c.println(" OK");
               }
 
-              // ثبت در RTC
-              rtc.setDate(val[2], 0, val[1], 0, val[0] % 100);
-              rtc.setTime(val[3], val[4], val[5]);
+              // ثبت در RTC (زیر قفل I2C)
+              if (xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(1000))) {
+                rtc.setDate(val[2], 0, val[1], 0, val[0] % 100);
+                rtc.setTime(val[3], val[4], val[5]);
+                xSemaphoreGive(xI2CMutex);
+              }
 
               c.println("[SUCCESS] RTC Updated.");
               timeConfigured = true;
@@ -1057,16 +1075,23 @@ void TaskReadSHT(void *pvParameters) {
     float sumHum = 0;
     int validSamples = 0;
 
-    for (int i = 0; i < SAMPLE_COUNT; i++) {
-      float t = sht31.readTemperature();
-      float h = sht31.readHumidity();
+    // SHT روی همان Wire/I2C — زیر قفل مشترک با RTC
+    if (xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(500))) {
+      for (int i = 0; i < SAMPLE_COUNT; i++) {
+        float t = sht31.readTemperature();
+        float h = sht31.readHumidity();
 
-      if (!isnan(t) && !isnan(h)) {
-        sumTemp += t;
-        sumHum += h;
-        validSamples++;
+        if (!isnan(t) && !isnan(h)) {
+          sumTemp += t;
+          sumHum += h;
+          validSamples++;
+        }
+        xSemaphoreGive(xI2CMutex);
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));  // صبر کوتاه بین نمونه‌ها
+        if (i + 1 < SAMPLE_COUNT) xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(500));
       }
-      vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));  // صبر کوتاه بین نمونه‌ها
+    } else {
+      DEBUG_PRINTLN("[SHT-TASK] I2C busy — samples skipped this cycle.");
     }
 
     // ============================================================
@@ -1117,8 +1142,11 @@ void TaskReadSHT(void *pvParameters) {
     }
 
     // ============================================================
-    // فاز ۳: تحلیل و اعتبارسنجی زمان (RTC Logic)
-    // ============================================================
+    // فاز ۳: تحلیل و اعتبارسنجی زمان (RTC Logic) — زیر قفل I2C
+    if (!xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(500))) {
+      xEventGroupSetBits(xDoorEvents, BIT_SHT_READ_COMPLETE);
+      continue;
+    }
     rtc.formatDate();
     rtc.formatTime();
 
@@ -1128,22 +1156,27 @@ void TaskReadSHT(void *pvParameters) {
 
     bool timeIsValid = (curYear >= 24) && (curMonth >= 1 && curMonth <= 12) && (curDay >= 1 && curDay <= 31);
 
+    uint8_t rh = rtc.getHour();
+    uint8_t rmi = rtc.getMinute();
+    uint8_t rs = rtc.getSecond();
+    xSemaphoreGive(xI2CMutex);
+
     if (xSemaphoreTake(xGlobalStateMutex, pdMS_TO_TICKS(500))) {
       if (timeIsValid) {
         globalSystemState.Year = 2000 + curYear;
         globalSystemState.Month = curMonth;
         globalSystemState.Day = curDay;
-        globalSystemState.Hour = rtc.getHour();
-        globalSystemState.Minute = rtc.getMinute();
-        globalSystemState.Second = rtc.getSecond();
+        globalSystemState.Hour = rh;
+        globalSystemState.Minute = rmi;
+        globalSystemState.Second = rs;
 
         // ذخیره در حافظه
         last_Year = curYear;
         last_Month = curMonth;
         last_Day = curDay;
-        last_Hour = rtc.getHour();
-        last_Minute = rtc.getMinute();
-        last_Second = rtc.getSecond();
+        last_Hour = rh;
+        last_Minute = rmi;
+        last_Second = rs;
       } else {
         DEBUG_PRINTLN("[SHT-TASK] RTC Noise detected. Advancing history by interval.");
         // به‌جای فریز‌شدن روی زمان قدیمی، زمان تاریخی را ۱۲۰ ثانیه جلو ببر
@@ -1364,11 +1397,13 @@ bool uploadRfcToServer(const String &fPath) {
 
   file.close();
   client.stop();
-  if (allAck && any) {
+  // فایل خالی (فقط هدر) یا کاملاً ACK → حذف تا هر چرخه دوباره آپلود نشود
+  if (allAck) {
     SD.remove(fPath);
-    DEBUG_PRINTLN("[CLIENT] RFC file fully ACKed. Deleted.");
+    DEBUG_PRINTLN(any ? "[CLIENT] RFC file fully ACKed. Deleted."
+                      : "[CLIENT] RFC empty (header-only). Deleted.");
   }
-  return allAck && any;
+  return allAck;
 }
 
 // تسک نویسندهٔ رویداد: غیرمسدودکننده برای وظایف دیگر
@@ -1399,39 +1434,55 @@ void TaskEventWriter(void *pvParameters) {
 static void enqueueNbcmEdge(uint8_t ch, bool newState) {
   if (!xEventQueue) return;
   RfcEvent ev;
-  // اعتبار RTC در همان لحظه
-  int ry = rtc.getYear();
-  int rmo = rtc.getMonth();
-  int rd = rtc.getDay();
-  uint8_t valid = ((ry >= 24) && (rmo >= 1) && (rmo <= 12) && (rd >= 1) && (rd <= 31)) ? 1 : 0;
-  rtcReadEvent(ch, newState ? 1 : 0, valid, ev);
+  if (!xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(200))) {
+    // اگر I2C اشغال بود، زمان تقریبی با valid=0 ثبت شود (دیتا گم نشود)
+    memset(&ev, 0, sizeof(ev));
+    ev.sod = 0;
+    ev.ch = ch;
+    ev.state = newState ? 1 : 0;
+    ev.valid = 0;
+    // تلاش برای خواندن بدون قفل طولانی
+    if (xSemaphoreTake(xI2CMutex, pdMS_TO_TICKS(50))) {
+      rtcReadEvent(ch, newState ? 1 : 0, 1, ev);
+      xSemaphoreGive(xI2CMutex);
+    }
+  } else {
+    int ry = rtc.getYear();
+    int rmo = rtc.getMonth();
+    int rd = rtc.getDay();
+    uint8_t valid = ((ry >= 24) && (rmo >= 1) && (rmo <= 12) && (rd >= 1) && (rd <= 31)) ? 1 : 0;
+    rtcReadEvent(ch, newState ? 1 : 0, valid, ev);
+    xSemaphoreGive(xI2CMutex);
+  }
   if (xQueueSend(xEventQueue, &ev, pdMS_TO_TICKS(20)) != pdPASS) {
     DEBUG_PRINTLN("[RFE] Queue full — event dropped (should not happen).");
   }
 }
 
 // مقایسه با وضعیت قبلی و ارسال رویداد فقط هنگام تغییر
+// هر کانال جداگانه یک‌بار init می‌شود (قبلاً اولین فراخوانی ch1 رویداد کاذب می‌داد)
+// + حفاظت portMUX چون از TaskRelay و TaskDigital همزمان صدا زده می‌شود
 static void noteNbcmChange(uint8_t ch, bool newState) {
-  static bool inited = false;
-  static bool prev1 = false, prev2 = false, prev3 = false, prev4 = false;
-  bool *prev = nullptr;
-  switch (ch) {
-    case 0: prev = &prev1; break;
-    case 1: prev = &prev2; break;
-    case 2: prev = &prev3; break;
-    case 3: prev = &prev4; break;
-    default: return;
-  }
-  if (!inited) {
-    // اولین نمونه‌برداری: مقدار اولیه را فقط ذخیره کن (رویداد false→false لازم نیست)
-    *prev = newState;
-    inited = true;
+  static bool prev[4] = {false, false, false, false};
+  static bool seen[4] = {false, false, false, false};
+  if (ch > 3) return;
+
+  bool fire = false;
+  portENTER_CRITICAL(&noteMux);
+  if (!seen[ch]) {
+    // اولین نمونه‌برداری برای این کانال: فقط ذخیره، بدون رویداد
+    prev[ch] = newState;
+    seen[ch] = true;
+    portEXIT_CRITICAL(&noteMux);
     return;
   }
-  if (*prev != newState) {
-    *prev = newState;
-    enqueueNbcmEdge(ch, newState);
+  if (prev[ch] != newState) {
+    prev[ch] = newState;
+    fire = true;
   }
+  portEXIT_CRITICAL(&noteMux);
+
+  if (fire) enqueueNbcmEdge(ch, newState);
 }
 
 // آپلود فایل رویداد (.rfe) — هر رویداد یک خط؛ حذف فقط پس از ACK
@@ -1482,11 +1533,13 @@ bool uploadRfeToServer(const String &fPath) {
 
   file.close();
   client.stop();
-  if (allAck && any) {
+  // فایل خالی (فقط هدر) یا کاملاً ACK شده → حذف تا هر چرخه دوباره آپلود نشود
+  if (allAck) {
     SD.remove(fPath);
-    DEBUG_PRINTLN("[CLIENT] RFE file fully ACKed. Deleted.");
+    DEBUG_PRINTLN(any ? "[CLIENT] RFE file fully ACKed. Deleted."
+                      : "[CLIENT] RFE empty (header-only). Deleted.");
   }
-  return allAck && any;
+  return allAck;
 }
 
 // آپلود فایل قدیمی تک‌رکوردی (سازگاری با فرمت قبلی)

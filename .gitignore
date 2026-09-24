@@ -1,18 +1,20 @@
-# Gradle
+# Python
+__pycache__/
+*.pyc
+*.db
+instance/
+
+# Android / Gradle
 android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
 android/.idea/
 android/captures/
-android/externalNativeBuild/
-android/.cxx/
 *.apk
 *.aab
 
-# Room / misc
-*.hprof
-
-# Python
-__pycache__/
-*.pyc
+# IDE
+.vscode/
+.idea/
+.DS_Store

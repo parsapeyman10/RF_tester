@@ -13,7 +13,7 @@
 //  هر رکورد در دیتابیس Flask می‌شدند چون همان کلیدواژه NUM= را هم در
 //  خط اکو خام و هم در خط [LINE RECV] تکرار می‌کردند)
 // =====================================================================
-#define DEBUG_ENABLE true
+#define DEBUG_ENABLE false
 
 #if DEBUG_ENABLE
 #define DBG_PRINT(x) Serial.print(x)

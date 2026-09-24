@@ -47,6 +47,8 @@ class MasterReading(db.Model):
     date = db.Column(db.String(50), nullable=True) 
     timestamp = db.Column(db.DateTime, nullable=False, index=True) 
     formatted_log = db.Column(db.String(500), nullable=True)
+    # شناسه نود/محصول (1 یا 2) — برای اپ اندروید دو محصول نود بدنه
+    node_id = db.Column(db.Integer, nullable=True, index=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -527,22 +529,28 @@ def get_sensor_data():
 def get_master_data():
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
+    limit_arg = request.args.get('limit', type=int)
     
     query = MasterReading.query
     
-    # اگر فیلتر تاریخ نداشتیم، به جای 1 روز، 1000 رکورد آخر را بیاور (برای سرعت و پر بودن نمودار)
+    # اگر فیلتر تاریخ نداشتیم، به جای روز، رکوردهای آخر را برمی‌گردانیم
     if not start_date and not end_date:
-        # دریافت 1000 رکورد آخر بر اساس زمان سنسور
-        readings = MasterReading.query.order_by(MasterReading.date.desc(), MasterReading.time.desc()).limit(1000).all()
-        # چون limit دیتای آخر را می‌آورد، باید لیست را برعکس کنیم تا در نمودار از چپ به راست باشد
-        readings = readings[::-1]
+        base = MasterReading.query.order_by(
+            MasterReading.date.desc(), MasterReading.time.desc()
+        )
+        if limit_arg and limit_arg > 0:
+            base = base.limit(min(limit_arg, 20000))
+        else:
+            base = base.limit(1000)
+        readings = base.all()[::-1]  # چپ‌به‌راست در نمودار
     else:
-        # اگر فیلتر داشت، طبق فیلتر عمل کن
         if start_date:
             query = query.filter(MasterReading.date >= start_date)
         if end_date:
             query = query.filter(MasterReading.date <= end_date)
         readings = query.order_by(MasterReading.date.asc(), MasterReading.time.asc()).all()
+        if limit_arg and limit_arg > 0 and len(readings) > limit_arg:
+            readings = readings[-limit_arg:]
     
     output = []
     for r in readings:
@@ -566,10 +574,162 @@ def get_master_data():
             'humidity': r.humidity,
             'timestamp': iso_timestamp,  # <--- این متغیر کلیدی است
             'nbcm_statuses': nbcm_map,
-            'date': r.date
+            'date': r.date,
+            'time': r.time,
+            'node_id': (r.node_id or 1) if hasattr(r, 'node_id') else 1
         })
 
     return jsonify(output)
+
+# =====================================================================
+#  API اپ اندروید — Store & Forward (ذخیره آفلاین در گوشی + ارسال بعداً)
+# =====================================================================
+def _ensure_android_schema():
+    """مهاجرت نرم: افزودن ستون node_id به جدول‌های موجود (در صورت نبود)."""
+    try:
+        from sqlalchemy import text
+        with app.app_context():
+            with db.engine.begin() as conn:
+                cols = [row[1] for row in conn.execute(text("PRAGMA table_info(MasterReading)"))]
+                if 'node_id' not in cols:
+                    conn.execute(text("ALTER TABLE MasterReading ADD COLUMN node_id INTEGER DEFAULT 1"))
+                    print("[MIGRATE] node_id added to MasterReading")
+    except Exception as e:
+        print(f"[MIGRATE_WARN] {e}")
+
+@app.route('/api/ingest', methods=['POST'])
+def api_ingest():
+    """دریافت بچ خوانش‌های اپ اندروید (پس از اتصال مجدد وای‌فای)."""
+    try:
+        payload = request.get_json(silent=True) or {}
+        items = payload.get('readings') or []
+        if not isinstance(items, list):
+            return jsonify({'status': 'error', 'message': 'readings must be a list'}), 400
+        items = items[:1000]
+
+        accepted = duplicates = errors = 0
+        now_tehran = datetime.datetime.now(TEHRAN_TZ)
+
+        for it in items:
+            try:
+                node_id = int(it.get('node_id') or 1)
+                if node_id < 1:
+                    node_id = 1
+                elif node_id > 2:
+                    node_id = 2
+                num_value = int(it.get('num_value') or 0)
+                temp_f = float(it.get('temp'))
+                hum_f = float(it.get('humidity'))
+                date_s = str(it.get('date') or '')
+                time_s = str(it.get('time') or '')
+                mask = int(it.get('nbcm_mask') or 0)
+
+                try:
+                    real_ts = datetime.datetime.strptime(f"{date_s} {time_s}", '%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    real_ts = now_tehran.replace(tzinfo=None)
+                    date_s = real_ts.strftime('%Y-%m-%d')
+                    time_s = real_ts.strftime('%H:%M:%S')
+
+                temp_s = str(round(max(-100.0, min(155.0, temp_f)), 1))
+                hum_s = str(round(max(0.0, min(100.0, hum_f)), 1))
+
+                # جلوگیری از ثبت تکراری (ارسال چندباره پس از آفلاین)
+                exists = MasterReading.query.filter(
+                    MasterReading.date == date_s,
+                    MasterReading.time == time_s,
+                    MasterReading.num_value == num_value,
+                    MasterReading.temp == temp_s,
+                    MasterReading.humidity == hum_s
+                ).first()
+                if exists is not None:
+                    if getattr(exists, 'node_id', None) in (None, 0):
+                        exists.node_id = node_id
+                        db.session.commit()
+                    duplicates += 1
+                    continue
+
+                nbcm_parts = [
+                    f'NBCM{i + 1}' for i in range(4) if (mask & (1 << i))
+                ]
+                entry = MasterReading(
+                    num_value=num_value,
+                    nbcm_selected=','.join(nbcm_parts),
+                    humidity=hum_s,
+                    temp=temp_s,
+                    time=time_s,
+                    date=date_s,
+                    timestamp=real_ts,
+                    formatted_log=f"NUM:{num_value}, H:{hum_s}, T:{temp_s}",
+                    node_id=node_id
+                )
+                db.session.add(entry)
+                accepted += 1
+
+                # همگام با دیتابیس روزانه موجود
+                daily_path = f"{date_s}.db"
+                with sqlite3.connect(daily_path) as conn:
+                    c = conn.cursor()
+                    c.execute('''CREATE TABLE IF NOT EXISTS daily_records (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                num_value INTEGER,
+                                nbcm_selected TEXT,
+                                temp TEXT,
+                                humidity TEXT,
+                                log_date TEXT,
+                                log_time TEXT,
+                                full_timestamp DATETIME
+                            )''')
+                    c.execute(
+                        '''INSERT INTO daily_records
+                           (num_value, nbcm_selected, temp, humidity, log_date, log_time, full_timestamp)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                        (num_value, ','.join(nbcm_parts), temp_s, hum_s, date_s, time_s, real_ts)
+                    )
+                    conn.commit()
+
+                if len(db.session.new) >= 200:
+                    db.session.commit()
+            except Exception:
+                errors += 1
+                try:
+                    db.session.rollback()
+                except Exception:
+                    pass
+
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+        return jsonify({'status': 'ok', 'accepted': accepted, 'duplicates': duplicates, 'errors': errors})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/app_health', methods=['GET'])
+def api_app_health():
+    """بررسی اتصال اپ اندروید به سرور."""
+    try:
+        total = MasterReading.query.count()
+        now = datetime.datetime.now(TEHRAN_TZ)
+        return jsonify({
+            'status': 'ok',
+            'records': total,
+            'time': now.strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# مهاجرت نرم هنگام اجرای اپ (flask run یا python app.py)
+try:
+    with app.app_context():
+        try:
+            db.create_all()
+        except Exception:
+            pass
+        _ensure_android_schema()
+except Exception as _mig_err:
+    print(f"[INIT_MIGRATE] {_mig_err}")
 
 @app.route('/api/serial_ports')
 def list_serial_ports():
@@ -689,6 +849,7 @@ def parse_nbcm(nbcm_str):
 if __name__ == '__main__':
     with app.app_context():
         db.create_all() 
+        _ensure_android_schema()
     
     stop_event.clear()
     serial_thread = threading.Thread(target=read_serial_worker, daemon=True)

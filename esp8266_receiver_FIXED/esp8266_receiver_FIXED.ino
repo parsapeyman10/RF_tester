@@ -54,6 +54,8 @@ WiFiClient currentClient;
 
 bool isClientConnected = false;
 unsigned long lastClientActivity = 0;
+bool lastLineWasEvt = false;
+char lastEvtLine[160];
 
 // پروتوتایپ توابع
 void initAccessPoint();
@@ -193,17 +195,27 @@ bool strToBool(const char* str) {
 }
 
 bool parseData(char* inputBuffer) {
+  // رویداد سوییچ: EVT,CH=...,STATE=...,Date=...,Time=...
+  // ACK می‌دهیم و خط خام را برای Flask نگه می‌داریم
+  if (strncmp(inputBuffer, "EVT,", 4) == 0) {
+    lastLineWasEvt = true;
+    strncpy(lastEvtLine, inputBuffer, sizeof(lastEvtLine) - 1);
+    lastEvtLine[sizeof(lastEvtLine) - 1] = '\0';
+    return true;
+  }
+
   char bcm1[10], bcm2[10], bcm3[10], bcm4[10];
   char tStr[15], hStr[15];
   int num, yr, mon, day, hr, min, sec;
 
   // تطابق کامل با فرمت snprintf ارسالی شما
-  int itemsParsed = sscanf(inputBuffer, 
+  int itemsParsed = sscanf(inputBuffer,
     "NUM=%d,NBCM1=%9[^,],NBCM2=%9[^,],NBCM3=%9[^,],NBCM4=%9[^,],Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d",
     &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec
   );
 
   if (itemsParsed == 13) {
+    lastLineWasEvt = false;
     WData.NUM = num;
     WData.NBCM1 = strToBool(bcm1);
     WData.NBCM2 = strToBool(bcm2);
@@ -228,6 +240,11 @@ bool parseData(char* inputBuffer) {
 // سازگار است.
 // =====================================================================
 void sendDataToComputer() {
+  if (lastLineWasEvt) {
+    // عبور خط رویداد به Flask همان‌طور که آمد
+    Serial.println(lastEvtLine);
+    return;
+  }
   Serial.printf(
     "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d\n",
     WData.NUM,

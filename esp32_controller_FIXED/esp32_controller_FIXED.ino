@@ -8,6 +8,7 @@
 #include <Adafruit_SHT31.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <time.h>
 #include "SD.h"
 #include "SPI.h"
 #include "freertos/FreeRTOS.h"
@@ -129,6 +130,9 @@ struct WifiData {
   uint8_t Month, Day, Hour, Minute, Second;
 };
 #pragma pack()
+
+// نمونهٔ RTC — باید قبل از توابع RFE/NTP تعریف شود
+Rtc_Pcf8563 rtc;
 
 // =====================================================================
 //  RFC v2 — ذخیره‌سازی فشرده با «تضمین حفظ زمان»
@@ -304,6 +308,151 @@ static void rfcExpandMask(uint8_t m, WifiData &d) {
   d.NBCM4 = m & 0x08;
 }
 
+// =====================================================================
+//  RFC-E — رویداد لحظه‌ای سوییچ: /data/YYYYMMDD.rfe
+//  هر رویداد 4 بایت (بسته‌بندی بیتی):
+//    sod     17b  ثانیهٔ روز لحظهٔ تغییر (از RTC همان لحظه)
+//    ch       2b  کانال (0=N1 .. 3=N4)
+//    state    1b  وضعیت جدید (0=NOK, 1=OK)
+//    valid    1b  آیا RTC در آن لحظه معتبر بود
+//    rsvd    11b
+//  تاریخ در هدر فایل روز (مثل .rfc)
+// =====================================================================
+#define RFE_REC_SIZE 4
+
+#pragma pack(1)
+struct RfcEventRec {
+  uint32_t packed;
+};
+#pragma pack()
+
+struct RfcEvent {
+  uint16_t sod;
+  uint8_t  ch;      // 0..3
+  uint8_t  state;   // 0/1
+  uint8_t  valid;   // 0/1
+  uint16_t year;
+  uint8_t  month, day;
+};
+
+static void rfePack(const RfcEvent &e, uint8_t out[4]) {
+  uint32_t v = 0;
+  uint16_t sod = (e.sod > 86399) ? 86399 : e.sod;
+  v |= (uint32_t)(sod & 0x1FFFFu);
+  v |= ((uint32_t)(e.ch & 0x3u)) << 17;
+  v |= ((uint32_t)(e.state & 0x1u)) << 19;
+  v |= ((uint32_t)(e.valid & 0x1u)) << 20;
+  for (int i = 0; i < 4; i++) out[i] = (uint8_t)((v >> (8 * i)) & 0xFFu);
+}
+
+// خواندن RTC فعلی به RfcEvent (بدون اعتبارسنجی سخت — caller تصمیم می‌گیرد)
+static void rtcReadEvent(uint8_t ch, uint8_t state, uint8_t valid, RfcEvent &out) {
+  out.year = (uint16_t)(2000 + rtc.getYear());
+  out.month = rtc.getMonth();
+  out.day = rtc.getDay();
+  uint16_t h = rtc.getHour();
+  uint16_t mi = rtc.getMinute();
+  uint16_t s = rtc.getSecond();
+  if (h > 23) h = 23;
+  if (mi > 59) mi = 59;
+  if (s > 59) s = 59;
+  out.sod = (uint16_t)(h * 3600u + mi * 60u + s);
+  out.ch = ch;
+  out.state = state;
+  out.valid = valid;
+}
+
+// ذخیرهٔ یک رویداد در فایل روزانه .rfe (SD قفل باشد یا از TaskEventWriter صدا زده شود)
+static bool saveRfcEvent(const RfcEvent &e) {
+  if (e.year < 2000 || e.month < 1 || e.month > 12 || e.day < 1 || e.day > 31) return false;
+  char path[40];
+  snprintf(path, sizeof(path), "/data/%04u%02u%02u.rfe",
+           (unsigned)e.year, (unsigned)e.month, (unsigned)e.day);
+  if (!SD.exists("/data")) SD.mkdir("/data");
+  if (!SD.exists(path)) {
+    File hf = SD.open(path, FILE_WRITE);
+    if (!hf) return false;
+    RfcHeader hdr;
+    memset(&hdr, 0, sizeof(hdr));
+    hdr.magic = RFC_MAGIC;
+    hdr.version = RFC_VERSION;
+    hdr.rec_size = RFE_REC_SIZE;
+    hdr.first_num = 0;
+    hdr.year = e.year;
+    hdr.month = e.month;
+    hdr.day = e.day;
+    hdr.hour = 0; hdr.minute = 0; hdr.second = 0; hdr._pad = 0;
+    hf.write((const uint8_t *)&hdr, sizeof(hdr));
+    hf.close();
+  }
+  uint8_t buf[4];
+  rfePack(e, buf);
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) return false;
+  size_t w = f.write(buf, 4);
+  f.close();
+  if (w == 4) {
+    DEBUG_PRINTF("[RFE] EVT ch=%u state=%u sod=%u %04u-%02u-%02u\n",
+                 (unsigned)e.ch, (unsigned)e.state, (unsigned)e.sod,
+                 (unsigned)e.year, (unsigned)e.month, (unsigned)e.day);
+    return true;
+  }
+  return false;
+}
+
+// =====================================================================
+//  NTP — همگام‌سازی RTC با اینترنت (هر بار که کلاینت وصل است)
+//  منطقهٔ زمانی ایران: UTC+3:30 بدون DST
+// =====================================================================
+#define TZ_SEC (3 * 3600 + 30 * 60)  // 12600
+#define NTP_SYNC_PERIOD_MS (6UL * 3600UL * 1000UL)  // هر ۶ ساعت
+
+static uint32_t g_lastNtpMs = 0;
+static bool g_ntpEverOk = false;
+
+static bool ntpSyncRtc(uint32_t timeoutMs) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  // TZ env for localtime_r
+  configTime(TZ_SEC, 0, "pool.ntp.org", "time.google.com", "time.nist.gov");
+  uint32_t t0 = millis();
+  time_t now = 0;
+  while ((now = time(nullptr)) < 1700000000L) {  // > 2023
+    if (millis() - t0 > timeoutMs) return false;
+    delay(100);
+  }
+  struct tm tmv;
+  localtime_r(&now, &tmv);
+  int y = tmv.tm_year + 1900;
+  if (y < 2024 || y > 2099) return false;
+  // مقایسه با RTC و اصلاح فقط اگر بیش از ۱ ثانیه اختلاف باشد
+  rtc.formatDate();
+  rtc.formatTime();
+  int ry = 2000 + rtc.getYear();
+  int64_t rtcE = rfcEpoch(ry, rtc.getMonth(), rtc.getDay(),
+                          rtc.getHour(), rtc.getMinute(), rtc.getSecond());
+  int64_t ntpE = rfcEpoch(y, tmv.tm_mon + 1, tmv.tm_mday,
+                          tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  int64_t delta = ntpE - rtcE;
+  if (delta > 1 || delta < -1) {
+    rtc.setDate((byte)tmv.tm_mday, 0, (byte)(tmv.tm_mon + 1), 0, (byte)(y % 100));
+    rtc.setTime((byte)tmv.tm_hour, (byte)tmv.tm_min, (byte)tmv.tm_sec);
+    DEBUG_PRINTF("[NTP] RTC corrected by %lld s → %04d-%02d-%02d %02d:%02d:%02d\n",
+                 (long long)delta, y, tmv.tm_mon + 1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  } else {
+    DEBUG_PRINTLN("[NTP] RTC already within 1s of NTP.");
+  }
+  g_lastNtpMs = millis();
+  g_ntpEverOk = true;
+  return true;
+}
+
+static void ntpMaybeSync() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (g_lastNtpMs != 0 && (millis() - g_lastNtpMs) < NTP_SYNC_PERIOD_MS) return;
+  ntpSyncRtc(8000);
+}
+
 enum WiFiOperationMode {
   MODE_CLIENT_UPLOAD = 0,  // حالت نرمال: اتصال به مودم و آپلود
   MODE_HOTSPOT_VIEW = 1    // حالت دیباگ: هات‌اسپات و نمایش دیتا
@@ -311,6 +460,7 @@ enum WiFiOperationMode {
 
 // --- FreeRTOS Handles ---
 QueueHandle_t xDataQueue;
+QueueHandle_t xEventQueue;   // صف رویدادهای سوییچ (نوشتن غیرمسدودکننده)
 SemaphoreHandle_t xSDMutex;
 SemaphoreHandle_t xGlobalStateMutex;  // ADDED: Mutex for global state protection
 EventGroupHandle_t xDoorEvents;
@@ -321,7 +471,6 @@ EventGroupHandle_t xDoorEvents;
 const int inputPins[] = { 13, 15, 16, 17 };
 
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
-Rtc_Pcf8563 rtc;
 WiFiClient client;
 const int configPort = 81;
 const int serverPort = 80;
@@ -363,11 +512,17 @@ void saveToSD(const WifiData &data);
 int getNextPersistentID();
 void saveNextPersistentID(int id);
 int rfcScanLastNum();
+void TaskEventWriter(void *pvParameters);
 void TaskRelayControl(void *pvParameters);
 void TaskReadSHT(void *pvParameters);
 void TaskDigitalRead(void *pvParameters);
 void TaskInternalWiFiConnection(void *pvParameters);
+static void noteNbcmChange(uint8_t ch, bool newState);
+static void enqueueNbcmEdge(uint8_t ch, bool newState);
+static bool ntpSyncRtc(uint32_t timeoutMs);
+static void ntpMaybeSync();
 bool uploadRfcToServer(const String &fPath);
+bool uploadRfeToServer(const String &fPath);
 bool uploadLegacyDatToServer(const String &fPath, File &file);
 void sendLastRecordOnly(WiFiClient &cl, String filePath);
 
@@ -381,6 +536,7 @@ void setup() {
   WiFi.setAutoReconnect(true);
 
   xDataQueue = xQueueCreate(20, sizeof(WifiData));
+  xEventQueue = xQueueCreate(64, sizeof(RfcEvent));
   xSDMutex = xSemaphoreCreateMutex();
   xGlobalStateMutex = xSemaphoreCreateMutex();  // ADDED: Init global mutex
   xDoorEvents = xEventGroupCreate();
@@ -441,6 +597,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskDigitalRead, "DigiRead", 4096, NULL, 6, NULL, 1);
   xTaskCreatePinnedToCore(TaskRelayControl, "RelayCtrl", 4096, NULL, 5, NULL, 1);
   xTaskCreatePinnedToCore(TaskReadSHT, "SHTRead", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(TaskEventWriter, "EvtWrite", 4096, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(TaskInternalWiFiConnection, "WiFiConn", 8192, NULL, 2, NULL, 1);
 
   DEBUG_PRINTLN("[DEBUG] All tasks created and pinned to Core 1.");
@@ -482,6 +639,12 @@ void startupNetworkLogic() {
   }
   if (connected) {
     DEBUG_PRINTF("\n[DEBUG] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
+    // همگام‌سازی زمان با NTP بلافاصله پس از اتصال
+    if (ntpSyncRtc(10000)) {
+      DEBUG_PRINTLN("[NTP] Initial sync OK.");
+    } else {
+      DEBUG_PRINTLN("[NTP] Initial sync failed (will retry later).");
+    }
   } else {
     DEBUG_PRINTLN("\n[DEBUG] Connection Failed. Cleaning up stack...");
     WiFi.disconnect(true);
@@ -762,11 +925,15 @@ void TaskRelayControl(void *pvParameters) {
         globalSystemState.NBCM2 = (raw_N2_Open && raw_N2_Close);
       }
 
-      // 4. ارسال به صف (کپی ایمن)
+      bool finalN1 = globalSystemState.NBCM1;
+      bool finalN2 = globalSystemState.NBCM2;
       WifiData dataToSend;
-      // استفاده از memcpy برای کپی بایت‌به‌بایت از متغیر volatile
       memcpy(&dataToSend, (void *)&globalSystemState, sizeof(WifiData));
       xSemaphoreGive(xGlobalStateMutex);
+
+      // رویداد لبه در پایان سیکل (اگر نسبت به آخرین ثبت تغییر کرده باشد)
+      noteNbcmChange(0, finalN1);
+      noteNbcmChange(1, finalN2);
 
       xQueueSend(xDataQueue, (void *)&dataToSend, pdMS_TO_TICKS(100));
     } else {
@@ -840,11 +1007,17 @@ void TaskDigitalRead(void *pvParameters) {
 
     if (xSemaphoreTake(xGlobalStateMutex, pdMS_TO_TICKS(500))) {
       // پر کردن استراکچر نهایی (پیش‌فرض)
-      globalSystemState.NBCM1 = (openSignalConfirmedNBCM1 && closeSignalConfirmedNBCM1);
-      globalSystemState.NBCM2 = (openSignalConfirmedNBCM2 && closeSignalConfirmedNBCM2);
+      bool n1 = (openSignalConfirmedNBCM1 && closeSignalConfirmedNBCM1);
+      bool n2 = (openSignalConfirmedNBCM2 && closeSignalConfirmedNBCM2);
+      globalSystemState.NBCM1 = n1;
+      globalSystemState.NBCM2 = n2;
       globalSystemState.NBCM3 = false;
       globalSystemState.NBCM4 = false;
       xSemaphoreGive(xGlobalStateMutex);
+
+      // ثبت لبهٔ سوییچ با زمان لحظه‌ای RTC (بلافاصله پس از تغییر)
+      noteNbcmChange(0, n1);
+      noteNbcmChange(1, n2);
     }
 
     DEBUG_PRINTLN("[DIGI-READ] Global Flags Updated.");
@@ -972,7 +1145,26 @@ void TaskReadSHT(void *pvParameters) {
         last_Minute = rtc.getMinute();
         last_Second = rtc.getSecond();
       } else {
-        DEBUG_PRINTLN("[SHT-TASK] RTC Noise detected. Using History.");
+        DEBUG_PRINTLN("[SHT-TASK] RTC Noise detected. Advancing history by interval.");
+        // به‌جای فریز‌شدن روی زمان قدیمی، زمان تاریخی را ۱۲۰ ثانیه جلو ببر
+        // (اینتروال سیکل رله) تا رکوردها بی‌زمان تکرار نشوند
+        int tot = (int)last_Hour * 3600 + (int)last_Minute * 60 + (int)last_Second + 120;
+        int dayAdd = 0;
+        if (tot >= 86400) { tot -= 86400; dayAdd = 1; }
+        last_Hour = (uint8_t)(tot / 3600);
+        last_Minute = (uint8_t)((tot % 3600) / 60);
+        last_Second = (uint8_t)(tot % 60);
+        if (dayAdd) {
+          // افزودن یک روز ساده با اعتبارسنجی ماه
+          int mdays[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+          last_Day++;
+          int mi = last_Month; if (mi < 1) mi = 1; if (mi > 12) mi = 12;
+          if (last_Day > mdays[mi - 1]) {
+            last_Day = 1;
+            last_Month++;
+            if (last_Month > 12) { last_Month = 1; last_Year++; }
+          }
+        }
         globalSystemState.Year = 2000 + last_Year;
         globalSystemState.Month = last_Month;
         globalSystemState.Day = last_Day;
@@ -1112,6 +1304,7 @@ void sendLastRecordOnly(WiFiClient &cl, String filePath) {
 }
 
 // آپلود فایل فشرده به سرور (هر رکورد یک خط NUM=؛ حذف فقط پس از ACK کامل)
+// (uploadRfeToServer در بالای همین بلوک تعریف شده)
 bool uploadRfcToServer(const String &fPath) {
   File file = SD.open(fPath, FILE_READ);
   if (!file) return false;
@@ -1174,6 +1367,124 @@ bool uploadRfcToServer(const String &fPath) {
   if (allAck && any) {
     SD.remove(fPath);
     DEBUG_PRINTLN("[CLIENT] RFC file fully ACKed. Deleted.");
+  }
+  return allAck && any;
+}
+
+// تسک نویسندهٔ رویداد: غیرمسدودکننده برای وظایف دیگر
+void TaskEventWriter(void *pvParameters) {
+  RfcEvent ev;
+  for (;;) {
+    if (xQueueReceive(xEventQueue, &ev, portMAX_DELAY) == pdPASS) {
+      if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
+        saveRfcEvent(ev);
+        xSemaphoreGive(xSDMutex);
+      } else {
+        // در بدترین حالت دوباره تلاش کن — دیتا نباید گم شود
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(5000))) {
+          saveRfcEvent(ev);
+          xSemaphoreGive(xSDMutex);
+        } else {
+          DEBUG_PRINTLN("[RFE] Critical: event write deferred failed!");
+          xQueueSendToFront(xEventQueue, &ev, 0);  // try again later
+          vTaskDelay(pdMS_TO_TICKS(200));
+        }
+      }
+    }
+  }
+}
+
+// ثبت لبهٔ تغییر NBCM با زمان لحظه‌ای RTC (غیرمسدودکننده)
+static void enqueueNbcmEdge(uint8_t ch, bool newState) {
+  if (!xEventQueue) return;
+  RfcEvent ev;
+  // اعتبار RTC در همان لحظه
+  int ry = rtc.getYear();
+  int rmo = rtc.getMonth();
+  int rd = rtc.getDay();
+  uint8_t valid = ((ry >= 24) && (rmo >= 1) && (rmo <= 12) && (rd >= 1) && (rd <= 31)) ? 1 : 0;
+  rtcReadEvent(ch, newState ? 1 : 0, valid, ev);
+  if (xQueueSend(xEventQueue, &ev, pdMS_TO_TICKS(20)) != pdPASS) {
+    DEBUG_PRINTLN("[RFE] Queue full — event dropped (should not happen).");
+  }
+}
+
+// مقایسه با وضعیت قبلی و ارسال رویداد فقط هنگام تغییر
+static void noteNbcmChange(uint8_t ch, bool newState) {
+  static bool inited = false;
+  static bool prev1 = false, prev2 = false, prev3 = false, prev4 = false;
+  bool *prev = nullptr;
+  switch (ch) {
+    case 0: prev = &prev1; break;
+    case 1: prev = &prev2; break;
+    case 2: prev = &prev3; break;
+    case 3: prev = &prev4; break;
+    default: return;
+  }
+  if (!inited) {
+    // اولین نمونه‌برداری: مقدار اولیه را فقط ذخیره کن (رویداد false→false لازم نیست)
+    *prev = newState;
+    inited = true;
+    return;
+  }
+  if (*prev != newState) {
+    *prev = newState;
+    enqueueNbcmEdge(ch, newState);
+  }
+}
+
+// آپلود فایل رویداد (.rfe) — هر رویداد یک خط؛ حذف فقط پس از ACK
+bool uploadRfeToServer(const String &fPath) {
+  File file = SD.open(fPath, FILE_READ);
+  if (!file) return false;
+
+  RfcHeader hdr;
+  if (file.read((uint8_t *)&hdr, sizeof(hdr)) != sizeof(hdr) || hdr.magic != RFC_MAGIC) {
+    file.close();
+    return false;
+  }
+
+  if (!client.connect(serverIP, serverPort)) {
+    file.close();
+    return false;
+  }
+
+  bool allAck = true;
+  bool any = false;
+  uint8_t b[4];
+  while (file.read(b, 4) == 4) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= ((uint32_t)b[i]) << (8 * i);
+    uint16_t sod = (uint16_t)(v & 0x1FFFFu);
+    uint8_t ch = (uint8_t)((v >> 17) & 0x3u);
+    uint8_t st = (uint8_t)((v >> 19) & 0x1u);
+    if (sod > 86399) continue;
+    any = true;
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "EVT,CH=%u,STATE=%s,Date=%04u-%02u-%02u,Time=%02u:%02u:%02u",
+             (unsigned)(ch + 1), st ? "OK" : "NOK",
+             (unsigned)hdr.year, (unsigned)hdr.month, (unsigned)hdr.day,
+             (unsigned)(sod / 3600), (unsigned)((sod % 3600) / 60), (unsigned)(sod % 60));
+    client.println(buf);
+    unsigned long t = millis();
+    bool ack = false;
+    while (millis() - t < 3000) {
+      if (client.available() && client.readStringUntil('\n').indexOf("OK") != -1) {
+        ack = true;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    if (!ack) { allAck = false; break; }
+  }
+
+  file.close();
+  client.stop();
+  if (allAck && any) {
+    SD.remove(fPath);
+    DEBUG_PRINTLN("[CLIENT] RFE file fully ACKed. Deleted.");
   }
   return allAck && any;
 }
@@ -1356,6 +1667,11 @@ void TaskInternalWiFiConnection(void *pvParameters) {
             }
           }
 
+          // ج) همگام‌سازی دوره‌ای زمان (NTP → RTC)
+          if (WiFi.status() == WL_CONNECTED) {
+            ntpMaybeSync();
+          }
+
           // ب) آپلود و حذف (Store and Forward) — اولویت با فایل‌های فشرده روزانه
           if (WiFi.status() == WL_CONNECTED) {
             if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(50))) {
@@ -1370,6 +1686,8 @@ void TaskInternalWiFiConnection(void *pvParameters) {
                   if (fPath.endsWith(".rfc")) {
                     // فایل فشرده روزانه: همه رکوردها روی یک اتصال، سپس حذف
                     uploadRfcToServer(fPath);
+                  } else if (fPath.endsWith(".rfe")) {
+                    uploadRfeToServer(fPath);
                   } else if (fPath.endsWith(".dat")) {
                     File lf = SD.open(fPath, FILE_READ);
                     if (lf) {

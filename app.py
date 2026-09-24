@@ -50,6 +50,18 @@ class MasterReading(db.Model):
     # شناسه نود/محصول (1 یا 2) — برای اپ اندروید دو محصول نود بدنه
     node_id = db.Column(db.Integer, nullable=True, index=True)
     
+class SwitchEvent(db.Model):
+    """رویداد لحظه‌ای سوییچ NBCM (از فایل .rfe) — زمان دقیق تغییر وضعیت."""
+    id = db.Column(db.Integer, primary_key=True)
+    channel = db.Column(db.Integer, nullable=False)   # 1..4 → NBCM
+    state = db.Column(db.Integer, nullable=False)      # 0=NOK, 1=OK
+    time = db.Column(db.String(50), nullable=True)
+    date = db.Column(db.String(50), nullable=True)
+    timestamp = db.Column(db.DateTime, nullable=False, index=True)
+    time_valid = db.Column(db.Integer, default=1)
+    node_id = db.Column(db.Integer, default=1)
+    num_value = db.Column(db.Integer, nullable=True)   # آخرین NUM شناخته‌شده (اختیاری)
+
 class DailyRecordAdapter:
     def __init__(self, row):
         # row ساختاری است که از کوئری SELECT برمی‌گردد
@@ -261,10 +273,40 @@ def read_serial_worker():
                     raw = ser.readline().decode('utf-8', errors='ignore').strip()
                     if not raw: continue
                     print(f"[RX_RAW] {raw}")
-                    if "NUM=" in raw: 
+                    if "NUM=" in raw:
                         payload = parse_industrial_line(raw)
                         if payload:
                             with app.app_context(): save_sensor_data(payload)
+                    elif "EVT," in raw:
+                        evt = parse_evt_line(raw)
+                        if evt:
+                            with app.app_context():
+                                try:
+                                    real_ts = datetime.datetime.strptime(
+                                        f"{evt['date']} {evt['time']}", '%Y-%m-%d %H:%M:%S')
+                                except Exception:
+                                    real_ts = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+                                exists = SwitchEvent.query.filter(
+                                    SwitchEvent.date == evt['date'],
+                                    SwitchEvent.time == evt['time'],
+                                    SwitchEvent.channel == evt['channel'],
+                                    SwitchEvent.state == evt['state']
+                                ).first()
+                                if exists is None:
+                                    last = MasterReading.query.order_by(MasterReading.id.desc()).limit(1).first()
+                                    db.session.add(SwitchEvent(
+                                        channel=evt['channel'],
+                                        state=evt['state'],
+                                        time=evt['time'],
+                                        date=evt['date'],
+                                        timestamp=real_ts,
+                                        time_valid=1,
+                                        node_id=1,
+                                        num_value=last.num_value if last else None,
+                                    ))
+                                    db.session.commit()
+                                else:
+                                    print(f"[EVT] duplicate skipped: {evt}")
                 except Exception as read_err:
                     print(f"[READ_ERR] {read_err}")
             time.sleep(0.01)
@@ -381,6 +423,52 @@ def parse_rfc_bytes(file_bytes):
         })
     return out
 
+# ---- رویداد سوییچ لحظه‌ای (.rfe) — 4 بایت/رویداد ----
+# sod:17 | ch:2 | state:1 | valid:1 | rsvd:11
+RFE_REC_SIZE = 4
+
+def _rfe_unpack(buf: bytes):
+    v = int.from_bytes(buf[:4], 'little')
+    sod = v & 0x1FFFF
+    ch = (v >> 17) & 0x3
+    state = (v >> 19) & 0x1
+    valid = (v >> 20) & 0x1
+    return sod, ch, state, valid
+
+def parse_rfe_bytes(file_bytes):
+    """فایل رویداد سوییچ روزانه → لیست dict با زمان دقیق لحظه تغییر."""
+    out = []
+    if not file_bytes or len(file_bytes) < RFC_HEADER_SIZE:
+        return out
+    (magic, ver, rec_size, _first,
+     year, month, day, _h, _mi, _s, _pad) = struct.unpack_from(RFC_HEADER_FMT, file_bytes, 0)
+    if magic != RFC_MAGIC:
+        return out
+    base = _rfc_epoch_to_dt(year, month, day, 0, 0, 0)
+    if base is None:
+        base = datetime.datetime.now(TEHRAN_TZ).replace(tzinfo=None)
+    day0 = base.date()
+    off = RFC_HEADER_SIZE
+    total = len(file_bytes)
+    while off + RFE_REC_SIZE <= total:
+        sod, ch, state, valid = _rfe_unpack(file_bytes[off:off + 4])
+        off += RFE_REC_SIZE
+        if sod > 86399:
+            continue
+        dt = datetime.datetime(
+            day0.year, day0.month, day0.day,
+            sod // 3600, (sod % 3600) // 60, sod % 60
+        )
+        out.append({
+            'channel': ch + 1,
+            'state': int(state),
+            'time_valid': bool(valid),
+            'date': dt.strftime('%Y-%m-%d'),
+            'time': dt.strftime('%H:%M:%S'),
+            'sensor_dt': dt,
+        })
+    return out
+
 
 # --- نسخه نهایی اصلاح شده: تفکیک زمان ثبت و زمان سنسور ---
 @app.route('/upload_dat', methods=['GET', 'POST'])
@@ -396,13 +484,12 @@ def upload_dat_page():
         
         success_count = 0
         fail_count = 0
-        
-        upload_time_server = datetime.datetime.now(TEHRAN_TZ)
 
+        upload_time_server = datetime.datetime.now(TEHRAN_TZ)
         for file in uploaded_files:
             filename = secure_filename(file.filename)
             fl = filename.lower()
-            if not (fl.endswith('.dat') or fl.endswith('.rfc')):
+            if not (fl.endswith('.dat') or fl.endswith('.rfc') or fl.endswith('.rfe')):
                 continue
             
             try:
@@ -440,6 +527,42 @@ def upload_dat_page():
                         daily_buffer_map[device_date_str].append(
                             (num_val, nbcm_str, temp_str, hum_str, device_date_str, device_time_str, sensor_dt)
                         )
+                        success_count += 1
+                    continue
+
+                # ---------- رویداد سوییچ (.rfe) ----------
+                if fl.endswith('.rfe'):
+                    evs = parse_rfe_bytes(file_bytes)
+                    if not evs:
+                        fail_count += 1
+                        continue
+                    last_num = MasterReading.query.order_by(MasterReading.id.desc()).limit(1).first()
+                    last_num_v = last_num.num_value if last_num else None
+                    for ev in evs:
+                        try:
+                            real_ts = datetime.datetime.strptime(
+                                f"{ev['date']} {ev['time']}", '%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            real_ts = upload_time_server.replace(tzinfo=None)
+                        exists_ev = SwitchEvent.query.filter(
+                            SwitchEvent.date == ev['date'],
+                            SwitchEvent.time == ev['time'],
+                            SwitchEvent.channel == ev['channel'],
+                            SwitchEvent.state == ev['state']
+                        ).first()
+                        if exists_ev is not None:
+                            success_count += 1
+                            continue
+                        db.session.add(SwitchEvent(
+                            channel=ev['channel'],
+                            state=ev['state'],
+                            time=ev['time'],
+                            date=ev['date'],
+                            timestamp=real_ts,
+                            time_valid=1 if ev.get('time_valid') else 0,
+                            node_id=1,
+                            num_value=last_num_v,
+                        ))
                         success_count += 1
                     continue
 
@@ -528,9 +651,10 @@ def upload_dat_page():
                 print(f"[Batch Err] {filename}: {e}")
                 fail_count += 1
 
-        if success_count > 0:
+        if success_count > 0 or db.session.new:
             try:
-                db.session.bulk_save_objects(master_buffer)
+                if master_buffer:
+                    db.session.bulk_save_objects(master_buffer)
                 db.session.commit()
                 
                 for log_date, records in daily_buffer_map.items():
@@ -846,6 +970,34 @@ def api_ingest():
         return jsonify({'status': 'ok', 'accepted': accepted, 'duplicates': duplicates, 'errors': errors})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+def parse_evt_line(line: str):
+    """پارس خط رویداد سوییچ از سریال/شبکه: EVT,CH=1,STATE=OK,Date=...,Time=..."""
+    try:
+        if 'EVT' not in line:
+            return None
+        parts = {}
+        for p in line.strip().split(','):
+            if '=' in p:
+                k, v = p.split('=', 1)
+                parts[k.strip()] = v.strip()
+        ch = int(parts.get('CH', '0') or 0)
+        if ch < 1:
+            return None
+        state_raw = parts.get('STATE', 'NOK')
+        state = 1 if str(state_raw).upper() in ('OK', '1', 'TRUE') else 0
+        date_s = parts.get('Date', '')
+        time_s = parts.get('Time', '')
+        if not date_s or not time_s:
+            return None
+        return {
+            'channel': min(4, max(1, ch)),
+            'state': state,
+            'date': date_s,
+            'time': time_s,
+        }
+    except Exception:
+        return None
 
 @app.route('/api/app_health', methods=['GET'])
 def api_app_health():

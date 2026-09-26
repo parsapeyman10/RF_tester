@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ESP32 فقط HTTP/TCP خام و بدون TLS صحبت می‌کند؛ اجازه‌ی cleartext را
+     تنها برای شبکه‌های محلی دستگاه می‌دهیم، نه برای کل اینترنت. -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.1.1</domain>
+        <domain includeSubdomains="false">192.168.4.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

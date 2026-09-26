@@ -1,0 +1,116 @@
+name: Firmware & Server CI
+
+# ---------------------------------------------------------------------------
+# این ورک‌فلو چیزی است که این ریپو واقعاً به آن نیاز دارد:
+#   1) کامپایل فریمور ESP32 (کنترلر صنعتی)
+#   2) کامپایل فریمور ESP8266 (گیرنده / اکسس‌پوینت)
+#   3) چک سلامت سرور Flask (app.py)
+#   4) یک تست سازگاری پروتکل: فرمت خط سریال ESP8266 باید دقیقاً با
+#      parse_industrial_line در app.py و با sscanf سمت گیرنده جور باشد.
+#
+# خروجی باینری‌ها (bin/elf) به عنوان artifact آپلود می‌شود تا برای
+# فلش کردن روی برد قابل دانلود باشد.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "android/**"
+      - "test/**"
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "android/**"
+      - "test/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware:
+    name: Compile ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ESP32 controller
+            sketch: esp32_controller_FIXED
+            fqbn: esp32:esp32:esp32
+            platform: esp32:esp32@3.1.1
+            url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+            libraries: '"Adafruit SHT31 Library" "Adafruit BusIO" "Adafruit Unified Sensor"'
+          - name: ESP8266 receiver
+            sketch: esp8266_receiver_FIXED
+            fqbn: esp8266:esp8266:nodemcuv2
+            platform: esp8266:esp8266@3.1.2
+            url: https://arduino.esp8266.com/stable/package_esp8266com_index.json
+            libraries: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install core & libraries
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls ${{ matrix.url }}
+          arduino-cli core update-index
+          arduino-cli core install ${{ matrix.platform }}
+          if [ -n '${{ matrix.libraries }}' ]; then
+            eval arduino-cli lib install ${{ matrix.libraries }}
+          fi
+
+      - name: Compile sketch
+        run: |
+          arduino-cli compile \
+            --fqbn ${{ matrix.fqbn }} \
+            --warnings default \
+            --output-dir "build/${{ matrix.sketch }}" \
+            "${{ matrix.sketch }}"
+
+      - name: Upload firmware binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ matrix.sketch }}
+          path: build/${{ matrix.sketch }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  server:
+    name: Flask server checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install flask flask_sqlalchemy pyserial pytz flake8
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Syntax check (py_compile)
+        run: python -m py_compile app.py test/lab_web_server/app_FIXED.py
+
+      - name: Lint (errors only)
+        run: flake8 app.py --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Protocol compatibility test
+        run: python .github/scripts/test_protocol.py

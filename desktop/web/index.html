@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0b1220" />
+<title>RF Tester — کلاینت ESP32</title>
+<style>
+  :root{
+    --bg:#0b1220; --panel:#131c2e; --panel2:#0f1726; --line:#22304a;
+    --txt:#e8eefc; --muted:#8fa3c4; --ok:#22c55e; --nok:#ef4444;
+    --accent:#3b82f6; --accent2:#22d3ee;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#17263f 0%,var(--bg) 55%);
+       color:var(--txt);font-family:"Segoe UI",Tahoma,system-ui,sans-serif;min-height:100vh}
+  header{display:flex;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line);
+         background:rgba(11,18,32,.75);backdrop-filter:blur(8px);position:sticky;top:0;z-index:5}
+  .logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+        display:grid;place-items:center;font-weight:700}
+  h1{font-size:17px;margin:0}
+  header small{color:var(--muted);font-size:12px}
+  .wrap{max-width:1050px;margin:0 auto;padding:20px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+        border-radius:16px;padding:16px;margin-bottom:16px}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  input{background:#0a1120;border:1px solid var(--line);color:var(--txt);border-radius:10px;
+        padding:10px 12px;font-size:14px;outline:none;min-width:120px}
+  input:focus{border-color:var(--accent)}
+  button{border:0;border-radius:10px;padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer;
+         color:#06101f;background:linear-gradient(135deg,var(--accent),var(--accent2));transition:.15s}
+  button:hover{filter:brightness(1.1)} button:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+  .status{margin-top:12px;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .dot{width:9px;height:9px;border-radius:50%;background:#64748b}
+  .dot.busy{background:#f59e0b;animation:p 1s infinite} .dot.ok{background:var(--ok)} .dot.err{background:var(--nok)}
+  @keyframes p{50%{opacity:.25}}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+  .rec{background:#0d1424;border:1px solid var(--line);border-radius:14px;padding:14px;position:relative;overflow:hidden}
+  .rec:before{content:"";position:absolute;inset-inline-start:0;top:0;bottom:0;width:3px;background:var(--accent)}
+  .rec.bad:before{background:var(--nok)}
+  .rid{font-weight:700;font-size:15px} .ts{color:var(--muted);font-size:12px;margin-top:2px;direction:ltr;text-align:right}
+  .vals{display:flex;gap:14px;margin:12px 0 10px;font-size:20px;font-weight:700}
+  .vals span small{display:block;font-size:11px;color:var(--muted);font-weight:400}
+  .tags{display:flex;gap:6px;flex-wrap:wrap}
+  .tag{font-size:11px;padding:4px 9px;border-radius:999px;border:1px solid var(--line)}
+  .tag.ok{color:var(--ok);border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.08)}
+  .tag.nok{color:var(--nok);border-color:rgba(239,68,68,.4);background:rgba(239,68,68,.08)}
+  pre{background:#080e1a;border:1px solid var(--line);border-radius:12px;padding:12px;overflow:auto;
+      font-size:12px;color:#9fd3ff;direction:ltr;text-align:left;max-height:220px;margin:0}
+  .muted{color:var(--muted);font-size:12px}
+  details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-bottom:8px}
+  .empty{text-align:center;color:var(--muted);padding:26px 10px;font-size:14px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">RF</div>
+  <div>
+    <h1>RF Tester — کلاینت ESP32</h1>
+    <small>خواندن رکوردهای SD از طریق دستورهای sync / sync10 روی TCP</small>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="host">IP دستگاه</label>
+        <input id="host" value="192.168.1.1" dir="ltr" />
+      </div>
+      <div>
+        <label for="port">پورت</label>
+        <input id="port" value="80" dir="ltr" style="min-width:90px" />
+      </div>
+      <button id="b1">آخرین رکورد (sync)</button>
+      <button id="b10">۱۰ رکورد آخر (sync10)</button>
+      <button id="bcsv" class="ghost">خروجی CSV</button>
+      <button id="bclr" class="ghost">پاک کردن</button>
+    </div>
+    <div class="status"><span id="dot" class="dot"></span><span id="msg">آماده — ابتدا به هات‌اسپات ESP32 وصل شوید.</span></div>
+  </div>
+
+  <div class="card">
+    <div id="cards" class="grid"></div>
+    <div id="empty" class="empty">هنوز داده‌ای گرفته نشده است.</div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>پاسخ خام دستگاه (برای دیباگ)</summary>
+      <pre id="raw">—</pre>
+    </details>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let records = [];
+
+fetch('api/defaults').then(r => r.json()).then(d => {
+  $('host').value = d.host; $('port').value = d.port;
+}).catch(() => {});
+
+function setStatus(text, cls){ $('msg').textContent = text; $('dot').className = 'dot ' + (cls||''); }
+
+function render(){
+  $('empty').style.display = records.length ? 'none' : 'block';
+  $('cards').innerHTML = records.map(r => `
+    <div class="rec ${(r.nbcm1 && r.nbcm2) ? '' : 'bad'}">
+      <div class="rid">رکورد #${r.id}</div>
+      <div class="ts">${r.timestamp || '—'}</div>
+      <div class="vals">
+        <span>${Number(r.temp).toFixed(2)}°<small>دما (C)</small></span>
+        <span>${Number(r.humidity).toFixed(2)}%<small>رطوبت</small></span>
+      </div>
+      <div class="tags">
+        <span class="tag ${r.nbcm1?'ok':'nok'}">NBCM1 ${r.nbcm1?'OK':'NOK'}</span>
+        <span class="tag ${r.nbcm2?'ok':'nok'}">NBCM2 ${r.nbcm2?'OK':'NOK'}</span>
+      </div>
+    </div>`).join('');
+}
+
+async function run(cmd){
+  const btns = document.querySelectorAll('button');
+  btns.forEach(b => b.disabled = true);
+  setStatus('در حال اتصال و ارسال «' + cmd + '»…', 'busy');
+  try{
+    const res = await fetch('api/query', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({host:$('host').value.trim(), port:$('port').value.trim(), cmd})
+    });
+    const data = await res.json();
+    $('raw').textContent = data.raw || data.error || '—';
+    if(!data.ok){ setStatus('خطا: ' + (data.error || 'نامشخص'), 'err'); }
+    else if(!data.records.length){ setStatus(data.note || 'رکوردی برنگشت', 'err'); }
+    else{
+      records = data.records.slice().sort((a,b)=>b.id-a.id);
+      render();
+      setStatus(records.length + ' رکورد دریافت شد.', 'ok');
+    }
+  }catch(e){ setStatus('خطای شبکه: ' + e.message, 'err'); }
+  finally{ btns.forEach(b => b.disabled = false); }
+}
+
+$('b1').onclick  = () => run('sync');
+$('b10').onclick = () => run('sync10');
+$('bclr').onclick = () => { records = []; render(); $('raw').textContent='—'; setStatus('پاک شد.'); };
+$('bcsv').onclick = () => {
+  if(!records.length) return setStatus('چیزی برای خروجی گرفتن نیست.', 'err');
+  const rows = [['ID','Timestamp','Temp','Humidity','NBCM1','NBCM2']]
+    .concat(records.map(r => [r.id, r.timestamp, r.temp, r.humidity, r.nbcm1?'OK':'NOK', r.nbcm2?'OK':'NOK']));
+  const blob = new Blob(['\ufeff' + rows.map(r=>r.join(',')).join('\n')], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'rf_tester_export.csv'; a.click();
+};
+render();
+</script>
+</body>
+</html>

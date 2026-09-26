@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RF Tester</string>
+    <string name="host_hint">آی‌پی دستگاه (مثال: 192.168.1.1)</string>
+    <string name="port_hint">پورت</string>
+    <string name="btn_sync">آخرین رکورد (sync)</string>
+    <string name="btn_sync10">۱۰ رکورد آخر (sync10)</string>
+    <string name="btn_clear">پاک کردن</string>
+    <string name="status_idle">آماده</string>
+    <string name="status_connecting">در حال اتصال…</string>
+    <string name="hint_wifi">ابتدا گوشی را به هات‌اسپات ESP32 وصل کنید.</string>
+</resources>

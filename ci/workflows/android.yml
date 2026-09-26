@@ -1,0 +1,84 @@
+name: Android CI
+
+# ---------------------------------------------------------------------------
+# اپلیکیشن اندروید RF_tester (پوشه android/)
+# این اپ به هات‌اسپات ESP32 وصل می‌شود و با دستورهای متنی sync / sync10
+# روی TCP، آخرین رکورد(های) ذخیره‌شده روی SD کارت را به صورت JSON می‌گیرد.
+#
+# نکته: عمداً از gradlew استفاده نمی‌کنیم تا مجبور نباشیم فایل باینری
+# gradle-wrapper.jar را داخل ریپو نگه داریم؛ خود اکشن Gradle را نصب می‌کند.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test (debug APK)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+
+      - name: Lint (Android Lint)
+        run: gradle --no-daemon lintDebug
+
+      - name: Unit tests
+        run: gradle --no-daemon testDebugUnitTest
+
+      - name: Assemble debug APK
+        run: gradle --no-daemon assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rftester-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload lint & test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-reports
+          path: |
+            android/app/build/reports/**
+            android/app/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7

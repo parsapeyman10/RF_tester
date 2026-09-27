@@ -12,5 +12,7 @@ android/local.properties
 .idea/
 *.iml
 
-# Arduino build output
+# Build output
 build/
+dist/*
+!dist/RFTester.pyz

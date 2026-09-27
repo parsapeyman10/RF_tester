@@ -26,7 +26,46 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import esp_protocol  # noqa: E402
 
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+def _resolve_web_dir() -> str:
+    """
+    مسیر پوشه‌ی web را در هر سه حالت اجرا پیدا می‌کند:
+      1) اجرای معمولی از روی سورس
+      2) باینری PyInstaller (فایل‌ها در sys._MEIPASS)
+      3) بسته‌ی zipapp (.pyz) -> محتوا را در پوشه‌ی موقت باز می‌کند
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and os.path.isdir(os.path.join(meipass, "web")):
+        return os.path.join(meipass, "web")
+
+    if os.path.isdir(os.path.join(here, "web")):
+        return os.path.join(here, "web")
+
+    # داخل zipapp: سورس روی دیسک نیست
+    import tempfile
+    import zipfile
+
+    archive = here
+    while archive and not zipfile.is_zipfile(archive):
+        parent = os.path.dirname(archive)
+        if parent == archive:
+            archive = None
+            break
+        archive = parent
+
+    if archive:
+        out = os.path.join(tempfile.gettempdir(), "rf_tester_web")
+        with zipfile.ZipFile(archive) as zf:
+            for name in zf.namelist():
+                if name.startswith("web/") and not name.endswith("/"):
+                    zf.extract(name, out)
+        return os.path.join(out, "web")
+
+    raise RuntimeError("پوشه‌ی web پیدا نشد")
+
+
+WEB_DIR = _resolve_web_dir()
 DEFAULTS = {"host": "192.168.1.1", "port": 80}
 
 

@@ -90,3 +90,28 @@ python3 desktop/rf_tester_gui.py             # اپ بومی
 python3 desktop/server.py                    # نسخه‌ی مرورگری
 python3 desktop/rf_tester_gui.py --simulate  # دمو بدون سخت‌افزار
 ```
+
+## ۵) بسته‌های آماده (Build)
+
+| خروجی | چطور ساخته می‌شود | نیازمندی کاربر |
+|---|---|---|
+| `dist/RFTester.pyz` | `python -m zipapp desktop -o dist/RFTester.pyz -c` | فقط Python 3.8+ |
+| `RFTester-windows.exe` | ورک‌فلو `Build Apps` روی runner ویندوز (PyInstaller) | هیچی |
+| `RFTester-macos` / `RFTester-linux` | همان ورک‌فلو | هیچی |
+| `RFTester-debug.apk` | همان ورک‌فلو، jobِ `android` | اندروید ۷+ |
+
+اجرای بسته‌ی پرتابل:
+
+```bash
+python RFTester.pyz              # اپ بومی Tkinter
+python RFTester.pyz --web        # UI مرورگری
+python RFTester.pyz --simulate   # دمو بدون سخت‌افزار
+```
+
+ساخت همه‌ی بسته‌ها روی گیت‌هاب:
+
+```bash
+mkdir -p .github/workflows && git mv ci/workflows/*.yml .github/workflows/
+git commit -m "Enable CI" && git push
+gh workflow run "Build Apps"      # یا از تب Actions
+```

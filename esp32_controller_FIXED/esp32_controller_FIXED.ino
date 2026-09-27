@@ -24,6 +24,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <time.h>
+#include <Preferences.h>
 #include "SD.h"
 #include "SPI.h"
 #include "freertos/FreeRTOS.h"
@@ -247,6 +248,12 @@ EventGroupHandle_t xSystemEvents;
 
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 Rtc_Pcf8563 rtc;
+Preferences prefs;  // ذخیره‌ی دائمی تنظیمات وای‌فای در NVS
+
+// تنظیمات وای‌فای که از پورتال گرفته و در حافظه‌ی داخلی ذخیره می‌شوند.
+// مزیت: برای عوض کردن SSID/پسورد دیگر لازم نیست کد را دوباره کامپایل کنید.
+String cfgDataSsid, cfgDataPass;  // اکسس‌پوینت گیرنده‌ی دیتا (ESP8266)
+String cfgTimeSsid, cfgTimePass;  // مودم یا هات‌اسپات گوشی برای گرفتن ساعت
 WiFiClient uploadClient;
 WebServer setupServer(80);
 
@@ -263,11 +270,22 @@ volatile bool portalModeChosen = false;
 volatile bool portalWantsDataView = false;
 
 // Prototypes
+void loadConfig();
+void saveWifiConfig(const String &dSsid, const String &dPass,
+                    const String &tSsid, const String &tPass);
 bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void connectToDataAp(uint32_t timeoutMs);
 void saveToSD(const WifiData &data);
+static String dayFilePath(int y, int m, int d);
+static String posPathOf(const String &datPath);
+static uint32_t readUploadPos(const String &datPath);
+static void writeUploadPos(const String &datPath, uint32_t pos);
+static String baseNameOf(const char *rawName);
+static String pickDayFile(bool oldest);
+static int lastRecordIdOnSD();
+void sendRecord(WiFiClient &cl, const WifiData &d);
 int getNextPersistentID();
 void saveNextPersistentID(int id);
 void TaskRelayControl(void *pv);
@@ -294,6 +312,7 @@ void setup() {
   xGlobalStateMutex = xSemaphoreCreateMutex();
   xSystemEvents = xEventGroupCreate();
 
+  loadConfig();
   rtc.initClock();
 
   // ---------------- SD & شماره‌ی رکورد ----------------
@@ -304,29 +323,12 @@ void setup() {
       DEBUG_PRINTLN("[SD] Card OK.");
       if (!SD.exists("/data")) SD.mkdir("/data");
 
-      int maxFileID = 0;
-      bool filesFound = false;
-      File root = SD.open("/data");
-      if (root) {
-        File f = root.openNextFile();
-        while (f) {
-          String fn = String(f.name());
-          int slash = fn.lastIndexOf('/');
-          if (slash >= 0) fn = fn.substring(slash + 1);
-          int underscore = fn.lastIndexOf('_');
-          if (underscore != -1 && fn.endsWith(".dat")) {
-            filesFound = true;
-            int id = fn.substring(underscore + 1, fn.length() - 4).toInt();
-            if (id > maxFileID) maxFileID = id;
-          }
-          f.close();
-          f = root.openNextFile();
-        }
-        root.close();
-      }
-
+      // مدل ذخیره‌سازی بهینه: به‌جای «یک فایل برای هر رکورد»، هر روز یک فایل
+      // /data/YYYYMMDD.dat که رکوردهای ۲۵ بایتی پشت سر هم به آن append می‌شوند.
+      // آخرین شماره‌ی رکورد = NUM آخرین رکورد جدیدترین فایل.
+      currentGlobalID = lastRecordIdOnSD();
       int lastSaved = getNextPersistentID();
-      currentGlobalID = filesFound ? max(maxFileID, lastSaved) : lastSaved;
+      if (lastSaved > currentGlobalID) currentGlobalID = lastSaved;
       DEBUG_PRINTF("[SD] Resuming from ID %d\n", currentGlobalID);
       saveNextPersistentID(currentGlobalID);
     }
@@ -385,6 +387,41 @@ void loop() {
 // =====================================================================
 //                       TIME: NTP  +  LOCAL PORTAL
 // =====================================================================
+// =====================================================================
+//        تنظیمات وای‌فای در حافظه‌ی داخلی (NVS) — «اتصال آسان»
+//  یک بار از روی پورتال وارد می‌شود و برای همیشه می‌ماند؛ نیازی به
+//  کامپایل دوباره برای عوض کردن SSID یا پسورد نیست.
+// =====================================================================
+void loadConfig() {
+  prefs.begin("rfcfg", true);  // read-only
+  cfgDataSsid = prefs.getString("dssid", DATA_AP_SSID);
+  cfgDataPass = prefs.getString("dpass", DATA_AP_PASS);
+  cfgTimeSsid = prefs.getString("tssid", "");
+  cfgTimePass = prefs.getString("tpass", "");
+  prefs.end();
+
+  DEBUG_PRINTF("[CFG] data-AP='%s'  time-AP='%s'\n",
+               cfgDataSsid.c_str(),
+               cfgTimeSsid.length() ? cfgTimeSsid.c_str() : "(none)");
+}
+
+void saveWifiConfig(const String &dSsid, const String &dPass,
+                    const String &tSsid, const String &tPass) {
+  prefs.begin("rfcfg", false);
+  if (dSsid.length()) {
+    prefs.putString("dssid", dSsid);
+    prefs.putString("dpass", dPass);
+    cfgDataSsid = dSsid;
+    cfgDataPass = dPass;
+  }
+  prefs.putString("tssid", tSsid);
+  prefs.putString("tpass", tPass);
+  cfgTimeSsid = tSsid;
+  cfgTimePass = tPass;
+  prefs.end();
+  DEBUG_PRINTLN("[CFG] WiFi settings saved to NVS.");
+}
+
 bool rtcTimeLooksValid() {
   if (!rtc.read()) return false;
   uint8_t y = rtc.getYear(), mo = rtc.getMonth(), d = rtc.getDay();
@@ -393,15 +430,31 @@ bool rtcTimeLooksValid() {
 
 /** تلاش برای اتصال به شبکه‌های کاربر و گرفتن زمان از NTP */
 bool syncTimeFromNtp() {
-  if (TIME_NETWORK_COUNT == 0) {
-    DEBUG_PRINTLN("[TIME] No time-networks configured, skipping NTP.");
+  // لیست تلاش: اول شبکه‌ای که کاربر از پورتال ذخیره کرده، بعد لیست کامپایلی
+  String ssids[1 + 8];
+  String passes[1 + 8];
+  int n = 0;
+
+  if (cfgTimeSsid.length()) {
+    ssids[n] = cfgTimeSsid;
+    passes[n] = cfgTimePass;
+    n++;
+  }
+  for (int i = 0; i < TIME_NETWORK_COUNT && n < 9; i++) {
+    ssids[n] = String(TIME_NETWORKS[i].ssid);
+    passes[n] = String(TIME_NETWORKS[i].pass);
+    n++;
+  }
+
+  if (n == 0) {
+    DEBUG_PRINTLN("[TIME] No time-network saved; will ask the phone instead.");
     return false;
   }
 
-  for (int i = 0; i < TIME_NETWORK_COUNT; i++) {
-    DEBUG_PRINTF("[TIME] Trying SSID '%s' ...\n", TIME_NETWORKS[i].ssid);
+  for (int i = 0; i < n; i++) {
+    DEBUG_PRINTF("[TIME] Trying SSID '%s' ...\n", ssids[i].c_str());
     WiFi.mode(WIFI_STA);
-    WiFi.begin(TIME_NETWORKS[i].ssid, TIME_NETWORKS[i].pass);
+    WiFi.begin(ssids[i].c_str(), passes[i].c_str());
 
     uint32_t t0 = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - t0 < STA_CONNECT_TIMEOUT_MS) {
@@ -419,7 +472,7 @@ bool syncTimeFromNtp() {
 
     struct tm tmNow;
     bool got = false;
-    for (int k = 0; k < 20; k++) {           // حداکثر ~۱۰ ثانیه
+    for (int k = 0; k < 20; k++) {  // حداکثر ~۱۰ ثانیه
       if (getLocalTime(&tmNow, 500)) {
         got = (tmNow.tm_year + 1900) >= 2024;
         if (got) break;
@@ -465,6 +518,17 @@ input{width:100%;padding:10px;border-radius:8px;border:1px solid #22304a;backgro
 <input id="man" type="datetime-local" step="1">
 <button class="ghost" onclick="sendManual()">ثبت دستی</button></div>
 
+<div class="card"><h2>تنظیم وای‌فای (ذخیره‌ی دائمی)</h2>
+<small>شبکه‌ای که برای گرفتن ساعت (اینترنت) استفاده می‌شود:</small>
+<input id="tssid" placeholder="نام شبکه / SSID">
+<input id="tpass" type="password" placeholder="رمز عبور">
+<small>اکسس‌پوینت گیرنده‌ی دیتا (ESP8266):</small>
+<input id="dssid" placeholder="ESP8266_AP">
+<input id="dpass" type="password" placeholder="12345678">
+<button class="ghost" onclick="saveWifi()">ذخیره در حافظه‌ی دستگاه</button>
+<button class="ghost" onclick="scanWifi()">اسکن شبکه‌های اطراف</button>
+<div id="scan"><small></small></div></div>
+
 <div class="card"><h2>حالت کاری</h2>
 <button onclick="mode(0)">شروع کار عادی (تست رله‌ها)</button>
 <button class="ghost" onclick="mode(1)">حالت نمایش دیتا (بدون تست)</button></div>
@@ -485,7 +549,20 @@ function sendDate(d){fetch('/settime?'+q(d)).then(r=>r.text()).then(t=>{
   document.getElementById('msg').innerHTML='<span class="ok">'+t+'</span>';cur();});}
 function mode(m){fetch('/mode?v='+m).then(r=>r.text()).then(t=>{
   document.getElementById('msg').innerHTML='<span class="ok">'+t+'</span>';});}
-cur(); sendNow();           // ارسال خودکار ساعت گوشی به محض باز شدن صفحه
+function saveWifi(){
+  var q='dssid='+encodeURIComponent(document.getElementById('dssid').value)
+       +'&dpass='+encodeURIComponent(document.getElementById('dpass').value)
+       +'&tssid='+encodeURIComponent(document.getElementById('tssid').value)
+       +'&tpass='+encodeURIComponent(document.getElementById('tpass').value);
+  fetch('/savewifi?'+q).then(r=>r.text()).then(t=>{
+    document.getElementById('msg').innerHTML='<span class="ok">'+t+'</span>';});}
+function scanWifi(){
+  document.getElementById('scan').innerHTML='<small>در حال اسکن…</small>';
+  fetch('/scan').then(r=>r.text()).then(t=>{
+    document.getElementById('scan').innerHTML='<small>'+t+'</small>';});}
+function loadCfg(){fetch('/cfg').then(r=>r.json()).then(c=>{
+  document.getElementById('dssid').value=c.dssid; document.getElementById('tssid').value=c.tssid;});}
+cur(); loadCfg(); sendNow();  // ارسال خودکار ساعت گوشی به محض باز شدن صفحه
 </script></body></html>)HTML";
 
 void handlePortalRoot() {
@@ -520,6 +597,28 @@ void handlePortalSetTime() {
   setupServer.send(200, "text/plain; charset=utf-8", "ساعت ثبت شد");
 }
 
+void handlePortalCfg() {
+  String json = "{\"dssid\":\"" + cfgDataSsid + "\",\"tssid\":\"" + cfgTimeSsid + "\"}";
+  setupServer.send(200, "application/json", json);
+}
+
+void handlePortalSaveWifi() {
+  saveWifiConfig(setupServer.arg("dssid"), setupServer.arg("dpass"),
+                 setupServer.arg("tssid"), setupServer.arg("tpass"));
+  setupServer.send(200, "text/plain; charset=utf-8", "تنظیمات وای‌فای ذخیره شد");
+}
+
+void handlePortalScan() {
+  int n = WiFi.scanNetworks();
+  String out = "";
+  for (int i = 0; i < n && i < 15; i++) {
+    out += WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)<br>";
+  }
+  WiFi.scanDelete();
+  if (!out.length()) out = "شبکه‌ای پیدا نشد";
+  setupServer.send(200, "text/html; charset=utf-8", out);
+}
+
 void handlePortalMode() {
   int m = setupServer.arg("v").toInt();
   portalWantsDataView = (m == 1);
@@ -542,6 +641,9 @@ void runSetupPortal(bool timeAlreadyValid) {
   setupServer.on("/now", handlePortalNow);
   setupServer.on("/settime", handlePortalSetTime);
   setupServer.on("/mode", handlePortalMode);
+  setupServer.on("/cfg", handlePortalCfg);
+  setupServer.on("/savewifi", handlePortalSaveWifi);
+  setupServer.on("/scan", handlePortalScan);
   setupServer.onNotFound(handlePortalRoot);  // Captive-portal-ish
   setupServer.begin();
 
@@ -578,9 +680,9 @@ void runSetupPortal(bool timeAlreadyValid) {
 
 /** اتصال (یا اتصال مجدد) به اکسس‌پوینت گیرنده‌ی دیتا */
 void connectToDataAp(uint32_t timeoutMs) {
-  DEBUG_PRINTF("[NET] Connecting to %s ...\n", DATA_AP_SSID);
+  DEBUG_PRINTF("[NET] Connecting to %s ...\n", cfgDataSsid.c_str());
   WiFi.mode(WIFI_STA);
-  WiFi.begin(DATA_AP_SSID, DATA_AP_PASS);
+  WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
 
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
@@ -893,40 +995,136 @@ void saveNextPersistentID(int id) {
   }
 }
 
-void saveToSD(const WifiData &data) {
-  char filename[40];
-  snprintf(filename, sizeof(filename), "/data/%04d%02d%02d_%d.dat",
-           data.Year, data.Month, data.Day, data.NUM);
-  File f = SD.open(filename, FILE_WRITE);
+// =====================================================================
+//   ذخیره‌سازی بهینه روی SD  (یک فایل در روز، نه یک فایل برای هر رکورد)
+//
+//   چرا؟ روی FAT هر فایل حداقل یک کلاستر (۴ تا ۳۲ کیلوبایت) جا می‌گیرد.
+//   با رکورد ۲۵ بایتی یعنی بیش از ۹۹٪ فضا هدر می‌رفت و پیمایش پوشه هم
+//   با زیاد شدن فایل‌ها به‌شدت کند می‌شد.
+//
+//   ساختار:
+//     /data/YYYYMMDD.dat  -> رکوردهای ۲۵ بایتی پشت سر هم (append)
+//     /data/YYYYMMDD.pos  -> آفست بایتیِ رکورد بعدی که باید آپلود شود
+//
+//   فایلِ .dat دقیقاً همان فرمتی است که صفحه‌ی /upload_dat در app.py
+//   می‌خواند (len % 25 == 0)، پس آپلود دستی هم بدون تغییر کار می‌کند.
+// =====================================================================
+const size_t REC_SIZE = sizeof(WifiData);
+
+static String dayFilePath(int y, int m, int d) {
+  char buf[32];
+  snprintf(buf, sizeof(buf), "/data/%04d%02d%02d.dat", y, m, d);
+  return String(buf);
+}
+
+static String posPathOf(const String &datPath) {
+  return datPath.substring(0, datPath.length() - 4) + ".pos";
+}
+
+static uint32_t readUploadPos(const String &datPath) {
+  String pp = posPathOf(datPath);
+  if (!SD.exists(pp)) return 0;
+  File f = SD.open(pp, FILE_READ);
+  if (!f) return 0;
+  uint32_t v = (uint32_t)f.parseInt();
+  f.close();
+  return v;
+}
+
+static void writeUploadPos(const String &datPath, uint32_t pos) {
+  File f = SD.open(posPathOf(datPath), FILE_WRITE);
   if (f) {
-    f.write((const uint8_t *)&data, sizeof(WifiData));
+    f.print(pos);
     f.close();
-    DEBUG_PRINTF("[SD] Logged %s\n", filename);
-  } else {
-    DEBUG_PRINTLN("[SD] Critical: could not write file!");
   }
 }
 
-/** نام فایل را بدون توجه به نسخه‌ی core به مسیر کامل تبدیل می‌کند */
-static String fullDataPath(const char *rawName) {
+/** فقط نام فایل (بدون مسیر) را برمی‌گرداند؛ مستقل از نسخه‌ی core */
+static String baseNameOf(const char *rawName) {
   String n = String(rawName);
-  if (n.startsWith("/")) return n;
-  return "/data/" + n;
+  int slash = n.lastIndexOf('/');
+  return (slash >= 0) ? n.substring(slash + 1) : n;
 }
 
-void sendDataFile(WiFiClient &cl, const String &filePath) {
-  File f = SD.open(filePath, FILE_READ);
-  if (!f) return;
-  WifiData d;
-  if (f.read((uint8_t *)&d, sizeof(WifiData)) == sizeof(WifiData)) {
-    char buf[220];
-    snprintf(buf, sizeof(buf),
-             "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
-             d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
-             d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
-    cl.println(buf);
+/** قدیمی‌ترین (یا جدیدترین) فایل روزانه‌ی موجود. نام فایل‌ها تاریخی است پس
+    ترتیب الفبایی = ترتیب زمانی. */
+static String pickDayFile(bool oldest) {
+  File root = SD.open("/data");
+  if (!root) return "";
+  String best = "";
+  File e = root.openNextFile();
+  while (e) {
+    String name = baseNameOf(e.name());
+    if (name.endsWith(".dat")) {
+      if (best.length() == 0 ||
+          (oldest ? (name < best) : (name > best))) {
+        best = name;
+      }
+    }
+    e.close();
+    e = root.openNextFile();
+  }
+  root.close();
+  return best.length() ? ("/data/" + best) : "";
+}
+
+/** NUM آخرین رکورد ذخیره‌شده (برای ادامه‌ی شماره‌گذاری بعد از ریست) */
+static int lastRecordIdOnSD() {
+  String newest = pickDayFile(false);
+  if (!newest.length()) return 0;
+  File f = SD.open(newest, FILE_READ);
+  if (!f) return 0;
+  int id = 0;
+  size_t size = f.size();
+  if (size >= REC_SIZE) {
+    f.seek((size / REC_SIZE - 1) * REC_SIZE);
+    WifiData d;
+    if (f.read((uint8_t *)&d, REC_SIZE) == (int)REC_SIZE) id = d.NUM;
   }
   f.close();
+  return id;
+}
+
+void saveToSD(const WifiData &data) {
+  String path = dayFilePath(data.Year, data.Month, data.Day);
+  File f = SD.open(path, FILE_APPEND);
+  if (!f) f = SD.open(path, FILE_WRITE);  // اولین بار
+  if (f) {
+    f.write((const uint8_t *)&data, REC_SIZE);
+    f.close();
+    DEBUG_PRINTF("[SD] Appended #%d -> %s\n", data.NUM, path.c_str());
+  } else {
+    DEBUG_PRINTLN("[SD] Critical: could not write daily file!");
+  }
+}
+
+void sendRecord(WiFiClient &cl, const WifiData &d) {
+  char buf[220];
+  snprintf(buf, sizeof(buf),
+           "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
+           d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
+           d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+  cl.println(buf);
+}
+
+/** n رکورد آخرِ جدیدترین فایل روزانه را می‌خواند (جدید -> قدیم) */
+static int readLastRecords(WifiData *out, int maxCount) {
+  String newest = pickDayFile(false);
+  if (!newest.length()) return 0;
+  File f = SD.open(newest, FILE_READ);
+  if (!f) return 0;
+
+  size_t total = f.size() / REC_SIZE;
+  int n = (int)((total < (size_t)maxCount) ? total : (size_t)maxCount);
+  for (int i = 0; i < n; i++) {
+    f.seek((total - 1 - i) * REC_SIZE);
+    if (f.read((uint8_t *)&out[i], REC_SIZE) != (int)REC_SIZE) {
+      f.close();
+      return i;
+    }
+  }
+  f.close();
+  return n;
 }
 
 // =====================================================================
@@ -975,17 +1173,23 @@ void TaskInternalWiFiConnection(void *pv) {
           break;
         }
 
-        // ج) Store & Forward : یک فایل در هر دور
+        // ج) Store & Forward با آفست:
+        //    قدیمی‌ترین فایل روزانه را برمی‌داریم، از روی آفستِ ذخیره‌شده
+        //    رکورد بعدی را می‌خوانیم و می‌فرستیم. بعد از ACK فقط آفست جلو
+        //    می‌رود (نه حذف فایل) -> نوشتن روی SD خیلی کمتر و امن‌تر می‌شود.
         if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(100))) {
-          File root = SD.open("/data");
-          if (root) {
-            File file = root.openNextFile();
-            if (file) {
-              String fPath = fullDataPath(file.name());
-              if (fPath.endsWith(".dat")) {
+          String dayFile = pickDayFile(true);
+          if (dayFile.length()) {
+            uint32_t pos = readUploadPos(dayFile);
+            File f = SD.open(dayFile, FILE_READ);
+            if (f) {
+              size_t fileSize = f.size();
+
+              if (pos + REC_SIZE <= fileSize) {
                 WifiData stored;
-                bool readOk = (file.read((uint8_t *)&stored, sizeof(WifiData)) == sizeof(WifiData));
-                file.close();
+                f.seek(pos);
+                bool readOk = (f.read((uint8_t *)&stored, REC_SIZE) == (int)REC_SIZE);
+                f.close();
 
                 if (readOk && uploadClient.connect(serverIP, serverPort)) {
                   // این فرمت باید دقیقاً با sscanf سمت ESP8266 و با
@@ -1013,20 +1217,29 @@ void TaskInternalWiFiConnection(void *pv) {
                     }
                     vTaskDelay(pdMS_TO_TICKS(5));
                   }
+                  uploadClient.stop();
 
                   if (ack) {
-                    SD.remove(fPath);
-                    DEBUG_PRINTF("[UPLOAD] ACK -> removed %s\n", fPath.c_str());
+                    pos += REC_SIZE;
+                    writeUploadPos(dayFile, pos);
+                    DEBUG_PRINTF("[UPLOAD] #%d sent, offset -> %u/%u\n",
+                                 stored.NUM, (unsigned)pos, (unsigned)fileSize);
                   } else {
-                    DEBUG_PRINTLN("[UPLOAD] No ACK, keeping file.");
+                    DEBUG_PRINTLN("[UPLOAD] No ACK, will retry same record.");
                   }
-                  uploadClient.stop();
                 }
               } else {
-                file.close();
+                f.close();
+                // فایل کامل آپلود شده؛ اگر مربوط به امروز نیست پاکش کن
+                rtc.read();
+                String today = dayFilePath(2000 + rtc.getYear(), rtc.getMonth(), rtc.getDay());
+                if (dayFile != today) {
+                  SD.remove(posPathOf(dayFile));
+                  SD.remove(dayFile);
+                  DEBUG_PRINTF("[UPLOAD] %s fully uploaded -> removed\n", dayFile.c_str());
+                }
               }
             }
-            root.close();
           }
           xSemaphoreGive(xSDMutex);
         }
@@ -1065,60 +1278,26 @@ void TaskInternalWiFiConnection(void *pv) {
 
               if (cmd.equalsIgnoreCase("sync")) {
                 if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
-                  File root = SD.open("/data");
-                  String lastFile = "";
-                  int maxID = -1;
-                  if (root) {
-                    File e = root.openNextFile();
-                    while (e) {
-                      String p = fullDataPath(e.name());
-                      if (p.endsWith(".dat")) {
-                        int u = p.lastIndexOf('_');
-                        int id = p.substring(u + 1, p.length() - 4).toInt();
-                        if (id > maxID) {
-                          maxID = id;
-                          lastFile = p;
-                        }
-                      }
-                      e.close();
-                      e = root.openNextFile();
-                    }
-                    root.close();
-                  }
-                  if (lastFile.length()) sendDataFile(remote, lastFile);
+                  WifiData one;
+                  int n = readLastRecords(&one, 1);
+                  if (n == 1) sendRecord(remote, one);
                   else remote.println("NO_DATA");
                   xSemaphoreGive(xSDMutex);
                 }
               } else if (cmd.equalsIgnoreCase("sync10")) {
                 if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
-                  File root = SD.open("/data");
-                  String ring[10];
-                  int count = 0;
-                  if (root) {
-                    File e = root.openNextFile();
-                    while (e) {
-                      String p = fullDataPath(e.name());
-                      if (p.endsWith(".dat")) {
-                        ring[count % 10] = p;
-                        count++;
-                      }
-                      e.close();
-                      e = root.openNextFile();
+                  WifiData last10[10];
+                  int n = readLastRecords(last10, 10);
+                  if (n == 0) {
+                    remote.println("NO_DATA");
+                  } else {
+                    remote.println("[");
+                    for (int i = 0; i < n; i++) {
+                      sendRecord(remote, last10[i]);
+                      if (i < n - 1) remote.print(",");
                     }
-                    root.close();
+                    remote.println("]");
                   }
-                  int start = (count > 10) ? (count % 10) : 0;
-                  int items = (count > 10) ? 10 : count;
-
-                  remote.println("[");
-                  for (int i = 0; i < items; i++) {
-                    int idx = (start + i) % 10;
-                    if (ring[idx].length()) {
-                      sendDataFile(remote, ring[idx]);
-                      if (i < items - 1) remote.print(",");
-                    }
-                  }
-                  remote.println("]");
                   xSemaphoreGive(xSDMutex);
                 }
               } else if (cmd.length()) {

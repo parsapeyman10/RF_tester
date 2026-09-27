@@ -23,6 +23,7 @@ import os
 import sqlite3
 import math
 import struct
+import re
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'industrial_secret_key_v3_7_live_fix' 
@@ -83,6 +84,84 @@ def get_daily_db_path(date_str=None):
         date_str = datetime.datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
     return f"{date_str}.db"
 
+# =====================================================================
+#  متد ذخیره‌سازی (Data-Access Layer)
+#  ------------------------------------------------------------------
+#  هر رکورد دو جا نوشته می‌شود:
+#    1) master_industrial.db  -> جدول MasterReading (تاریخچه‌ی کامل)
+#    2) YYYY-MM-DD.db         -> جدول daily_records (فقط همان روز)
+#
+#  کلید یکتایی رکورد = (num_value, تاریخ دستگاه, ساعت دستگاه)
+#  بنابراین اگر یک خط سریال دوباره برسد (اکوی ESP8266، ارسال مجدد بعد از
+#  نبود ACK، یا آپلود دوباره‌ی همان فایل .dat) رکورد تکراری ثبت نمی‌شود.
+# =====================================================================
+
+DAILY_SCHEMA = """CREATE TABLE IF NOT EXISTS daily_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    num_value INTEGER,
+                    nbcm_selected TEXT,
+                    temp TEXT,
+                    humidity TEXT,
+                    log_date TEXT,
+                    log_time TEXT,
+                    full_timestamp DATETIME
+                )"""
+
+_daily_ready = set()
+_last_cleanup_ts = 0.0
+
+
+def open_daily_db(date_str):
+    """اتصال آماده به دیتابیس روزانه: WAL + ایندکس یکتا + busy timeout."""
+    path = f"{date_str}.db"
+    conn = sqlite3.connect(path, timeout=10)
+    if path not in _daily_ready:
+        c = conn.cursor()
+        c.execute(DAILY_SCHEMA)
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=NORMAL")
+        except Exception:
+            pass
+        c.execute("CREATE INDEX IF NOT EXISTS idx_date_time ON daily_records (log_date, log_time)")
+        try:
+            # جلوگیری از رکورد تکراری در سطح دیتابیس
+            c.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_record
+                         ON daily_records (num_value, log_date, log_time)""")
+        except sqlite3.IntegrityError:
+            # دیتابیس قدیمی که از قبل رکورد تکراری دارد؛ ایندکس یکتا ساخته نمی‌شود
+            print(f"[DB] {path}: رکورد تکراری قدیمی موجود است، ایندکس یکتا رد شد")
+        conn.commit()
+        _daily_ready.add(path)
+    return conn
+
+
+def insert_daily_rows(date_str, rows):
+    """درج دسته‌ای با نادیده گرفتن تکراری‌ها. خروجی: تعداد رکورد واقعاً درج‌شده."""
+    if not rows:
+        return 0
+    conn = open_daily_db(date_str)
+    try:
+        c = conn.cursor()
+        before = conn.total_changes
+        c.executemany("""INSERT OR IGNORE INTO daily_records
+                         (num_value, nbcm_selected, temp, humidity, log_date, log_time, full_timestamp)
+                         VALUES (?, ?, ?, ?, ?, ?, ?)""", rows)
+        conn.commit()
+        return conn.total_changes - before
+    finally:
+        conn.close()
+
+
+def master_exists(num_value, date_str, time_str):
+    """آیا این رکورد قبلاً در دیتابیس اصلی ثبت شده است؟"""
+    try:
+        return db.session.query(MasterReading.id).filter_by(
+            num_value=num_value, date=date_str, time=time_str).first() is not None
+    except Exception:
+        return False
+
+
 def cleanup_old_databases(days_to_keep=7):
     now = datetime.datetime.now(TEHRAN_TZ)
     for filename in os.listdir('.'):
@@ -129,8 +208,12 @@ def safe_int(val, default=0):
     except: return default
 
 def save_sensor_data(data_source):
+    global _last_cleanup_ts
     try:
-        cleanup_old_databases()
+        # پاکسازی دیتابیس‌های قدیمی حداکثر هر ۱۰ دقیقه، نه به ازای هر رکورد
+        if time.time() - _last_cleanup_ts > 600:
+            _last_cleanup_ts = time.time()
+            cleanup_old_databases()
         
         # --- استخراج داده‌ها ---
         if hasattr(data_source, 'getlist'): 
@@ -167,6 +250,13 @@ def save_sensor_data(data_source):
         nbcm_str = ",".join(nbcm_checked_list)
         log_str = f"NUM:{num_int}, H:{h_val}, T:{t_val}"
 
+        # --- جلوگیری از رکورد تکراری ---
+        # منابع تکرار: اکوی سریال، ارسال مجدد ESP32 وقتی ACK گم می‌شود،
+        # یا آپلود دوباره‌ی همان فایل. کلید یکتایی = NUM + تاریخ + ساعت دستگاه
+        if master_exists(num_int, i_date, i_time):
+            print(f"[DB] تکراری رد شد: NUM={num_int} {i_date} {i_time}")
+            return True
+
         # 1. ذخیره در Master DB
         master_entry = MasterReading(
             num_value=num_int, nbcm_selected=nbcm_str,
@@ -177,30 +267,9 @@ def save_sensor_data(data_source):
         db.session.add(master_entry)
         db.session.commit()
 
-        # 2. ذخیره در Daily DB
-        daily_db_path = f"{i_date}.db"
-        
-        with sqlite3.connect(daily_db_path) as conn:
-            c = conn.cursor()
-            c.execute('''CREATE TABLE IF NOT EXISTS daily_records (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        num_value INTEGER,
-                        nbcm_selected TEXT,
-                        temp TEXT,
-                        humidity TEXT,
-                        log_date TEXT,
-                        log_time TEXT,
-                        full_timestamp DATETIME
-                    )''')
-
-            c.execute("CREATE INDEX IF NOT EXISTS idx_date_time ON daily_records (log_date, log_time)")
-
-            c.execute('''INSERT INTO daily_records 
-                        (num_value, nbcm_selected, temp, humidity, log_date, log_time, full_timestamp)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                        (num_int, nbcm_str, t_val, h_val, i_date, i_time, real_timestamp)) # <--- تغییر مهم
-            
-            conn.commit()
+        # 2. ذخیره در Daily DB (با ایندکس یکتا و INSERT OR IGNORE)
+        insert_daily_rows(i_date, [(num_int, nbcm_str, t_val, h_val,
+                                    i_date, i_time, real_timestamp)])
 
         return True
 
@@ -218,20 +287,48 @@ active_baud_rate = 115200
 DEFAULT_PORT = "COM9"
 manual_disconnect = False
 
+# الگوی دقیق خطی که ESP8266 روی سریال می‌فرستد (۱۳ فیلد).
+# استفاده از regex به‌جای split باعث می‌شود خطوط ناقص/به‌هم‌ریخته‌ی سریال
+# (که موقع ریست برد یا نویز پیش می‌آید) اصلاً وارد دیتابیس نشوند.
+INDUSTRIAL_LINE_RE = re.compile(
+    r"NUM=(?P<num>-?\d+),"
+    r"NBCM1=(?P<n1>[A-Za-z0-9]+),NBCM2=(?P<n2>[A-Za-z0-9]+),"
+    r"NBCM3=(?P<n3>[A-Za-z0-9]+),NBCM4=(?P<n4>[A-Za-z0-9]+),"
+    r"Temp=(?P<temp>-?\d+(?:\.\d+)?),Humidity=(?P<hum>-?\d+(?:\.\d+)?),"
+    r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
+    r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+)
+
+TRUE_TOKENS = ("OK", "1", "TRUE", "YES")
+
+
 def parse_industrial_line(line):
+    """یک خط سریال را به دیکشنری استاندارد تبدیل می‌کند (یا None اگر معتبر نبود)."""
+    if not line:
+        return None
+    m = INDUSTRIAL_LINE_RE.search(line)
+    if not m:
+        return None
+    g = m.groupdict()
     try:
-        if "NUM=" in line:
-            clean_line = line[line.find("NUM="):]
-            parts = {p.split('=')[0].strip(): p.split('=')[1].strip() for p in clean_line.split(',') if '=' in p}
-            return {
-                'num_value': parts.get('NUM'),
-                'nbcm': [f'NBCM{i}' for i in range(1, 5) if parts.get(f'NBCM{i}') == 'OK'],
-                'temp': parts.get('Temp', '0'),
-                'humidity': parts.get('Humidity', '0'),
-                'date': parts.get('Date', 'N/A'),
-                'time': parts.get('Time', 'N/A')
-            }
-    except: return None
+        nbcm = [f"NBCM{i}" for i in range(1, 5)
+                if g[f"n{i}"].strip().upper() in TRUE_TOKENS]
+        date_str = "%04d-%02d-%02d" % (int(g["y"]), int(g["mo"]), int(g["d"]))
+        time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
+        # اعتبارسنجی واقعی تاریخ (مثلاً 2026-02-31 رد می‌شود)
+        datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        return {
+            'num_value': g["num"],
+            'nbcm': nbcm,
+            'temp': g["temp"],
+            'humidity': g["hum"],
+            'date': date_str,
+            'time': time_str,
+        }
+    except Exception as exc:
+        print(f"[PARSE_ERR] {exc} :: {line[:120]}")
+        return None
+
 
 def read_serial_worker():
     global ser, active_serial_port, manual_disconnect
@@ -258,11 +355,14 @@ def read_serial_worker():
                 try:
                     raw = ser.readline().decode('utf-8', errors='ignore').strip()
                     if not raw: continue
-                    print(f"[RX_RAW] {raw}")
-                    if "NUM=" in raw: 
-                        payload = parse_industrial_line(raw)
-                        if payload:
-                            with app.app_context(): save_sensor_data(payload)
+                    payload = parse_industrial_line(raw)
+                    if payload:
+                        print(f"[RX] NUM={payload['num_value']} {payload['date']} {payload['time']}")
+                        with app.app_context():
+                            save_sensor_data(payload)
+                    elif "NUM=" in raw:
+                        # خط شبیه دیتا بود ولی فرمتش کامل نبود -> دور ریخته می‌شود
+                        print(f"[RX_BAD] {raw[:120]}")
                 except Exception as read_err:
                     print(f"[READ_ERR] {read_err}")
             time.sleep(0.01)
@@ -295,6 +395,7 @@ def upload_dat_page():
         
         success_count = 0
         fail_count = 0
+        skipped_count = 0
         
         upload_time_server = datetime.datetime.now(TEHRAN_TZ)
 
@@ -370,6 +471,10 @@ def upload_dat_page():
                             timestamp=upload_time_server,
                             formatted_log=formatted_log
                         )
+                        # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
+                        if master_exists(num_val, device_date_str, device_time_str):
+                            skipped_count += 1
+                            continue
                         master_buffer.append(master_obj)
                         
                         # ذخیره در Daily (ارسال رشته برای یکدستی)
@@ -391,28 +496,14 @@ def upload_dat_page():
                 db.session.commit()
                 
                 for log_date, records in daily_buffer_map.items():
-                    daily_db_path = f"{log_date}.db"
-                    with sqlite3.connect(daily_db_path) as conn:
-                        c = conn.cursor()
-                        c.execute('''CREATE TABLE IF NOT EXISTS daily_records (
-                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                    num_value INTEGER,
-                                    nbcm_selected TEXT,
-                                    temp TEXT,
-                                    humidity TEXT,
-                                    log_date TEXT,
-                                    log_time TEXT,
-                                    full_timestamp DATETIME
-                                )''')
-                        c.executemany('''INSERT INTO daily_records 
-                                    (num_value, nbcm_selected, temp, humidity, log_date, log_time, full_timestamp)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)''', records)
-                        conn.commit()
+                    inserted = insert_daily_rows(log_date, records)
+                    print(f"[UPLOAD] {log_date}: {inserted}/{len(records)} رکورد جدید")
             except Exception as e:
                 db.session.rollback()
                 return jsonify({'status': 'error', 'message': str(e)}), 500
 
-        return jsonify({'status': 'success', 'processed': success_count, 'failed': fail_count})
+        return jsonify({'status': 'success', 'processed': success_count,
+                        'failed': fail_count, 'skipped_duplicates': skipped_count})
     return render_template('upload.html')
 
 @app.route('/')

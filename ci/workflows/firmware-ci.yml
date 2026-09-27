@@ -114,3 +114,6 @@ jobs:
 
       - name: Protocol compatibility test
         run: python .github/scripts/test_protocol.py
+
+      - name: Database pipeline test
+        run: python .github/scripts/test_db_pipeline.py

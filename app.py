@@ -25,7 +25,35 @@ import math
 import struct
 import re
 
-app = Flask(__name__)
+# =====================================================================
+#  مسیرها مستقل از پوشه‌ای که برنامه از آن اجرا می‌شود
+#  (باگ: اجرای app.py از ریشه‌ی ریپو با خطای TemplateNotFound: index.html
+#   می‌خورد چون Flask دنبال ./templates کنار فایل می‌گردد)
+# =====================================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_templates():
+    for cand in (os.path.join(BASE_DIR, 'templates'),
+                 os.path.join(BASE_DIR, 'test', 'lab_web_server', 'templates')):
+        if os.path.isfile(os.path.join(cand, 'index.html')):
+            return cand
+    return os.path.join(BASE_DIR, 'templates')
+
+
+TEMPLATE_DIR = _resolve_templates()
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
+
+# دیتابیس‌های روزانه همیشه کنار app.py ساخته می‌شوند، نه در پوشه‌ی جاری
+DAILY_DB_DIR = BASE_DIR
+
+
+def daily_db_file(date_str):
+    return os.path.join(DAILY_DB_DIR, f"{date_str}.db")
+
+
+app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
+print(f"[INIT] templates: {TEMPLATE_DIR}")
 app.config['SECRET_KEY'] = 'industrial_secret_key_v3_7_live_fix' 
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 # --- تنظیمات زمانی و دیتابیس جامع ---
@@ -82,7 +110,7 @@ class DailyRecordAdapter:
 def get_daily_db_path(date_str=None):
     if not date_str:
         date_str = datetime.datetime.now(TEHRAN_TZ).strftime('%Y-%m-%d')
-    return f"{date_str}.db"
+    return daily_db_file(date_str)
 
 # =====================================================================
 #  متد ذخیره‌سازی (Data-Access Layer)
@@ -113,7 +141,7 @@ _last_cleanup_ts = 0.0
 
 def open_daily_db(date_str):
     """اتصال آماده به دیتابیس روزانه: WAL + ایندکس یکتا + busy timeout."""
-    path = f"{date_str}.db"
+    path = daily_db_file(date_str)
     conn = sqlite3.connect(path, timeout=10)
     if path not in _daily_ready:
         c = conn.cursor()
@@ -164,14 +192,14 @@ def master_exists(num_value, date_str, time_str):
 
 def cleanup_old_databases(days_to_keep=7):
     now = datetime.datetime.now(TEHRAN_TZ)
-    for filename in os.listdir('.'):
+    for filename in os.listdir(DAILY_DB_DIR):
         if filename.endswith('.db') and filename != 'master_industrial.db':
             try:
                 date_part = filename.replace('.db', '')
                 file_date = datetime.datetime.strptime(date_part, '%Y-%m-%d')
                 file_date = TEHRAN_TZ.localize(file_date)
                 if (now - file_date).days >= days_to_keep:
-                    os.remove(filename)
+                    os.remove(os.path.join(DAILY_DB_DIR, filename))
             except:
                 continue
 
@@ -528,7 +556,7 @@ def history():
 
     if target_date:
         # سناریوی صنعتی: خواندن از فایل روزانه (Distributed Data Access)
-        daily_db_path = f"{target_date}.db"
+        daily_db_path = daily_db_file(target_date)
         
         if os.path.exists(daily_db_path):
             try:

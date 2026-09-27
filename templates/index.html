@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HMI مدیریت گیرنده صنعتی</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Vazirmatn', sans-serif; background-color: #0f172a; color: #f8fafc; overflow-x: hidden; }
+        .glass-card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        
+        /* تنظیمات سایدبار و انیمیشن‌ها */
+        .sidebar { 
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+            width: 260px; 
+            height: 100vh; 
+            position: fixed; 
+            right: 0; 
+            top: 0; 
+            z-index: 50; 
+            background: #1e293b; 
+            border-left: 1px solid rgba(255,255,255,0.1); 
+            transform: translateX(0);
+        }
+        
+        /* کلاس برای بسته بودن سایدبار (در دسکتاپ و موبایل) */
+        .sidebar.closed { transform: translateX(100%); }
+
+        .main-content { 
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
+            margin-right: 260px; 
+            min-height: 100vh; 
+        }
+        
+        /* وقتی سایدبار بسته است، محتوا تمام صفحه شود */
+        .main-content.expanded { margin-right: 0; }
+
+        @media (max-width: 1024px) {
+            .sidebar { transform: translateX(100%); } /* پیش‌فرض موبایل: بسته */
+            .sidebar.open { transform: translateX(0); } /* حالت باز در موبایل */
+            .main-content { margin-right: 0; } /* در موبایل همیشه مارجین ندارد */
+        }
+
+        .nav-item { cursor: pointer; transition: all 0.2s; border-right: 4px solid transparent; }
+        .nav-item.active { background: rgba(59, 130, 246, 0.1); border-right-color: #3b82f6; color: #60a5fa; }
+        
+        .view-section { display: none; animation: fadeIn 0.3s ease; }
+        .view-section.active { display: block; }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        .status-indicator { transition: all 0.3s; }
+        .pulse-green { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); animation: pulse-green 2s infinite; }
+        @keyframes pulse-green {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 10px rgba(34, 197, 94, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+        }
+        
+        input, select { background: #0f172a !important; border: 1px solid #334155 !important; color: white !important; }
+    </style>
+</head>
+<body>
+
+<aside id="sidebar" class="sidebar shadow-2xl flex flex-col">
+    <div class="p-6 border-b border-slate-700 flex justify-between items-center">
+        <div>
+            <h2 class="text-xl font-bold text-blue-400">منوی کنترل</h2>
+            <p class="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">Industrial System v3.8</p>
+        </div>
+        <button onclick="toggleSidebar()" class="lg:hidden text-slate-400 hover:text-white">
+            ✕
+        </button>
+    </div>
+    
+    <nav class="flex-1 mt-4">
+        <div onclick="switchView('monitoring')" id="nav-monitoring" class="nav-item active p-4 flex items-center gap-3 hover:bg-slate-700/50">
+            <span>📊</span><span class="font-medium">مانیتورینگ زنده</span>
+        </div>
+        <div onclick="switchView('serial')" id="nav-serial" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50">
+            <span>🔌</span><span class="font-medium">تنظیمات پورت</span>
+        </div>
+        <div onclick="switchView('manual')" id="nav-manual" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50">
+            <span>📝</span><span class="font-medium">ثبت دستی</span>
+        </div>
+
+        <div class="border-t border-slate-700 my-2"></div>
+        
+        <a href="/history" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50">
+            <span>📜</span><span class="font-medium">تاریخچه داده‌ها</span>
+        </a>
+        
+        <a href="/upload_dat" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50">
+            <span>📂</span><span class="font-medium">بارگذاری فایل (DAT)</span>
+        </a>
+    </nav>
+
+    <div class="p-4 border-t border-slate-700">
+        <div id="refresh-timer" class="text-[10px] text-slate-500 text-center mb-2">بروزرسانی بعدی: <span id="timer-val">05:00</span></div>
+    </div>
+</aside>
+
+<div id="main-content" class="main-content p-4 md:p-8">
+    <header class="mb-8 flex justify-between items-center bg-slate-800/50 p-4 rounded-2xl border-r-4 border-blue-500 shadow-lg relative">
+        <div class="flex items-center gap-4">
+            <button onclick="toggleSidebar()" class="p-2 rounded-lg bg-slate-700/50 hover:bg-slate-700 text-blue-400 transition-all">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                </svg>
+            </button>
+            
+            <div>
+                <h1 id="view-title" class="text-xl md:text-2xl font-bold text-blue-400">مانیتورینگ فرآیند</h1>
+                <p class="text-slate-400 text-xs mt-1 hidden md:block">HMI گیرنده صنعتی - وضعیت لحظه‌ای سیستم</p>
+            </div>
+        </div>
+
+        <div id="serial-mini-status" class="flex items-center gap-3 bg-slate-900 px-4 py-2 rounded-full border border-slate-700">
+            <div id="mini-bulb" class="w-3 h-3 rounded-full bg-red-500 status-indicator"></div>
+            <span id="mini-status-text" class="text-xs font-mono text-slate-400 hidden sm:block">Offline</span>
+        </div>
+    </header>
+
+    <section id="view-monitoring" class="view-section active space-y-6">
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+            
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-orange-500 text-center flex flex-col justify-center min-h-[140px]">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Sequence (NUM)</span>
+                <div id="live-num" class="text-4xl font-bold mt-2 text-orange-400 font-mono">--</div>
+            </div>
+            
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 text-center flex flex-col justify-center min-h-[140px]">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
+                <div id="live-temp" class="text-4xl font-bold mt-2 text-blue-400 font-mono">--</div>
+            </div>
+            
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-cyan-500 text-center flex flex-col justify-center min-h-[140px]">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
+                <div id="live-humidity" class="text-4xl font-bold mt-2 text-cyan-400 font-mono">--</div>
+            </div>
+            
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-purple-500 text-center flex flex-col justify-center min-h-[140px]">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Timestamp</span>
+                <div id="live-time" class="text-xl font-bold mt-2 font-mono text-slate-200">--:--:--</div>
+                <div id="live-date" class="text-[10px] text-slate-500 font-mono">----/--/--</div>
+            </div>
+
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">Logic State</span>
+                <div class="space-y-2 px-2">
+                    {% for i in range(1, 3) %}
+                    <div class="flex justify-between items-center border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
+                        <span class="text-xs font-bold text-slate-400 font-mono">NBCM{{ i }}</span>
+                        <div id="mini-nbcm-{{ i }}" class="w-3 h-3 rounded-full bg-slate-700 shadow-sm transition-all duration-300"></div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+        </div>
+
+        <div class="glass-card rounded-2xl overflow-hidden shadow-2xl mt-6">
+            <iframe id="plotIframe" src="/plot_display" class="w-full min-h-[500px] border-none bg-slate-900"></iframe>
+        </div>
+
+
+    </section>
+
+    <section id="view-serial" class="view-section space-y-4">
+        <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-blue-600">
+            <h3 class="text-xl font-bold mb-6 flex items-center gap-3">
+                <span>🔌</span> تنظیمات درگاه سریال
+            </h3>
+            <div class="space-y-6">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">پورت شناسایی شده (Default: COM9):</label>
+                    <div class="flex gap-2">
+                        <select id="serialPortSelect" class="flex-1 p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">در حال جستجو...</option>
+                        </select>
+                        <button id="refreshSerialPorts" class="bg-slate-700 px-4 rounded-xl hover:bg-slate-600 transition-all">🔄</button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">سرعت ارتباط (Baud Rate):</label>
+                    <select id="baudRateInput" class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="9600">9600 bps</option>
+                        <option value="115200" selected>115200 bps</option>
+                        <option value="57600">57600 bps</option>
+                    </select>
+                </div>
+                <div class="flex gap-3 pt-4">
+                    <button id="applySerialConfig" class="flex-1 bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-bold transition-all shadow-lg">اتصال به سیستم</button>
+                    <button id="closeSerialPort" class="px-8 bg-red-600/10 text-red-500 hover:bg-red-600 hover:text-white rounded-2xl transition-all border border-red-500/20">قطع ارتباط</button>
+                </div>
+                <div id="serialStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
+            </div>
+        </div>
+    </section>
+
+    <section id="view-manual" class="view-section space-y-4">
+        <div class="max-w-3xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-emerald-600">
+            <h3 class="text-xl font-bold mb-6 text-emerald-400">ثبت دستی رویداد</h3>
+            <form action="/submit_form" method="POST" class="space-y-6">
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400">شماره توالی (NUM)</label>
+                        <input type="number" name="num_value" required class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none" placeholder="Ex: 101">
+                    </div>
+                    
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400">تاریخ ثبت (اختیاری)</label>
+                        <input type="date" name="date" class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none">
+                        <p class="text-[9px] text-slate-500 text-right">* پیش‌فرض: امروز</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400">دما (°C)</label>
+                        <input type="number" step="any" name="temp" class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none" placeholder="-5.5">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400">رطوبت (%)</label>
+                        <input type="number" step="any" name="humidity" class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none" placeholder="40">
+                    </div>
+                </div>
+
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-400 block mb-2">وضعیت انتخابی ماژول‌ها:</label>
+                    <div class="grid grid-cols-2 gap-4 bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+                        {% for nbcm in ['NBCM1', 'NBCM2'] %}
+                        <label class="flex items-center gap-3 cursor-pointer p-2 rounded-lg hover:bg-slate-700/50 transition-colors">
+                            <input type="checkbox" name="nbcm" value="{{ nbcm }}" class="w-5 h-5 rounded accent-emerald-500 bg-slate-800 border-slate-600">
+                            <span class="text-sm font-bold text-slate-300">{{ nbcm }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-2xl font-bold transition-all text-white shadow-lg hover:shadow-emerald-900/20">
+                    ذخیره در دیتابیس صنعتی
+                </button>
+            </form>
+        </div>
+    </section>
+</div>
+
+<script>
+    let refreshSeconds = 300;
+
+    // تابع کنترل باز/بسته شدن سایدبار
+    function toggleSidebar() {
+        const sidebar = document.getElementById('sidebar');
+        const content = document.getElementById('main-content');
+        const isMobile = window.innerWidth < 1024;
+
+        if (isMobile) {
+            sidebar.classList.toggle('open');
+        } else {
+            // در دسکتاپ از کلاس closed استفاده می‌کنیم
+            sidebar.classList.toggle('closed');
+            content.classList.toggle('expanded');
+        }
+    }
+
+    function switchView(viewName) {
+        document.querySelectorAll('.view-section').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        document.getElementById(`view-${viewName}`).classList.add('active');
+        document.getElementById(`nav-${viewName}`).classList.add('active');
+        const titles = { 'monitoring': 'مانیتورینگ فرآیند', 'serial': 'پیکربندی سخت‌افزار', 'manual': 'ورود دستی داده' };
+        document.getElementById('view-title').innerText = titles[viewName];
+        
+        // در موبایل بعد از انتخاب منو، سایدبار بسته شود
+        if (window.innerWidth < 1024) {
+            document.getElementById('sidebar').classList.remove('open');
+        }
+    }
+
+    setInterval(() => {
+        refreshSeconds--;
+        if (refreshSeconds <= 0) window.location.reload();
+        const mins = Math.floor(refreshSeconds / 60);
+        const secs = refreshSeconds % 60;
+        const timerVal = document.getElementById('timer-val');
+        if(timerVal) timerVal.innerText = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }, 1000);
+
+    const statusDiv = document.getElementById('serialStatus');
+    const portSelect = document.getElementById('serialPortSelect');
+    const miniBulb = document.getElementById('mini-bulb');
+    const miniText = document.getElementById('mini-status-text');
+
+    async function updateSerialUI() {
+        try {
+            const res = await fetch('/api/serial_ports');
+            const data = await res.json();
+            
+            if(portSelect) {
+                const currentSelection = portSelect.value;
+                portSelect.innerHTML = '<option value="">انتخاب پورت...</option>' + 
+                    data.available_ports.map(p => `<option value="${p}" ${p === data.active_port ? 'selected' : ''}>${p}</option>`).join('');
+                if (!data.active_port && currentSelection) { }
+            }
+            
+            if(data.active_port) {
+                if(statusDiv) statusDiv.innerHTML = `📡 وضعیت: ${data.connection_status} | پورت: ${data.active_port} | Baud: ${data.baud_rate}`;
+                if(data.connection_status === 'Connected') {
+                    miniBulb.className = 'w-3 h-3 rounded-full bg-green-500 pulse-green';
+                    miniText.innerText = `Connected: ${data.active_port}`;
+                    miniText.className = 'text-xs font-mono text-green-400 hidden sm:block';
+                } else {
+                    miniBulb.className = 'w-3 h-3 rounded-full bg-yellow-500';
+                    miniText.innerText = 'Searching...';
+                }
+            } else {
+                if(statusDiv) statusDiv.innerHTML = `⚠️ وضعیت: قطع ارتباط | <span class="text-red-400">لطفا پورت را انتخاب کنید</span>`;
+                miniBulb.className = 'w-3 h-3 rounded-full bg-red-500';
+                miniText.innerText = 'Offline';
+                miniText.className = 'text-xs font-mono text-slate-500 hidden sm:block';
+            }
+        } catch (e) { console.error("Serial UI Error:", e); }
+    }
+
+    async function updateLiveDashboard() {
+        try {
+            const res = await fetch('/api/sensor_data');
+            const data = await res.json();
+            if (data.length === 0) return;
+
+            const last = data[data.length - 1]; 
+            
+            // بروزرسانی کارت‌های اصلی
+            const numEl = document.getElementById('live-num');
+            if(numEl) numEl.innerText = last.num_value !== null ? last.num_value : '0';
+            
+            const tempEl = document.getElementById('live-temp');
+            if(tempEl) tempEl.innerText = last.temp || 'N/A';
+            
+            const humEl = document.getElementById('live-humidity');
+            if(humEl) humEl.innerText = last.humidity || 'N/A';
+            
+            const timeEl = document.getElementById('live-time');
+            if(timeEl) timeEl.innerText = last.time || '--:--:--';
+            
+            const dateEl = document.getElementById('live-date');
+            if(dateEl) dateEl.innerText = last.date || '----/--/--';
+
+            // بروزرسانی ستونی دایره‌های NBCM (کد جدید)
+            // حلقه روی NBCM1 تا NBCM4
+            for(let i=1; i<=2; i++) {
+                const key = `NBCM${i}`;
+                const indicator = document.getElementById(`mini-nbcm-${i}`);
+                const isActive = last.nbcm_statuses && last.nbcm_statuses[key] === 'active';
+
+                if(indicator) {
+                    if(isActive) {
+                        // سبز روشن با افکت سایه
+                        indicator.className = 'w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e] transition-all duration-300';
+                    } else {
+                        // خاموش (توسی تیره)
+                        indicator.className = 'w-3 h-3 rounded-full bg-slate-700 transition-all duration-300';
+                    }
+                }
+            }
+        } catch (e) { console.error("Dashboard Sync Error:", e); }
+    }
+
+    document.getElementById('applySerialConfig').onclick = async () => {
+        const port = portSelect.value;
+        const baud = parseInt(document.getElementById('baudRateInput').value);
+        if(!port) {
+            alert("لطفا یک پورت سریال را انتخاب کنید.");
+            return;
+        }
+        await fetch('/api/set_serial_config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({port, baud_rate: baud})
+        });
+        updateSerialUI();
+    };
+
+    document.getElementById('closeSerialPort').onclick = async () => {
+        try {
+            await fetch('/api/close_serial_port', {method: 'POST'});
+            window.location.reload();
+        } catch(e) {
+            console.error("Disconnect Error:", e);
+        }
+    };
+
+    document.getElementById('refreshSerialPorts').onclick = updateSerialUI;
+
+    setInterval(updateSerialUI, 10000);
+    setInterval(updateLiveDashboard, 2000); // رفرش سریع‌تر برای نمای بهتر
+    
+    updateSerialUI();
+    updateLiveDashboard();
+</script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>تحلیل پیشرفته نموداری | صنعتی</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        body { margin: 0; background: #0f172a; font-family: system-ui, Tahoma; color: white; overflow: hidden; }
+        
+        #controls { 
+            background: #1e293b; 
+            padding: 0 15px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            border-bottom: 1px solid #334155;
+            height: 50px; 
+            gap: 15px;
+        }
+
+        /* اصلاح شده: هدر گروپ حالا شامل تایتل و چک باکس های سنسور است */
+        .header-group { display: flex; align-items: center; gap: 10px; }
+
+        .live-title {
+            font-size: 13px; font-weight: bold; color: #cbd5e1;
+            display: flex; align-items: center; gap: 6px;
+            background: rgba(59, 130, 246, 0.1); padding: 4px 10px;
+            border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.2);
+        }
+
+        .ping-dot {
+            width: 8px; height: 8px; background-color: #3b82f6; border-radius: 50%; position: relative;
+        }
+        .ping-dot::after {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 50%; background-color: #3b82f6;
+            animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite; opacity: 0.75;
+        }
+        @keyframes ping { 75%, 100% { transform: scale(2); opacity: 0; } }
+
+        .tools-group { display: flex; align-items: center; gap: 8px; }
+
+        #wrapper { 
+            display: grid; 
+            grid-template-columns: 2fr 1fr; 
+            gap: 10px; 
+            padding: 10px; 
+            height: calc(100vh - 90px); 
+        }
+        
+        .chart-card { background: #1e293b; border-radius: 12px; padding: 10px; border: 1px solid #334155; position: relative; }
+        
+        .date-input-group {
+            display: flex; align-items: center; gap: 5px;
+            background: #0f172a; padding: 2px 8px; border-radius: 6px; border: 1px solid #334155;
+        }
+        input[type="date"] {
+            background: transparent; color: #38bdf8; border: none; padding: 2px;
+            cursor: pointer; font-weight: bold; outline: none; font-family: inherit; font-size: 11px;
+        }
+        ::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; width: 14px; }
+        label { font-size: 11px; color: #64748b; white-space: nowrap; }
+
+        .btn-refresh {
+            background: rgba(30, 41, 59, 0.5); border: 1px solid #334155; color: #60a5fa;
+            border-radius: 6px; cursor: pointer; padding: 4px 10px; font-size: 11px;
+            transition: all 0.2s; display: flex; align-items: center; gap: 4px;
+        }
+        .btn-refresh:hover { background: #334155; color: white; }
+        .btn-clear { background: #334155; border: none; color: #cbd5e1; border-radius: 4px; cursor: pointer; padding: 4px 8px; font-size: 10px; }
+
+        /* استایل پایه چک باکس */
+        .checkbox-wrapper {
+            display: flex; align-items: center; gap: 6px; 
+            background: #0f172a; padding: 4px 8px; border-radius: 6px; border: 1px solid #334155;
+            transition: all 0.2s;
+        }
+        .checkbox-wrapper input { cursor: pointer; }
+        .checkbox-wrapper span { font-size: 10px; font-weight: bold; }
+
+        /* استایل اختصاصی برای چک باکس آپدیت خودکار (سبز پیش فرض) */
+        .auto-update-wrapper input { accent-color: #10b981; }
+        .auto-update-wrapper span { color: #94a3b8; }
+
+        /* --- استایل های جدید برای تثبیت رنگ دما و رطوبت --- */
+        
+        /* استایل ثابت نارنجی برای دما */
+        .temp-toggle-wrapper {
+            border-color: #f97316 !important; /* رنگ حاشیه ثابت */
+        }
+        .temp-toggle-wrapper span {
+            color: #f97316 !important; /* رنگ متن ثابت */
+        }
+        .temp-toggle-wrapper input {
+            accent-color: #f97316 !important; /* رنگ تیک چک باکس ثابت */
+        }
+
+        /* استایل ثابت آبی فیروزه ای برای رطوبت */
+        .hum-toggle-wrapper {
+            border-color: #06b6d4 !important;
+        }
+        .hum-toggle-wrapper span {
+            color: #06b6d4 !important;
+        }
+        .hum-toggle-wrapper input {
+            accent-color: #06b6d4 !important;
+        }
+        /* -------------------------------------------------- */
+
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div class="header-group">
+            <div class="live-title">
+                <span class="ping-dot"></span>
+                نمودار مانیتورینگ بلادرنگ دیتابیس
+            </div>
+
+            <div class="h-4 w-[1px] bg-slate-700 mx-2"></div>
+
+            <label class="checkbox-wrapper temp-toggle-wrapper" title="نمایش/مخفی کردن نمودار دما">
+                <input type="checkbox" id="toggle-temp" checked>
+                <span>دما</span>
+            </label>
+            
+            <label class="checkbox-wrapper hum-toggle-wrapper" title="نمایش/مخفی کردن نمودار رطوبت">
+                <input type="checkbox" id="toggle-hum" checked>
+                <span>رطوبت</span>
+            </label>
+        </div>
+        
+        <div class="tools-group">
+            <label class="checkbox-wrapper auto-update-wrapper" title="فعال/غیرفعال کردن بروزرسانی خودکار">
+                <input type="checkbox" id="autoUpdateToggle" checked>
+                <span>آپدیت خودکار</span>
+            </label>
+
+            <div class="h-4 w-[1px] bg-slate-700 mx-1"></div>
+
+            <div class="date-input-group">
+                <label>از:</label>
+                <input type="date" id="startDate" onchange="loadCharts()">
+            </div>
+            <div class="date-input-group">
+                <label>تا:</label>
+                <input type="date" id="endDate" onchange="loadCharts()">
+            </div>
+            
+            <button onclick="clearDates()" class="btn-clear">نمایش کل</button>
+            <button onclick="loadCharts()" class="btn-refresh" title="بروزرسانی">🔄</button>
+        </div>
+    </div>
+
+    <div id="wrapper">
+        <div id="main-chart" class="chart-card"></div>
+        <div id="nbcm-chart" class="chart-card"></div>
+    </div>
+
+    <script>
+        function clearDates() {
+            document.getElementById('startDate').value = '';
+            document.getElementById('endDate').value = '';
+            loadCharts();
+        }
+
+        // افزودن لیسنر برای تغییر وضعیت فوری بدون لود مجدد دیتا
+        document.getElementById('toggle-temp').addEventListener('change', function() {
+            // تریس 0 مربوط به دما است
+            Plotly.restyle('main-chart', {visible: this.checked}, [0]);
+        });
+
+        document.getElementById('toggle-hum').addEventListener('change', function() {
+            // تریس 1 مربوط به رطوبت است
+            Plotly.restyle('main-chart', {visible: this.checked}, [1]);
+        });
+
+        async function loadCharts() {
+            const start = document.getElementById('startDate').value;
+            const end = document.getElementById('endDate').value;
+            
+            // خواندن وضعیت چک‌باکس‌ها برای اعمال در رندرینگ اولیه یا آپدیت
+            const showTemp = document.getElementById('toggle-temp').checked;
+            const showHum = document.getElementById('toggle-hum').checked;
+
+            let url = '/api/master_data?_=' + new Date().getTime(); 
+            
+            if(start) url += `&start_date=${start}`;
+            if(end) url += `&end_date=${end}`;
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                if(!data || !data.length) {
+                    const emptyLayout = {
+                        title: {text: 'داده‌ای یافت نشد (منتظر داده جدید...)', font: {color: '#64748b', size: 12}},
+                        paper_bgcolor: 'rgba(0,0,0,0)',
+                        plot_bgcolor: 'rgba(0,0,0,0)',
+                        xaxis: { visible: false }, yaxis: { visible: false }
+                    };
+                    Plotly.newPlot('main-chart', [], emptyLayout, {responsive: true});
+                    Plotly.newPlot('nbcm-chart', [], emptyLayout, {responsive: true});
+                    return;
+                }
+
+                const xLabels = data.map(d => d.timestamp);
+                const temps = data.map(d => d.temp);
+                const hums = data.map(d => d.humidity);
+
+                // تنظیمات کلی نمودار
+                const layoutBase = {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    font: { color: '#94a3b8', size: 10, family: 'Tahoma' },
+                    margin: { t: 40, b: 60, l: 50, r: 20 },
+                    xaxis: { gridcolor: '#334155', zeroline: false, tickangle: -45 },
+                    yaxis: { gridcolor: '#334155', zeroline: false },
+                    legend: { orientation: 'h', y: 1.1, x: 0.5, xanchor: 'center' }
+                };
+
+                // 1. نمودار دما و رطوبت
+                const envTraces = [
+                    { 
+                        x: xLabels, y: temps, name: 'دما (C°)', 
+                        line: {color: '#f97316', width: 2}, type: 'scatter',
+                        visible: showTemp // اعمال وضعیت چک باکس
+                    },
+                    { 
+                        x: xLabels, y: hums, name: 'رطوبت (%)', 
+                        line: {color: '#06b6d4', width: 2}, type: 'scatter',
+                        visible: showHum // اعمال وضعیت چک باکس
+                    }
+                ];
+                
+                // افزودن تایتل داینامیک بر اساس تاریخ
+                const uniqueDates = [...new Set(data.map(d => d.date))];
+                const chartTitle = uniqueDates.length === 1 ? `روند تغییرات - ${uniqueDates[0]}` : 'روند تغییرات محیطی';
+                
+                Plotly.newPlot('main-chart', envTraces, {...layoutBase, title: chartTitle}, {responsive: true});
+
+                // 2. نمودار وضعیت لاژیک (فقط NBCM1 و NBCM2)
+                const nbcms = ['NBCM1', 'NBCM2'];
+                const colors = ['#22c55e', '#eab308']; 
+                const nTraces = nbcms.map((name, i) => {
+                    const base = (1 - i) * 2; 
+                    return {
+                        x: xLabels,
+                        y: data.map(d => d.nbcm_statuses[name] === 'active' ? (base + 1) : base),
+                        name: name, type: 'scatter', mode: 'lines',
+                        line: { shape: 'hv', width: 2, color: colors[i] }, connectgaps: true
+                    };
+                });
+
+                const tickVals = [], tickTexts = [];
+                nbcms.forEach((name, i) => {
+                    const base = (1 - i) * 2;
+                    tickVals.push(base, base + 1);
+                    tickTexts.push('0', `<b style="color:${colors[i]}">${name}</b>`);
+                });
+
+                Plotly.newPlot('nbcm-chart', nTraces, {
+                    ...layoutBase, title: 'وضعیت دیجیتال (NBCM 1-2)',
+                    yaxis: { tickvals: tickVals, ticktext: tickTexts, gridcolor: '#334155', range: [-0.5, 3.5], fixedrange: true },
+                    showlegend: false
+                }, {responsive: true});
+
+            } catch (err) { console.error("Chart Error:", err); }
+        }
+
+        window.onload = loadCharts;
+        
+        // لاژیک بروزرسانی خودکار با بررسی وضعیت چک باکس
+        setInterval(() => {
+            const isAutoUpdate = document.getElementById('autoUpdateToggle').checked;
+            if(isAutoUpdate) {
+                loadCharts();
+            }
+        }, 30000); 
+    </script>
+</body>
+</html>

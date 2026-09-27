@@ -16,3 +16,8 @@ android/local.properties
 build/
 dist/*
 !dist/RFTester.pyz
+
+# Flask runtime data
+instance/
+/master_industrial.db
+/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].db

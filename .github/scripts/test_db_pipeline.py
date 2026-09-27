@@ -32,6 +32,9 @@ os.chdir(WORKDIR)
 
 import app as flask_app  # noqa: E402
 
+# دیتابیس‌های روزانه هم در پوشه‌ی موقت ساخته شوند
+flask_app.DAILY_DB_DIR = WORKDIR
+
 failures = []
 
 
@@ -131,6 +134,18 @@ conn = sqlite3.connect(os.path.join(WORKDIR, "2026-01-05.db"))
 idx = [r[1] for r in conn.execute("PRAGMA index_list(daily_records)").fetchall()]
 conn.close()
 check("uq_daily_record" in idx, f"ایندکس یکتا ساخته شد (ایندکس‌ها: {idx})")
+
+print("\n[8] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
+check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
+      f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
+flask_app.app.config["TESTING"] = True
+client = flask_app.app.test_client()
+for route in ("/", "/history", "/plot_display", "/upload_dat", "/api/sensor_data"):
+    try:
+        resp = client.get(route)
+        check(resp.status_code == 200, f"{route} -> {resp.status_code}")
+    except Exception as exc:
+        check(False, f"{route} -> {type(exc).__name__}: {exc}")
 
 # ---------------------------------------------------------------- گزارش
 with flask_app.app.app_context():

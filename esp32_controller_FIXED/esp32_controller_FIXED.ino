@@ -75,12 +75,6 @@ const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش�
 const uint32_t PHASE_GAP_MS = 800;          // فاصله‌ی بین فاز باز و بسته
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
-// چون تست‌ها توالی دارند (باز شدن و بسته شدن به هم وابسته‌اند) چکش‌کاری
-// به‌صورت پیش‌فرض خاموش است؛ در صورت نیاز true کنید.
-const bool ENABLE_HAMMERING = false;        // ضربه‌های کوتاه در صورت گیر کردن
-const uint8_t HAMMER_COUNT = 5;
-const uint32_t HAMMER_ON_MS = 50;
-const uint32_t HAMMER_OFF_MS = 100;
 const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای معتبر بودن پالس
 const uint32_t CYCLE_PERIOD_MS = 120000;    // فاصله‌ی بین سیکل‌ها (۲ دقیقه)
 
@@ -97,16 +91,12 @@ IPAddress serverIP(192, 168, 4, 1);
 const int serverPort = 80;
 
 // --- پایداری اتصال ---
-// IP ثابت سریع‌تر است ولی اگر با تنظیمات DHCP گیرنده جور نباشد، اتصال را
-// خراب می‌کند. پیش‌فرض روی DHCP است که همیشه کار می‌کند؛ بعد از اینکه لینک
-// پایدار شد می‌توانید true کنید.
-const bool USE_STATIC_IP = false;
-IPAddress staticIP(192, 168, 4, 50);
-IPAddress gatewayIP(192, 168, 4, 1);
-IPAddress subnetMask(255, 255, 255, 0);
-
-const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;   // فاصله‌ی تلاش مجدد (قبلاً ۲۰ ثانیه)
-const uint32_t TCP_KEEPALIVE_MS = 25000;        // PING برای زنده نگه داشتن سوکت
+// آدرس‌دهی از DHCP خودِ گیرنده گرفته می‌شود؛ ساده‌ترین و مطمئن‌ترین حالت.
+const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;   // مهلت هر تلاش اتصال
+const uint32_t WIFI_BACKOFF_MIN_MS = 2000;       // فاصله‌ی تلاش‌ها: از ۲ ثانیه
+const uint32_t WIFI_BACKOFF_MAX_MS = 30000;      // تا سقف ۳۰ ثانیه
+const uint32_t TCP_KEEPALIVE_MS = 25000;         // PING برای زنده نگه داشتن سوکت
+const uint32_t LINK_DOWN_RESET_MS = 300000;      // ۵ دقیقه قطعی -> ریست کنترل‌شده
 const char *DEVICE_HOSTNAME = "RF-TESTER";
 
 // شبکه‌هایی که برای گرفتن ساعت از NTP امتحان می‌شوند (مودم یا هات‌اسپات گوشی).
@@ -316,10 +306,10 @@ void saveWifiConfig(const String &dSsid, const String &dPass,
 bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
-void connectToDataAp(uint32_t timeoutMs);
+void wifiService();
+void waitForDataLink(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void scanForDataAp();
-void maintainWifiLink(uint32_t &lastTry);
 void saveToSD(const WifiData &data);
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
@@ -405,7 +395,7 @@ void setup() {
 
   // ---------------- اتصال به گیرنده‌ی دیتا ----------------
   if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-    connectToDataAp(30000);
+    waitForDataLink(20000);
   }
 
   // ---------------- سنسور و پین‌ها ----------------
@@ -458,20 +448,19 @@ void loop() {
 //  کامپایل دوباره برای عوض کردن SSID یا پسورد نیست.
 // =====================================================================
 void loadConfig() {
+  prefs.begin("rfcfg", true);  // read-only
+  // شبکه‌ی ساعت همیشه از NVS خوانده می‌شود (کاربر از پورتال واردش می‌کند)
+  cfgTimeSsid = prefs.getString("tssid", "");
+  cfgTimePass = prefs.getString("tpass", "");
+
   if (FORCE_DEFAULT_WIFI) {
     cfgDataSsid = DATA_AP_SSID;
     cfgDataPass = DATA_AP_PASS;
-    cfgTimeSsid = "";
-    cfgTimePass = "";
-    DEBUG_PRINTLN("[CFG] FORCE_DEFAULT_WIFI فعال است؛ تنظیمات NVS نادیده گرفته شد");
-    return;
+    DEBUG_PRINTLN("[CFG] اکسس‌پوینت دیتا از مقادیر ثابت کد استفاده می‌کند");
+  } else {
+    cfgDataSsid = prefs.getString("dssid", DATA_AP_SSID);
+    cfgDataPass = prefs.getString("dpass", DATA_AP_PASS);
   }
-
-  prefs.begin("rfcfg", true);  // read-only
-  cfgDataSsid = prefs.getString("dssid", DATA_AP_SSID);
-  cfgDataPass = prefs.getString("dpass", DATA_AP_PASS);
-  cfgTimeSsid = prefs.getString("tssid", "");
-  cfgTimePass = prefs.getString("tpass", "");
   prefs.end();
 
   // طول رمز چاپ می‌شود (نه خودش) تا اگر خالی یا ناقص ذخیره شده باشد، معلوم شود
@@ -777,9 +766,36 @@ void runSetupPortal(bool timeAlreadyValid) {
 }
 
 /** اتصال (یا اتصال مجدد) به اکسس‌پوینت گیرنده‌ی دیتا */
-void connectToDataAp(uint32_t timeoutMs) {
-  static uint8_t failStreak = 0;
+// =====================================================================
+//                   مدیریت لینک وای‌فای (صنعتی)
+//
+//  یک ماشین حالت ساده و قابل پیش‌بینی:
+//
+//      DOWN ──(اسکن + اتصال)──► UP
+//        ▲                        │
+//        └────(قطعی/تایم‌اوت)─────┘
+//
+//  قواعد:
+//   • هیچ‌وقت دو تلاش اتصال هم‌پوشانی نمی‌کنند.
+//   • فاصله‌ی تلاش‌ها نمایی است (۲ ► ۴ ► ۸ ► ۱۶ ► ۳۰ ثانیه) تا نه شبکه را
+//     شخم بزنیم و نه بعد از یک قطعی لحظه‌ای دیر برگردیم.
+//   • قبل از هر اتصال، کانال و BSSID دقیق با اسکن پیدا می‌شود.
+//   • آمار لینک (اتصال‌ها، شکست‌ها، قطعی‌ها، مدت آپ‌تایم لینک) نگه داشته
+//     می‌شود و در گزارش سلامت چاپ می‌شود.
+// =====================================================================
+struct LinkStats {
+  uint32_t connects = 0;     // چند بار موفق وصل شده
+  uint32_t failures = 0;     // چند تلاش ناموفق
+  uint32_t upSinceMs = 0;    // لینک از چه زمانی بالاست
+  uint32_t downSinceMs = 0;  // لینک از چه زمانی پایین است
+  uint32_t backoffMs = WIFI_BACKOFF_MIN_MS;
+  uint32_t nextTryMs = 0;
+};
 
+LinkStats link;
+
+/** یک تلاش اتصال؛ بلاک‌کننده ولی کراندار. فقط از تسک شبکه صدا زده می‌شود. */
+static bool wifiConnectOnce() {
   DEBUG_PRINTF("[NET] اتصال به '%s' (passLen=%u) ...\n",
                cfgDataSsid.c_str(), (unsigned)cfgDataPass.length());
 
@@ -789,24 +805,15 @@ void connectToDataAp(uint32_t timeoutMs) {
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  // بعضی اکسس‌پوینت‌های ESP8266 به‌صورت WPA/WPA2 مختلط (TKIP) تبلیغ می‌شوند و
-  // ESP32 در حالت پیش‌فرض (حداقل WPA2) از اتصال به آن‌ها خودداری می‌کند.
-  // این خط همان حالت را هم می‌پذیرد.
+  // بعضی اکسس‌پوینت‌های ESP8266 به‌صورت WPA/WPA2 مختلط تبلیغ می‌شوند و ESP32
+  // با حداقلِ پیش‌فرض (WPA2) بی‌صدا از اتصال خودداری می‌کند.
 #if defined(WIFI_AUTH_WPA_PSK)
   WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
 #endif
 
-  if (USE_STATIC_IP && failStreak < 2) {
-    WiFi.config(staticIP, gatewayIP, subnetMask);
-  } else {
-    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // DHCP
-  }
-
-  // --- پیدا کردن کانال و BSSID دقیق قبل از اتصال ---
-  // وقتی کانال و BSSID را بدهیم، ESP32 دیگر همه‌ی کانال‌ها را جستجو نمی‌کند؛
-  // اتصال هم سریع‌تر و هم به‌مراتب مطمئن‌تر می‌شود.
-  int32_t bestChannel = 0;
-  uint8_t bestBssid[6];
+  // کانال و BSSID دقیق را پیدا کن تا اتصال، کورکورانه روی همه‌ی کانال‌ها نباشد
+  int32_t channel = 0;
+  uint8_t bssid[6];
   bool haveBssid = false;
   int32_t bestRssi = -127;
 
@@ -814,107 +821,97 @@ void connectToDataAp(uint32_t timeoutMs) {
   for (int i = 0; i < found; i++) {
     if (WiFi.SSID(i) == cfgDataSsid && WiFi.RSSI(i) > bestRssi) {
       bestRssi = WiFi.RSSI(i);
-      bestChannel = WiFi.channel(i);
-      memcpy(bestBssid, WiFi.BSSID(i), 6);
+      channel = WiFi.channel(i);
+      memcpy(bssid, WiFi.BSSID(i), 6);
       haveBssid = true;
     }
   }
   WiFi.scanDelete();
 
   if (haveBssid) {
-    DEBUG_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d -> اتصال مستقیم\n",
-                 (int)bestChannel, (int)bestRssi);
-    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), bestChannel, bestBssid);
+    DEBUG_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d\n", (int)channel, (int)bestRssi);
+    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid);
   } else {
-    DEBUG_PRINTLN("[NET] AP در اسکن دیده نشد؛ اتصال عادی امتحان می‌شود");
+    DEBUG_PRINTLN("[NET] AP در اسکن نبود؛ اتصال عادی امتحان می‌شود");
     WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
   }
 
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
-    DEBUG_PRINT(".");
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    failStreak = 0;
-    DEBUG_PRINTF("\n[NET] وصل شد. IP: %s  RSSI: %d dBm  ch=%d\n",
-                 WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
-  } else {
-    failStreak++;
-    DEBUG_PRINTF("\n[NET] وصل نشد (status=%d، شکست پیاپی=%u)\n",
-                 (int)WiFi.status(), (unsigned)failStreak);
-    if (failStreak % 5 == 0) scanForDataAp();
-  }
+  return WiFi.status() == WL_CONNECTED;
 }
 
 /**
- * نگهداری اتصال — بدون دست زدن به SD.
- * حتی وقتی سیکل رله در جریان است هم اجرا می‌شود، چون قبلاً تسک شبکه تا پایان
- * سیکل (حدود دو دقیقه) بلاک می‌شد و اگر وسط سیکل وای‌فای قطع می‌شد، تا آخر
- * سیکل هیچ تلاشی برای اتصال مجدد انجام نمی‌گرفت.
+ * سرویس لینک — هر بار که تسک شبکه بیدار می‌شود صدا زده می‌شود.
+ * هم در حالت عادی و هم وسط سیکل رله اجرا می‌شود (به SD دست نمی‌زند).
  */
-void maintainWifiLink(uint32_t &lastTry) {
-  if (WiFi.status() != WL_CONNECTED) {
-    if (millis() - lastTry > WIFI_RETRY_INTERVAL_MS) {
-      lastTry = millis();
-      connectToDataAp(6000);
+void wifiService() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (link.upSinceMs == 0) {
+      link.upSinceMs = millis();
+      link.downSinceMs = 0;
+      link.connects++;
+      link.backoffMs = WIFI_BACKOFF_MIN_MS;
+      DEBUG_PRINTF("[NET] لینک بالا آمد. IP: %s  RSSI: %d dBm  ch=%d\n",
+                   WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
+    }
+
+    // سوکت را بین دو سیکل زنده نگه می‌داریم
+    if (uploadClient.connected() && millis() - lastTxMillis > TCP_KEEPALIVE_MS) {
+      uploadClient.println("PING");
+      lastTxMillis = millis();
+      uint32_t t0 = millis();
+      while (millis() - t0 < 500) {
+        if (uploadClient.available()) {
+          uploadClient.readStringUntil('\n');  // PONG
+          break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+      }
     }
     return;
   }
 
-  // Keep-alive سبک: اگر مدتی چیزی نفرستاده‌ایم، سوکت را زنده نگه می‌داریم
-  if (uploadClient.connected() && millis() - lastTxMillis > TCP_KEEPALIVE_MS) {
-    uploadClient.println("PING");
-    lastTxMillis = millis();
-    uint32_t t0 = millis();
-    while (millis() - t0 < 500) {
-      if (uploadClient.available()) {
-        uploadClient.readStringUntil('\n');  // PONG
-        break;
-      }
-      vTaskDelay(pdMS_TO_TICKS(5));
-    }
+  // ---- لینک پایین است ----
+  if (link.upSinceMs != 0) {
+    link.upSinceMs = 0;
+    link.downSinceMs = millis();
+    if (uploadClient.connected()) uploadClient.stop();
   }
+  if (link.downSinceMs == 0) link.downSinceMs = millis();
+
+  if (millis() < link.nextTryMs) return;  // هنوز نوبت تلاش بعدی نشده
+
+  if (wifiConnectOnce()) {
+    link.backoffMs = WIFI_BACKOFF_MIN_MS;
+    link.nextTryMs = 0;
+    return;
+  }
+
+  link.failures++;
+  DEBUG_PRINTF("[NET] وصل نشد (status=%d) — تلاش بعدی تا %u ثانیه دیگر\n",
+               (int)WiFi.status(), (unsigned)(link.backoffMs / 1000));
+
+  // هر پنج شکست، یک اسکن تشخیصی کامل
+  if (link.failures % 5 == 0) scanForDataAp();
+
+  link.nextTryMs = millis() + link.backoffMs;
+  link.backoffMs = (link.backoffMs * 2 > WIFI_BACKOFF_MAX_MS)
+                     ? WIFI_BACKOFF_MAX_MS
+                     : link.backoffMs * 2;
 }
 
-/** ترجمه‌ی کد خطای قطعی وای‌فای به متن */
-static const char *wifiReasonText(uint8_t reason) {
-  switch (reason) {
-    case 1: return "UNSPECIFIED";
-    case 2: return "AUTH_EXPIRE (رمز/احراز هویت)";
-    case 4: return "ASSOC_EXPIRE";
-    case 5: return "ASSOC_TOOMANY (ظرفیت AP پر است)";
-    case 15: return "4WAY_HANDSHAKE_TIMEOUT (رمز اشتباه)";
-    case 201: return "NO_AP_FOUND (AP دیده نمی‌شود)";
-    case 202: return "AUTH_FAIL (رمز اشتباه)";
-    case 203: return "ASSOC_FAIL";
-    case 204: return "HANDSHAKE_TIMEOUT";
-    case 205: return "CONNECTION_FAIL";
-    default: return "?";
+/** برای استفاده در setup: تا سقف مشخصی منتظر بالا آمدن لینک می‌ماند */
+void waitForDataLink(uint32_t timeoutMs) {
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
+    wifiService();
+    delay(200);
   }
-}
-
-/** یک اسکن تشخیصی: آیا اکسس‌پوینت هدف اصلاً دیده می‌شود؟ */
-void scanForDataAp() {
-  DEBUG_PRINTLN("[SCAN] در حال جستجوی شبکه‌ها ...");
-  int n = WiFi.scanNetworks();
-  bool found = false;
-  for (int i = 0; i < n; i++) {
-    bool isTarget = (WiFi.SSID(i) == cfgDataSsid);
-    if (isTarget) found = true;
-    DEBUG_PRINTF("[SCAN] %s%-20s ch=%2d rssi=%4d enc=%d\n",
-                 isTarget ? "-> " : "   ",
-                 WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i),
-                 (int)WiFi.encryptionType(i));
-  }
-  WiFi.scanDelete();
-
-  if (!found) {
-    DEBUG_PRINTF("[SCAN] '%s' در هوا نیست! برد گیرنده روشن است؟ فاصله زیاد است؟\n",
-                 cfgDataSsid.c_str());
-  } else {
-    DEBUG_PRINTLN("[SCAN] AP دیده می‌شود -> پس مشکل رمز یا تنظیمات IP است");
+  if (WiFi.status() != WL_CONNECTED) {
+    DEBUG_PRINTLN("[NET] فعلاً بدون شبکه ادامه می‌دهیم؛ دیتا روی SD می‌ماند.");
   }
 }
 
@@ -1019,28 +1016,6 @@ static void runTestCycle(bool result[DEVICE_COUNT]) {
     // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
     for (int phase = 0; phase < PHASE_COUNT; phase++) {
       runPhase(phase, got);
-
-      if (ENABLE_HAMMERING) {
-        bool missing = false;
-        for (int d = 0; d < DEVICE_COUNT; d++)
-          if (!got[phase][d]) missing = true;
-
-        if (missing) {
-          DEBUG_PRINTF("[PHASE %s] جواب ناقص -> hammering %ux\n",
-                       PHASE_NAMES[phase], HAMMER_COUNT);
-          beginFeedbackWindow();
-          for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
-            digitalWrite(RELAY_PINS[phase], HIGH);
-            vTaskDelay(pdMS_TO_TICKS(HAMMER_ON_MS));
-            digitalWrite(RELAY_PINS[phase], LOW);
-            vTaskDelay(pdMS_TO_TICKS(HAMMER_OFF_MS));
-          }
-          vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
-          endFeedbackWindow();
-          for (int d = 0; d < DEVICE_COUNT; d++)
-            if (fbSeen[phase][d]) got[phase][d] = true;
-        }
-      }
 
       vTaskDelay(pdMS_TO_TICKS(PHASE_GAP_MS));  // فاصله‌ی فاز باز تا فاز بستن
     }
@@ -1443,7 +1418,6 @@ void TaskInternalWiFiConnection(void *pv) {
   WiFiServer debugServer(80);
   bool debugServerStarted = false;
   bool apStarted = false;
-  uint32_t lastReconnectTry = 0;
 
   for (;;) {
     hbNet++;
@@ -1466,8 +1440,8 @@ void TaskInternalWiFiConnection(void *pv) {
         EventBits_t permit = xEventGroupWaitBits(xSystemEvents, BIT_WIFI_PERMIT,
                                                  pdFALSE, pdTRUE, pdMS_TO_TICKS(2000));
         if (!(permit & BIT_WIFI_PERMIT)) {
-          maintainWifiLink(lastReconnectTry);
-          break;  // سیکل رله در جریان است؛ فقط لینک را نگه می‌داریم
+          wifiService();   // سیکل رله در جریان است؛ فقط لینک را نگه می‌داریم
+          break;
         }
 
         // الف) هر چه در صف است روی SD ذخیره شود
@@ -1479,8 +1453,8 @@ void TaskInternalWiFiConnection(void *pv) {
         }
 
         // ب) اگر شبکه قطع است، هر ۲۰ ثانیه دوباره تلاش کن (باگ نسخه‌ی قبل)
+        wifiService();
         if (WiFi.status() != WL_CONNECTED) {
-          maintainWifiLink(lastReconnectTry);
           vTaskDelay(pdMS_TO_TICKS(500));
           break;
         }
@@ -1698,6 +1672,9 @@ void TaskHealthMonitor(void *pv) {
                  WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                  (unsigned)wifiDropCount,
                  (unsigned long)(millis() / 1000));
+    DEBUG_PRINTF("[LINK] connects=%u failures=%u linkUp=%lus\n",
+                 (unsigned)link.connects, (unsigned)link.failures,
+                 (unsigned long)(link.upSinceMs ? (millis() - link.upSinceMs) / 1000 : 0));
 
     if (freeHeap < 20000) {
       DEBUG_PRINTLN("[HEALTH] WARNING: low heap!");
@@ -1717,17 +1694,11 @@ void TaskHealthMonitor(void *pv) {
 
     // اگر وای‌فای خیلی طولانی قطع بماند، یک ریست کنترل‌شده معمولاً
     // درایور را از حالت گیرکرده بیرون می‌آورد (دیتا روی SD امن است)
-    static uint32_t wifiDownRounds = 0;
     if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-      if (WiFi.status() != WL_CONNECTED) {
-        wifiDownRounds++;
-        if (wifiDownRounds >= 10) {   // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
-          Serial.println("[HEALTH] وای‌فای ۵ دقیقه قطع بوده -> ریست کنترل‌شده");
-          delay(200);
-          ESP.restart();
-        }
-      } else {
-        wifiDownRounds = 0;
+      if (link.downSinceMs != 0 && millis() - link.downSinceMs > LINK_DOWN_RESET_MS) {
+        Serial.println("[HEALTH] لینک بیش از حد مجاز قطع بوده -> ریست کنترل‌شده");
+        delay(200);
+        ESP.restart();
       }
     }
 

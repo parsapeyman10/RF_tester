@@ -35,7 +35,7 @@ const unsigned long AP_RETRY_DELAY_MS = 1000;
 
 // --- پایداری اکسس‌پوینت ---
 const uint8_t  AP_CHANNEL = 6;            // کانال ثابت (کمترین تداخل معمول)
-const uint8_t  AP_MAX_CLIENTS = 4;
+const uint8_t  AP_MAX_CLIENTS = 8;        // سخت‌گیری بی‌دلیل نکنیم
 const float    AP_TX_POWER = 20.5;        // حداکثر توان خروجی
 const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
 const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
@@ -176,13 +176,27 @@ void loop() {
   if (millis() - lastHealth > AP_HEALTH_PERIOD_MS) {
     lastHealth = millis();
     uint8_t stations = WiFi.softAPgetStationNum();
-    DBG_PRINTF("[HEALTH] clients=%u heap=%u up=%lus\n",
-               stations, ESP.getFreeHeap(), millis() / 1000);
+    DBG_PRINTF("[HEALTH] ssid=%s ch=%u clients=%u heap=%u up=%lus\n",
+               SSID_NAME, WiFi.channel(), stations, ESP.getFreeHeap(), millis() / 1000);
 
     // اگر اکسس‌پوینت به هر دلیلی پایین آمده باشد، دوباره بالا می‌آید
     if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() == IPAddress(0, 0, 0, 0)) {
       DBG_PRINTLN("[HEALTH] AP پایین است -> راه‌اندازی مجدد");
       initAccessPoint();
+    }
+
+    // اگر خیلی طولانی هیچ کلاینتی وصل نشد، AP را تازه می‌کنیم.
+    // (گاهی SoftAP بدون اینکه پایین بیاید، دیگر کسی را نمی‌پذیرد.)
+    static uint8_t noClientRounds = 0;
+    if (stations == 0) {
+      noClientRounds++;
+      if (noClientRounds >= 10) {   // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
+        DBG_PRINTLN("[HEALTH] ۵ دقیقه بدون کلاینت -> AP تازه‌سازی می‌شود");
+        noClientRounds = 0;
+        initAccessPoint();
+      }
+    } else {
+      noClientRounds = 0;
     }
   }
 
@@ -199,7 +213,9 @@ void initAccessPoint() {
   //  - کانال ثابت به‌جای انتخاب خودکار
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.setOutputPower(AP_TX_POWER);
-  WiFi.setPhyMode(WIFI_PHY_MODE_11N);
+  // توجه: setPhyMode(11N) عمداً حذف شد. اجبار AP به حالت N باعث می‌شود
+  // بعضی کلاینت‌ها (از جمله ESP32 در شرایط خاص) اصلاً associate نشوند.
+  // حالت پیش‌فرض b/g/n سازگارترین است.
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1),
                     IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));

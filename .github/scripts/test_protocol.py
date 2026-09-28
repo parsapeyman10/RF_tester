@@ -135,12 +135,20 @@ check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سیکل حداکثر �
 # ------------------------- 5b) پایداری وای‌فای
 check("WiFi.setSleep(false)" in esp32, "[ESP32] Modem-Sleep خاموش است")
 check("WiFi.setAutoReconnect(true)" in esp32, "[ESP32] اتصال مجدد خودکار فعال است")
-check("USE_STATIC_IP" in esp32 and "WiFi.config(staticIP" in esp32,
-      "[ESP32] امکان IP ثابت برای اتصال سریع‌تر وجود دارد")
+check("WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid)" in esp32,
+      "[ESP32] اتصال با کانال و BSSID دقیق انجام می‌شود (نه کورکورانه)")
+check("setMinSecurity" in esp32, "[ESP32] اکسس‌پوینت WPA/WPA2 مختلط هم پذیرفته می‌شود")
+check("WIFI_BACKOFF_MIN_MS" in esp32 and "WIFI_BACKOFF_MAX_MS" in esp32,
+      "[ESP32] فاصله‌ی تلاش‌ها نمایی است (بدون شخم زدن شبکه)")
+check("struct LinkStats" in esp32, "[ESP32] آمار لینک نگه داشته می‌شود")
 check("WiFi.onEvent(onWiFiEvent)" in esp32, "[ESP32] رویدادهای وای‌فای لاگ می‌شوند")
 check("uploadClient.connected()" in esp32, "[ESP32] اتصال TCP بین رکوردها باز می‌ماند")
-check("void maintainWifiLink(" in esp32,
-      "[ESP32] نگهداری لینک حتی حین سیکل رله انجام می‌شود")
+check("void wifiService(" in esp32,
+      "[ESP32] کل منطق لینک در یک سرویس واحد جمع شده")
+check(esp32.count("WiFi.begin(") <= 3,
+      "[ESP32] فراخوانی WiFi.begin در چند جای پراکنده تکرار نشده")
+check("HAMMER" not in esp32, "[ESP32] کد چکش‌کاری (بازمانده‌ی متد قدیمی) حذف شده")
+check("staticIP" not in esp32, "[ESP32] مسیر IP ثابت حذف شده و فقط DHCP می‌ماند")
 check("portMAX_DELAY);" not in esp32.split("BIT_WIFI_PERMIT,")[1][:120],
       "[ESP32] تسک شبکه دیگر تا پایان سیکل بلاک نمی‌شود")
 check('uploadClient.println("PING")' in esp32, "[ESP32] keep-alive ارسال می‌شود")

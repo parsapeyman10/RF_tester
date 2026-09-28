@@ -891,4 +891,8 @@ if __name__ == '__main__':
     serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
     serial_thread.start()
     
-    app.run(debug=True, port=5000, use_reloader=False)
+    # host='0.0.0.0' لازم است تا گوشی هم بتواند به سرور وصل شود؛
+    # با مقدار پیش‌فرض (127.0.0.1) فقط از خود همان کامپیوتر در دسترس بود.
+    print('[INIT] سرور روی http://0.0.0.0:5000 بالا آمد '
+          '(از گوشی: http://<IP کامپیوتر>:5000)')
+    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)

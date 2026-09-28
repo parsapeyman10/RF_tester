@@ -139,6 +139,14 @@ check("USE_STATIC_IP" in esp32 and "WiFi.config(staticIP" in esp32,
       "[ESP32] امکان IP ثابت برای اتصال سریع‌تر وجود دارد")
 check("WiFi.onEvent(onWiFiEvent)" in esp32, "[ESP32] رویدادهای وای‌فای لاگ می‌شوند")
 check("uploadClient.connected()" in esp32, "[ESP32] اتصال TCP بین رکوردها باز می‌ماند")
+check("void maintainWifiLink(" in esp32,
+      "[ESP32] نگهداری لینک حتی حین سیکل رله انجام می‌شود")
+check("portMAX_DELAY);" not in esp32.split("BIT_WIFI_PERMIT,")[1][:120],
+      "[ESP32] تسک شبکه دیگر تا پایان سیکل بلاک نمی‌شود")
+check('uploadClient.println("PING")' in esp32, "[ESP32] keep-alive ارسال می‌شود")
+check('strcmp(rxBuffer, "PING")' in esp8266 and 'println("PONG")' in esp8266,
+      "[ESP8266] به PING پاسخ PONG می‌دهد و آن را خطای فرمت نمی‌شمارد")
+check("wifiDropCount" in esp32, "[ESP32] تعداد قطعی‌ها شمرده و گزارش می‌شود")
 check("WiFi.setSleepMode(WIFI_NONE_SLEEP)" in esp8266, "[ESP8266] حالت خواب AP خاموش است")
 check("AP_CHANNEL" in esp8266, "[ESP8266] کانال AP ثابت است")
 check("CLIENT_IDLE_TIMEOUT_MS = 60000" in esp8266,

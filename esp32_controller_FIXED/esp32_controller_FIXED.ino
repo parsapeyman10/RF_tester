@@ -99,6 +99,7 @@ IPAddress gatewayIP(192, 168, 4, 1);
 IPAddress subnetMask(255, 255, 255, 0);
 
 const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;   // فاصله‌ی تلاش مجدد (قبلاً ۲۰ ثانیه)
+const uint32_t TCP_KEEPALIVE_MS = 25000;        // PING برای زنده نگه داشتن سوکت
 const char *DEVICE_HOSTNAME = "RF-TESTER";
 
 // شبکه‌هایی که برای گرفتن ساعت از NTP امتحان می‌شوند (مودم یا هات‌اسپات گوشی).
@@ -296,6 +297,10 @@ volatile bool portalWantsDataView = false;
 // --- ضربان تسک‌ها برای ناظر پایداری ---
 volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
 
+// آمار پایداری شبکه
+volatile uint32_t wifiDropCount = 0;   // چند بار لینک قطع شده
+uint32_t lastTxMillis = 0;             // آخرین باری که چیزی روی سوکت فرستادیم
+
 // Prototypes
 void TaskHealthMonitor(void *pv);
 void loadConfig();
@@ -306,6 +311,7 @@ void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void connectToDataAp(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event);
+void maintainWifiLink(uint32_t &lastTry);
 void saveToSD(const WifiData &data);
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
@@ -771,6 +777,36 @@ void connectToDataAp(uint32_t timeoutMs) {
   }
 }
 
+/**
+ * نگهداری اتصال — بدون دست زدن به SD.
+ * این تابع حتی وقتی سیکل رله در جریان است هم اجرا می‌شود، چون قبلاً تسک شبکه
+ * تا پایان سیکل (حدود دو دقیقه) کامل بلاک می‌شد و اگر وسط سیکل وای‌فای قطع
+ * می‌شد، تا آخر سیکل هیچ تلاشی برای اتصال مجدد انجام نمی‌گرفت.
+ */
+void maintainWifiLink(uint32_t &lastTry) {
+  if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastTry > WIFI_RETRY_INTERVAL_MS) {
+      lastTry = millis();
+      connectToDataAp(6000);
+    }
+    return;
+  }
+
+  // Keep-alive سبک: اگر مدتی چیزی نفرستاده‌ایم، سوکت را زنده نگه می‌داریم
+  if (uploadClient.connected() && millis() - lastTxMillis > TCP_KEEPALIVE_MS) {
+    uploadClient.println("PING");
+    lastTxMillis = millis();
+    uint32_t t0 = millis();
+    while (millis() - t0 < 500) {
+      if (uploadClient.available()) {
+        uploadClient.readStringUntil('\n');  // PONG
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
+  }
+}
+
 /** لاگ رویدادهای وای‌فای — برای اینکه دلیل قطعی‌ها معلوم شود */
 void onWiFiEvent(WiFiEvent_t event) {
   switch (event) {
@@ -781,7 +817,8 @@ void onWiFiEvent(WiFiEvent_t event) {
       DEBUG_PRINTF("[NET] IP گرفت: %s\n", WiFi.localIP().toString().c_str());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-      DEBUG_PRINTLN("[NET] اتصال قطع شد -> تلاش مجدد");
+      wifiDropCount++;
+      DEBUG_PRINTF("[NET] اتصال قطع شد (بار %u) -> تلاش مجدد\n", (unsigned)wifiDropCount);
       break;
     default:
       break;
@@ -1309,7 +1346,15 @@ void TaskInternalWiFiConnection(void *pv) {
           debugServerStarted = false;
         }
 
-        xEventGroupWaitBits(xSystemEvents, BIT_WIFI_PERMIT, pdFALSE, pdTRUE, portMAX_DELAY);
+        // قبلاً اینجا portMAX_DELAY بود و تسک شبکه تا پایان سیکل رله
+        // کامل می‌خوابید. حالا هر ۲ ثانیه بیدار می‌شود و اتصال را زنده
+        // نگه می‌دارد، ولی تا اجازه نگیرد سراغ SD/آپلود نمی‌رود.
+        EventBits_t permit = xEventGroupWaitBits(xSystemEvents, BIT_WIFI_PERMIT,
+                                                 pdFALSE, pdTRUE, pdMS_TO_TICKS(2000));
+        if (!(permit & BIT_WIFI_PERMIT)) {
+          maintainWifiLink(lastReconnectTry);
+          break;  // سیکل رله در جریان است؛ فقط لینک را نگه می‌داریم
+        }
 
         // الف) هر چه در صف است روی SD ذخیره شود
         while (xQueueReceive(xDataQueue, &q, pdMS_TO_TICKS(10)) == pdPASS) {
@@ -1321,10 +1366,7 @@ void TaskInternalWiFiConnection(void *pv) {
 
         // ب) اگر شبکه قطع است، هر ۲۰ ثانیه دوباره تلاش کن (باگ نسخه‌ی قبل)
         if (WiFi.status() != WL_CONNECTED) {
-          if (millis() - lastReconnectTry > WIFI_RETRY_INTERVAL_MS) {
-            lastReconnectTry = millis();
-            connectToDataAp(8000);
-          }
+          maintainWifiLink(lastReconnectTry);
           vTaskDelay(pdMS_TO_TICKS(500));
           break;
         }
@@ -1366,6 +1408,7 @@ void TaskInternalWiFiConnection(void *pv) {
                   char buf[300];
                   formatRecordLine(stored, buf, sizeof(buf));  // فرمت واحد پروژه
                   uploadClient.println(buf);
+                  lastTxMillis = millis();
 
                   uint32_t t0 = millis();
                   bool ack = false;
@@ -1533,10 +1576,13 @@ void TaskHealthMonitor(void *pv) {
     size_t freeHeap = ESP.getFreeHeap();
     size_t minHeap = ESP.getMinFreeHeap();
 
-    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | up=%lus\n",
+    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | wifi=%s rssi=%d drops=%u | up=%lus\n",
                  (unsigned)freeHeap, (unsigned)minHeap,
                  (unsigned)hbRelay, (unsigned)hbDigital,
                  (unsigned)hbSht, (unsigned)hbNet,
+                 WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+                 WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
+                 (unsigned)wifiDropCount,
                  (unsigned long)(millis() / 1000));
 
     if (freeHeap < 20000) {

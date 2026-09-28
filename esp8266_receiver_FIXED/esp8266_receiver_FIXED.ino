@@ -128,8 +128,13 @@ void loop() {
             DBG_PRINT("[LINE RECV]: ");
             DBG_PRINTLN(rxBuffer);
 
+            // Keep-alive: ESP32 وقتی مدتی دیتا ندارد PING می‌فرستد تا
+            // سوکت زنده بماند. نباید به‌عنوان خطای فرمت جواب داده شود.
+            if (strcmp(rxBuffer, "PING") == 0) {
+              currentClient.println("PONG");
+            }
             // تحلیل دیتا و بررسی مطابقت با فرمت درخواستی
-            if (parseData(rxBuffer)) {
+            else if (parseData(rxBuffer)) {
               // ارسال تاییدیه OK به فرستنده (ESP32)
               currentClient.println("OK");
               DBG_PRINTLN("[RESPONSE]: Sent 'OK' to Client (Handshake Complete)");

@@ -751,49 +751,70 @@ static void endFeedbackWindow() {
   xEventGroupWaitBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE, pdTRUE, pdTRUE, pdMS_TO_TICKS(500));
 }
 
-static bool channelSucceeded(int ch) {
-  bool o = fbOpenSeen[ch];
-  bool c = fbCloseSeen[ch];
-  return REQUIRE_BOTH_FEEDBACKS ? (o && c) : (o || c);
-}
-
-/** یک کانال (یک رله + BCM متناظرش) را کامل تست می‌کند */
+/**
+ * تست کامل یک کانال (یک رله + BCM متناظرش)
+ *
+ * منطق تکرار — دقیقاً طبق درخواست:
+ *   • حداکثر ۳ بار تلاش (RELAY_MAX_ATTEMPTS).
+ *   • اگر در همان تلاش دیدیم که هم «باز شد» و هم «بسته شد»، کار تمام است
+ *     و دیگر تکراری در کار نیست.
+ *   • اگر یکی‌شان آمد و آن یکی نه، همان‌که آمده **حفظ می‌شود** و فقط
+ *     برای بخشِ نیامده دوباره تلاش می‌کنیم — تا سقف سه بار.
+ *   • نتیجه‌ی تجمعی است: اگر Open در تلاش ۱ و Close در تلاش ۲ دیده شود،
+ *     کانال موفق حساب می‌شود.
+ */
 static bool testChannel(int ch) {
   const ChannelConfig &cfg = CHANNELS[ch];
   DEBUG_PRINTF("\n[TEST] ---- %s (relay pin %u) ----\n", cfg.name, cfg.relayPin);
 
+  // نتیجه‌ی تجمعی این کانال در طول کل سیکل
+  bool gotOpen = false;
+  bool gotClose = false;
+
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
-    DEBUG_PRINTF("[TEST] %s attempt %u/%u\n", cfg.name, attempt, RELAY_MAX_ATTEMPTS);
+
+    if (attempt == 1) {
+      DEBUG_PRINTF("[TEST] %s attempt %u/%u\n", cfg.name, attempt, RELAY_MAX_ATTEMPTS);
+    } else {
+      DEBUG_PRINTF("[TEST] %s attempt %u/%u  (فقط برای: %s%s)\n",
+                   cfg.name, attempt, RELAY_MAX_ATTEMPTS,
+                   gotOpen ? "" : "Open ", gotClose ? "" : "Close");
+    }
 
     // =============================================================
-    //  ترتیب دقیق درخواستی:
-    //    1) رله فعال
-    //    2) مانیتورینگ فعال
-    //    3) صبر به اندازه‌ی زمان مجاز
-    //    4) مانیتورینگ غیرفعال
-    //    5) رله غیرفعال
+    //  ترتیب: رله فعال -> مانیتورینگ فعال -> زمان مجاز ->
+    //         مانیتورینگ غیرفعال -> رله غیرفعال
     // =============================================================
     digitalWrite(cfg.relayPin, HIGH);                 // 1
-    vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       // فرصت پایدار شدن کنتاکت
+    vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //   پایدار شدن کنتاکت
     beginFeedbackWindow();                            // 2
     vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3
     endFeedbackWindow();                              // 4
     digitalWrite(cfg.relayPin, LOW);                  // 5
 
-    bool openSeen = fbOpenSeen[ch];
-    bool closeSeen = fbCloseSeen[ch];
-    DEBUG_PRINTF("[TEST] %s feedback -> Open:%s Close:%s\n",
-                 cfg.name, openSeen ? "YES" : "NO", closeSeen ? "YES" : "NO");
+    bool newOpen = fbOpenSeen[ch];
+    bool newClose = fbCloseSeen[ch];
 
-    if (channelSucceeded(ch)) {
-      DEBUG_PRINTF("[TEST] %s OK\n", cfg.name);
+    // آنچه یک بار تأیید شد، دیگر از دست نمی‌رود
+    gotOpen = gotOpen || newOpen;
+    gotClose = gotClose || newClose;
+
+    DEBUG_PRINTF("[TEST] %s این تلاش -> Open:%s Close:%s | مجموع -> Open:%s Close:%s\n",
+                 cfg.name,
+                 newOpen ? "YES" : "NO", newClose ? "YES" : "NO",
+                 gotOpen ? "YES" : "NO", gotClose ? "YES" : "NO");
+
+    bool done = REQUIRE_BOTH_FEEDBACKS ? (gotOpen && gotClose) : (gotOpen || gotClose);
+    if (done) {
+      DEBUG_PRINTF("[TEST] %s OK (در تلاش %u) — تکرار لازم نیست\n", cfg.name, attempt);
       return true;
     }
 
-    // نیمه‌کاره (مثلاً باز شد ولی بسته نشد) -> چکش‌کاری با همان ترتیب
-    bool jammed = (openSeen != closeSeen);
+    // فقط یکی مانده -> حالت گیرکرده؛ چکش‌کاری برای همان بخشِ نیامده
+    bool jammed = (gotOpen != gotClose);
     if (ENABLE_HAMMERING && jammed) {
-      DEBUG_PRINTF("[TEST] %s JAM -> hammering %ux\n", cfg.name, HAMMER_COUNT);
+      DEBUG_PRINTF("[TEST] %s JAM (%s نیامده) -> hammering %ux\n",
+                   cfg.name, gotOpen ? "Close" : "Open", HAMMER_COUNT);
 
       beginFeedbackWindow();
       for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
@@ -805,8 +826,12 @@ static bool testChannel(int ch) {
       vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
       endFeedbackWindow();
 
-      if (channelSucceeded(ch)) {
-        DEBUG_PRINTF("[TEST] %s recovered after hammering\n", cfg.name);
+      gotOpen = gotOpen || fbOpenSeen[ch];
+      gotClose = gotClose || fbCloseSeen[ch];
+
+      done = REQUIRE_BOTH_FEEDBACKS ? (gotOpen && gotClose) : (gotOpen || gotClose);
+      if (done) {
+        DEBUG_PRINTF("[TEST] %s بعد از چکش‌کاری OK شد\n", cfg.name);
         return true;
       }
     }
@@ -814,7 +839,9 @@ static bool testChannel(int ch) {
     if (attempt < RELAY_MAX_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
   }
 
-  DEBUG_PRINTF("[TEST] %s FAILED\n", cfg.name);
+  DEBUG_PRINTF("[TEST] %s FAILED بعد از %u تلاش (Open:%s Close:%s)\n",
+               cfg.name, RELAY_MAX_ATTEMPTS,
+               gotOpen ? "YES" : "NO", gotClose ? "YES" : "NO");
   return false;
 }
 

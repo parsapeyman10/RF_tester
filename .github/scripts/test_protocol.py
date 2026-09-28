@@ -109,6 +109,14 @@ if block:
     check(-1 < i_on < i_begin < i_end < i_off,
           f"ترتیب رله/مانیتورینگ درست است (on={i_on} mon+={i_begin} mon-={i_end} off={i_off})")
 
+# منطق تکرار: نتیجه باید تجمعی باشد و به‌محض کامل شدن، تکرار متوقف شود
+if block:
+    check("gotOpen = gotOpen || newOpen" in block and "gotClose = gotClose || newClose" in block,
+          "نتیجه‌ی فیدبک بین تلاش‌ها حفظ می‌شود (تجمعی)")
+    check("if (done) {" in block and "return true;" in block,
+          "به‌محض اینکه هم باز و هم بسته دیده شد، تکرار متوقف می‌شود")
+check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سقف تکرار سه بار است")
+
 # ------------------------- 6) فرمت واحد دیتا برای همه‌ی مقصدها
 check("void formatRecordLine(" in esp32, "[ESP32] تابع واحد formatRecordLine تعریف شده")
 check(esp32.count("formatRecordLine(") >= 3,

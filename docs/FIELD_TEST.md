@@ -67,16 +67,23 @@ const ChannelConfig CHANNELS[] = {
 
 [TEST] ---- BCM1 (relay pin 2) ----
 [TEST] BCM1 attempt 1/3
-[TEST] BCM1 feedback -> Open:YES Close:YES
-[TEST] BCM1 OK
+[TEST] BCM1 این تلاش -> Open:YES Close:YES | مجموع -> Open:YES Close:YES
+[TEST] BCM1 OK (در تلاش 1) — تکرار لازم نیست
 
 [TEST] ---- BCM2 (relay pin 4) ----
 [TEST] BCM2 attempt 1/3
-[TEST] BCM2 feedback -> Open:YES Close:YES
-[TEST] BCM2 OK
+[TEST] BCM2 این تلاش -> Open:YES Close:NO | مجموع -> Open:YES Close:NO
+[TEST] BCM2 JAM (Close نیامده) -> hammering 5x
+[TEST] BCM2 attempt 2/3  (فقط برای: Close)
+[TEST] BCM2 این تلاش -> Open:NO Close:YES | مجموع -> Open:YES Close:YES
+[TEST] BCM2 OK (در تلاش 2) — تکرار لازم نیست
 
 [CYCLE] #1178  BCM1=OK  BCM2=OK  T=24.10 H=41.20 @ 2026-09-28 16:20:11
 ```
+
+**منطق تکرار:** نتیجه تجمعی است؛ هرچه یک بار تأیید شد دیگر از دست نمی‌رود.
+اگر هم باز و هم بسته دیده شد، بلافاصله تمام و دیگر تکراری نیست. اگر فقط یکی
+آمد، تلاش بعدی برای همان بخشِ نیامده انجام می‌شود — نهایتاً ۳ بار.
 
 بررسی کنید:
 

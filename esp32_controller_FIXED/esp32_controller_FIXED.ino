@@ -87,6 +87,10 @@ const uint32_t CYCLE_PERIOD_MS = 120000;    // فاصله‌ی بین سیکل�
 // --- شبکه ---
 const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت کامپیوتر)
 const char *DATA_AP_PASS = "12345678";
+
+// اگر true شود، تنظیمات ذخیره‌شده در NVS نادیده گرفته می‌شوند و همین دو مقدار
+// بالا استفاده می‌شوند. برای وقتی که مطمئن نیستید در پورتال چه ذخیره کرده‌اید.
+const bool FORCE_DEFAULT_WIFI = false;
 IPAddress serverIP(192, 168, 4, 1);
 const int serverPort = 80;
 
@@ -310,7 +314,8 @@ bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void connectToDataAp(uint32_t timeoutMs);
-void onWiFiEvent(WiFiEvent_t event);
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+void scanForDataAp();
 void maintainWifiLink(uint32_t &lastTry);
 void saveToSD(const WifiData &data);
 static String dayFilePath(int y, int m, int d);
@@ -351,7 +356,7 @@ void setup() {
   xGlobalStateMutex = xSemaphoreCreateMutex();
   xSystemEvents = xEventGroupCreate();
 
-  WiFi.onEvent(onWiFiEvent);
+  WiFi.onEvent(onWiFiEvent);  // با اطلاعات دلیل قطعی
   loadConfig();
   rtc.initClock();
 
@@ -450,6 +455,15 @@ void loop() {
 //  کامپایل دوباره برای عوض کردن SSID یا پسورد نیست.
 // =====================================================================
 void loadConfig() {
+  if (FORCE_DEFAULT_WIFI) {
+    cfgDataSsid = DATA_AP_SSID;
+    cfgDataPass = DATA_AP_PASS;
+    cfgTimeSsid = "";
+    cfgTimePass = "";
+    DEBUG_PRINTLN("[CFG] FORCE_DEFAULT_WIFI فعال است؛ تنظیمات NVS نادیده گرفته شد");
+    return;
+  }
+
   prefs.begin("rfcfg", true);  // read-only
   cfgDataSsid = prefs.getString("dssid", DATA_AP_SSID);
   cfgDataPass = prefs.getString("dpass", DATA_AP_PASS);
@@ -457,9 +471,18 @@ void loadConfig() {
   cfgTimePass = prefs.getString("tpass", "");
   prefs.end();
 
-  DEBUG_PRINTF("[CFG] data-AP='%s'  time-AP='%s'\n",
-               cfgDataSsid.c_str(),
-               cfgTimeSsid.length() ? cfgTimeSsid.c_str() : "(none)");
+  // طول رمز چاپ می‌شود (نه خودش) تا اگر خالی یا ناقص ذخیره شده باشد، معلوم شود
+  DEBUG_PRINTF("[CFG] data-AP='%s' passLen=%u | time-AP='%s' passLen=%u\n",
+               cfgDataSsid.c_str(), (unsigned)cfgDataPass.length(),
+               cfgTimeSsid.length() ? cfgTimeSsid.c_str() : "(none)",
+               (unsigned)cfgTimePass.length());
+
+  if (cfgDataPass.length() < 8) {
+    DEBUG_PRINTLN("[CFG] هشدار: رمز ذخیره‌شده کوتاه‌تر از ۸ کاراکتر است -> "
+                  "به مقدار پیش‌فرض برمی‌گردیم");
+    cfgDataSsid = DATA_AP_SSID;
+    cfgDataPass = DATA_AP_PASS;
+  }
 }
 
 void saveWifiConfig(const String &dSsid, const String &dPass,
@@ -467,9 +490,13 @@ void saveWifiConfig(const String &dSsid, const String &dPass,
   prefs.begin("rfcfg", false);
   if (dSsid.length()) {
     prefs.putString("dssid", dSsid);
-    prefs.putString("dpass", dPass);
     cfgDataSsid = dSsid;
-    cfgDataPass = dPass;
+    // رمز فقط وقتی نوشته می‌شود که واقعاً وارد شده باشد؛ فیلد خالی نباید
+    // رمز قبلی را پاک کند (منبع باگِ «SSID درست ولی auth مدام fail»)
+    if (dPass.length()) {
+      prefs.putString("dpass", dPass);
+      cfgDataPass = dPass;
+    }
   }
   prefs.putString("tssid", tSsid);
   prefs.putString("tpass", tPass);
@@ -748,17 +775,27 @@ void runSetupPortal(bool timeAlreadyValid) {
 
 /** اتصال (یا اتصال مجدد) به اکسس‌پوینت گیرنده‌ی دیتا */
 void connectToDataAp(uint32_t timeoutMs) {
-  DEBUG_PRINTF("[NET] Connecting to %s ...\n", cfgDataSsid.c_str());
+  static uint8_t failStreak = 0;
 
+  DEBUG_PRINTF("[NET] Connecting to '%s' (passLen=%u) ...\n",
+               cfgDataSsid.c_str(), (unsigned)cfgDataPass.length());
+
+  // وضعیت قبلی کاملاً پاک شود تا تلاش‌های روی‌هم‌افتاده نداشته باشیم
+  WiFi.disconnect(true, true);
+  delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  if (USE_STATIC_IP) {
-    // بدون DHCP: اتصال سریع‌تر و بدون قطعی‌های ناشی از تمدید نشدن lease
+  // بعد از ۳ شکست پیاپی، IP ثابت را کنار می‌گذاریم و با DHCP امتحان می‌کنیم
+  bool useStatic = USE_STATIC_IP && (failStreak < 3);
+  if (useStatic) {
     if (!WiFi.config(staticIP, gatewayIP, subnetMask)) {
-      DEBUG_PRINTLN("[NET] هشدار: تنظیم IP ثابت ناموفق بود، DHCP استفاده می‌شود");
+      DEBUG_PRINTLN("[NET] هشدار: تنظیم IP ثابت ناموفق بود");
     }
+  } else {
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // برگشت به DHCP
+    if (USE_STATIC_IP) DEBUG_PRINTLN("[NET] IP ثابت جواب نداد -> تلاش با DHCP");
   }
 
   WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
@@ -770,18 +807,24 @@ void connectToDataAp(uint32_t timeoutMs) {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    DEBUG_PRINTF("\n[NET] Connected. IP: %s  RSSI: %d dBm\n",
-                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    failStreak = 0;
+    DEBUG_PRINTF("\n[NET] Connected. IP: %s  RSSI: %d dBm  ch=%d\n",
+                 WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
   } else {
-    DEBUG_PRINTF("\n[NET] وصل نشد (status=%d). دیتا روی SD می‌ماند.\n", (int)WiFi.status());
+    failStreak++;
+    DEBUG_PRINTF("\n[NET] وصل نشد (status=%d، شکست پیاپی=%u)\n",
+                 (int)WiFi.status(), (unsigned)failStreak);
+
+    // هر ۵ شکست یک بار اسکن تشخیصی بزن تا معلوم شود AP اصلاً هست یا نه
+    if (failStreak % 5 == 0) scanForDataAp();
   }
 }
 
 /**
  * نگهداری اتصال — بدون دست زدن به SD.
- * این تابع حتی وقتی سیکل رله در جریان است هم اجرا می‌شود، چون قبلاً تسک شبکه
- * تا پایان سیکل (حدود دو دقیقه) کامل بلاک می‌شد و اگر وسط سیکل وای‌فای قطع
- * می‌شد، تا آخر سیکل هیچ تلاشی برای اتصال مجدد انجام نمی‌گرفت.
+ * حتی وقتی سیکل رله در جریان است هم اجرا می‌شود، چون قبلاً تسک شبکه تا پایان
+ * سیکل (حدود دو دقیقه) بلاک می‌شد و اگر وسط سیکل وای‌فای قطع می‌شد، تا آخر
+ * سیکل هیچ تلاشی برای اتصال مجدد انجام نمی‌گرفت.
  */
 void maintainWifiLink(uint32_t &lastTry) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -807,8 +850,48 @@ void maintainWifiLink(uint32_t &lastTry) {
   }
 }
 
+/** ترجمه‌ی کد خطای قطعی وای‌فای به متن */
+static const char *wifiReasonText(uint8_t reason) {
+  switch (reason) {
+    case 1: return "UNSPECIFIED";
+    case 2: return "AUTH_EXPIRE (رمز/احراز هویت)";
+    case 4: return "ASSOC_EXPIRE";
+    case 5: return "ASSOC_TOOMANY (ظرفیت AP پر است)";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT (رمز اشتباه)";
+    case 201: return "NO_AP_FOUND (AP دیده نمی‌شود)";
+    case 202: return "AUTH_FAIL (رمز اشتباه)";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    default: return "?";
+  }
+}
+
+/** یک اسکن تشخیصی: آیا اکسس‌پوینت هدف اصلاً دیده می‌شود؟ */
+void scanForDataAp() {
+  DEBUG_PRINTLN("[SCAN] در حال جستجوی شبکه‌ها ...");
+  int n = WiFi.scanNetworks();
+  bool found = false;
+  for (int i = 0; i < n; i++) {
+    bool isTarget = (WiFi.SSID(i) == cfgDataSsid);
+    if (isTarget) found = true;
+    DEBUG_PRINTF("[SCAN] %s%-20s ch=%2d rssi=%4d enc=%d\n",
+                 isTarget ? "-> " : "   ",
+                 WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i),
+                 (int)WiFi.encryptionType(i));
+  }
+  WiFi.scanDelete();
+
+  if (!found) {
+    DEBUG_PRINTF("[SCAN] '%s' در هوا نیست! برد گیرنده روشن است؟ فاصله زیاد است؟\n",
+                 cfgDataSsid.c_str());
+  } else {
+    DEBUG_PRINTLN("[SCAN] AP دیده می‌شود -> پس مشکل رمز یا تنظیمات IP است");
+  }
+}
+
 /** لاگ رویدادهای وای‌فای — برای اینکه دلیل قطعی‌ها معلوم شود */
-void onWiFiEvent(WiFiEvent_t event) {
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:
       DEBUG_PRINTLN("[NET] لینک وای‌فای برقرار شد");
@@ -816,10 +899,13 @@ void onWiFiEvent(WiFiEvent_t event) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       DEBUG_PRINTF("[NET] IP گرفت: %s\n", WiFi.localIP().toString().c_str());
       break;
-    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
       wifiDropCount++;
-      DEBUG_PRINTF("[NET] اتصال قطع شد (بار %u) -> تلاش مجدد\n", (unsigned)wifiDropCount);
+      uint8_t reason = info.wifi_sta_disconnected.reason;
+      DEBUG_PRINTF("[NET] قطع شد (بار %u) reason=%u %s\n",
+                   (unsigned)wifiDropCount, reason, wifiReasonText(reason));
       break;
+    }
     default:
       break;
   }

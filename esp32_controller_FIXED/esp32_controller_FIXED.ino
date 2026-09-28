@@ -311,6 +311,7 @@ void wifiService();
 void waitForDataLink(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void scanForDataAp();
+static const char *wifiReasonText(uint8_t reason);
 void saveToSD(const WifiData &data);
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
@@ -793,7 +794,9 @@ struct LinkStats {
   uint32_t nextTryMs = 0;
 };
 
-LinkStats link;
+// نام «link» عمداً استفاده نشده: در unistd.h تابعی به همین نام وجود دارد
+// و کامپایلر آن را به‌عنوان تعریف دوباره‌ی یک موجودیت دیگر رد می‌کند.
+LinkStats wifiLink;
 
 /** یک تلاش اتصال؛ بلاک‌کننده ولی کراندار. فقط از تسک شبکه صدا زده می‌شود. */
 static bool wifiConnectOnce() {
@@ -850,11 +853,11 @@ static bool wifiConnectOnce() {
  */
 void wifiService() {
   if (WiFi.status() == WL_CONNECTED) {
-    if (link.upSinceMs == 0) {
-      link.upSinceMs = millis();
-      link.downSinceMs = 0;
-      link.connects++;
-      link.backoffMs = WIFI_BACKOFF_MIN_MS;
+    if (wifiLink.upSinceMs == 0) {
+      wifiLink.upSinceMs = millis();
+      wifiLink.downSinceMs = 0;
+      wifiLink.connects++;
+      wifiLink.backoffMs = WIFI_BACKOFF_MIN_MS;
       DEBUG_PRINTF("[NET] لینک بالا آمد. IP: %s  RSSI: %d dBm  ch=%d\n",
                    WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
     }
@@ -876,32 +879,32 @@ void wifiService() {
   }
 
   // ---- لینک پایین است ----
-  if (link.upSinceMs != 0) {
-    link.upSinceMs = 0;
-    link.downSinceMs = millis();
+  if (wifiLink.upSinceMs != 0) {
+    wifiLink.upSinceMs = 0;
+    wifiLink.downSinceMs = millis();
     if (uploadClient.connected()) uploadClient.stop();
   }
-  if (link.downSinceMs == 0) link.downSinceMs = millis();
+  if (wifiLink.downSinceMs == 0) wifiLink.downSinceMs = millis();
 
-  if (millis() < link.nextTryMs) return;  // هنوز نوبت تلاش بعدی نشده
+  if (millis() < wifiLink.nextTryMs) return;  // هنوز نوبت تلاش بعدی نشده
 
   if (wifiConnectOnce()) {
-    link.backoffMs = WIFI_BACKOFF_MIN_MS;
-    link.nextTryMs = 0;
+    wifiLink.backoffMs = WIFI_BACKOFF_MIN_MS;
+    wifiLink.nextTryMs = 0;
     return;
   }
 
-  link.failures++;
+  wifiLink.failures++;
   DEBUG_PRINTF("[NET] وصل نشد (status=%d) — تلاش بعدی تا %u ثانیه دیگر\n",
-               (int)WiFi.status(), (unsigned)(link.backoffMs / 1000));
+               (int)WiFi.status(), (unsigned)(wifiLink.backoffMs / 1000));
 
   // هر پنج شکست، یک اسکن تشخیصی کامل
-  if (link.failures % 5 == 0) scanForDataAp();
+  if (wifiLink.failures % 5 == 0) scanForDataAp();
 
-  link.nextTryMs = millis() + link.backoffMs;
-  link.backoffMs = (link.backoffMs * 2 > WIFI_BACKOFF_MAX_MS)
+  wifiLink.nextTryMs = millis() + wifiLink.backoffMs;
+  wifiLink.backoffMs = (wifiLink.backoffMs * 2 > WIFI_BACKOFF_MAX_MS)
                      ? WIFI_BACKOFF_MAX_MS
-                     : link.backoffMs * 2;
+                     : wifiLink.backoffMs * 2;
 }
 
 /** برای استفاده در setup: تا سقف مشخصی منتظر بالا آمدن لینک می‌ماند */
@@ -913,6 +916,47 @@ void waitForDataLink(uint32_t timeoutMs) {
   }
   if (WiFi.status() != WL_CONNECTED) {
     DEBUG_PRINTLN("[NET] فعلاً بدون شبکه ادامه می‌دهیم؛ دیتا روی SD می‌ماند.");
+  }
+}
+
+/** ترجمه‌ی کد خطای قطعی وای‌فای به متن خوانا */
+static const char *wifiReasonText(uint8_t reason) {
+  switch (reason) {
+    case 1: return "UNSPECIFIED";
+    case 2: return "AUTH_EXPIRE (احراز هویت منقضی شد)";
+    case 4: return "ASSOC_EXPIRE";
+    case 5: return "ASSOC_TOOMANY (ظرفیت AP پر است)";
+    case 15: return "4WAY_HANDSHAKE_TIMEOUT (رمز اشتباه)";
+    case 201: return "NO_AP_FOUND (AP دیده نمی‌شود)";
+    case 202: return "AUTH_FAIL (رمز اشتباه)";
+    case 203: return "ASSOC_FAIL";
+    case 204: return "HANDSHAKE_TIMEOUT";
+    case 205: return "CONNECTION_FAIL";
+    default: return "?";
+  }
+}
+
+/** اسکن تشخیصی: آیا اکسس‌پوینت هدف اصلاً در هوا هست؟ */
+void scanForDataAp() {
+  DEBUG_PRINTLN("[SCAN] در حال جستجوی شبکه‌ها ...");
+  int n = WiFi.scanNetworks();
+  bool found = false;
+
+  for (int i = 0; i < n; i++) {
+    bool isTarget = (WiFi.SSID(i) == cfgDataSsid);
+    if (isTarget) found = true;
+    DEBUG_PRINTF("[SCAN] %s%-20s ch=%2d rssi=%4d enc=%d\n",
+                 isTarget ? "-> " : "   ",
+                 WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i),
+                 (int)WiFi.encryptionType(i));
+  }
+  WiFi.scanDelete();
+
+  if (found) {
+    DEBUG_PRINTLN("[SCAN] AP دیده می‌شود -> پس مشکل رمز یا تنظیمات است");
+  } else {
+    DEBUG_PRINTF("[SCAN] '%s' در هوا نیست! برد گیرنده روشن است؟ فاصله زیاد است؟\n",
+                 cfgDataSsid.c_str());
   }
 }
 
@@ -1674,8 +1718,8 @@ void TaskHealthMonitor(void *pv) {
                  (unsigned)wifiDropCount,
                  (unsigned long)(millis() / 1000));
     DEBUG_PRINTF("[LINK] connects=%u failures=%u linkUp=%lus\n",
-                 (unsigned)link.connects, (unsigned)link.failures,
-                 (unsigned long)(link.upSinceMs ? (millis() - link.upSinceMs) / 1000 : 0));
+                 (unsigned)wifiLink.connects, (unsigned)wifiLink.failures,
+                 (unsigned long)(wifiLink.upSinceMs ? (millis() - wifiLink.upSinceMs) / 1000 : 0));
 
     if (freeHeap < 20000) {
       DEBUG_PRINTLN("[HEALTH] WARNING: low heap!");
@@ -1696,7 +1740,7 @@ void TaskHealthMonitor(void *pv) {
     // اگر وای‌فای خیلی طولانی قطع بماند، یک ریست کنترل‌شده معمولاً
     // درایور را از حالت گیرکرده بیرون می‌آورد (دیتا روی SD امن است)
     if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-      if (link.downSinceMs != 0 && millis() - link.downSinceMs > LINK_DOWN_RESET_MS) {
+      if (wifiLink.downSinceMs != 0 && millis() - wifiLink.downSinceMs > LINK_DOWN_RESET_MS) {
         Serial.println("[HEALTH] لینک بیش از حد مجاز قطع بوده -> ریست کنترل‌شده");
         delay(200);
         ESP.restart();

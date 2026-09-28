@@ -94,27 +94,42 @@ if m:
           f"EXPECTED_SIZE={m.group(1)} با struct پک‌شده‌ی ESP32 ({expected_size}) نمی‌خواند")
 check("#pragma pack(1)" in esp32, "[ESP32] struct باید با pragma pack(1) پک شده باشد")
 
-# ------------------------- 5) ساختار فریمور: ترتیب رله و مانیتورینگ
-# ترتیب درخواستی: رله فعال -> مانیتورینگ فعال -> زمان مجاز -> مانیتورینگ
-# غیرفعال -> رله غیرفعال
-tc_start = esp32.find("static bool testChannel(int ch)")
-tc_end = esp32.find("void TaskRelayControl(void *pv) {")
-block = esp32[tc_start:tc_end] if tc_start != -1 else ""
-check(bool(block), "تابع testChannel پیدا شد")
-if block:
-    i_on = block.find("digitalWrite(cfg.relayPin, HIGH)")
-    i_begin = block.find("beginFeedbackWindow()")
-    i_end = block.find("endFeedbackWindow()")
-    i_off = block.find("digitalWrite(cfg.relayPin, LOW)")
+# ------------------------- 5) ساختار فریمور: فازها و مانیتورینگ
+# ساختار درخواستی:
+#   تحریک رله۱ -> مانیتورینگ هم‌زمان BCM1 و BCM2 -> قطع رله۱
+#   تحریک رله۲ -> مانیتورینگ هم‌زمان BCM1 و BCM2 -> قطع رله۲
+ph_start = esp32.find("static void runPhase(")
+ph_end = esp32.find("static bool deviceDone(")
+phase_block = esp32[ph_start:ph_end] if ph_start != -1 else ""
+check(bool(phase_block), "تابع runPhase پیدا شد")
+if phase_block:
+    i_on = phase_block.find("digitalWrite(pin, HIGH)")
+    i_begin = phase_block.find("beginFeedbackWindow()")
+    i_end = phase_block.find("endFeedbackWindow()")
+    i_off = phase_block.find("digitalWrite(pin, LOW)")
     check(-1 < i_on < i_begin < i_end < i_off,
           f"ترتیب رله/مانیتورینگ درست است (on={i_on} mon+={i_begin} mon-={i_end} off={i_off})")
+    check("fbSeen[phase][d]" in phase_block,
+          "در هر فاز، فیدبک هر دو دستگاه هم‌زمان خوانده می‌شود")
 
-# منطق تکرار: نتیجه باید تجمعی باشد و به‌محض کامل شدن، تکرار متوقف شود
-if block:
-    check("gotOpen = gotOpen || newOpen" in block and "gotClose = gotClose || newClose" in block,
+cy_start = esp32.find("static void runTestCycle(")
+cy_end = esp32.find("void TaskRelayControl(void *pv) {")
+cycle_block = esp32[cy_start:cy_end] if cy_start != -1 else ""
+check(bool(cycle_block), "تابع runTestCycle پیدا شد")
+if cycle_block:
+    check("for (int phase = 0; phase < PHASE_COUNT; phase++)" in cycle_block,
+          "هر تلاش هر دو فاز (رله۱ و رله۲) را اجرا می‌کند")
+    check("if (allDone)" in cycle_block and "break;" in cycle_block,
+          "به‌محض OK شدن هر دو دستگاه، تکرار متوقف می‌شود")
+    check("phaseNeeded(got, phase)" in cycle_block,
+          "در تلاش‌های بعدی فقط فازِ ناقص تکرار می‌شود")
+    check("got[phase][d] = true" in cycle_block or "got[phase][d] = true" in phase_block,
           "نتیجه‌ی فیدبک بین تلاش‌ها حفظ می‌شود (تجمعی)")
-    check("if (done) {" in block and "return true;" in block,
-          "به‌محض اینکه هم باز و هم بسته دیده شد، تکرار متوقف می‌شود")
+
+check("const uint8_t RELAY_PINS[PHASE_COUNT] = { 2, 4 };" in esp32,
+      "دو رله به‌عنوان دو فرمان تعریف شده‌اند")
+check("{ 13, 16 }" in esp32 and "{ 15, 17 }" in esp32,
+      "جدول فیدبک: هر فاز، یک پین برای هر BCM")
 check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سقف تکرار سه بار است")
 
 # ------------------------- 6) فرمت واحد دیتا برای همه‌ی مقصدها

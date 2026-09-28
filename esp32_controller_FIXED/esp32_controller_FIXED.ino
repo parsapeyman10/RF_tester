@@ -38,32 +38,41 @@
 // =====================================================================
 #define DEBUG_MODE 1  // برای Production صفر شود
 
-// --- نگاشت رله -> BCM متناظر -------------------------------------------------
-// فرض پیش‌فرض: هر رله مربوط به یک دستگاه است.
-//   رله ۱ (پین 2)  ->  BCM1 : فیدبک Open = پین 13 , فیدبک Close = پین 15
-//   رله ۲ (پین 4)  ->  BCM2 : فیدبک Open = پین 16 , فیدبک Close = پین 17
-// اگر نگاشت سخت‌افزاری شما فرق دارد، فقط همین جدول را عوض کنید.
-struct ChannelConfig {
-  const char *name;
-  uint8_t relayPin;
-  uint8_t fbOpenPin;   // فیدبک «باز شد»
-  uint8_t fbClosePin;  // فیدبک «بسته شد»
+// --- ساختار واقعی سخت‌افزار -------------------------------------------------
+//  دو رله = دو «فرمان» ، دو BCM = دو «دستگاه»
+//
+//     رله ۱ (پین 2)  = فرمان باز کردن  -> هم‌زمان روی BCM1 و BCM2 اثر می‌گذارد
+//     رله ۲ (پین 4)  = فرمان بستن      -> هم‌زمان روی BCM1 و BCM2 اثر می‌گذارد
+//
+//  بنابراین هر سیکل دو فاز دارد و در هر فاز، فیدبک هر دو دستگاه
+//  «در آنِ واحد» مانیتور می‌شود:
+//
+//     تحریک رله۱ ─► مانیتورینگ (BCM1 و BCM2) ─► قطع رله۱
+//     تحریک رله۲ ─► مانیتورینگ (BCM1 و BCM2) ─► قطع رله۲
+// -----------------------------------------------------------------------------
+#define PHASE_OPEN 0
+#define PHASE_CLOSE 1
+#define PHASE_COUNT 2
+#define DEVICE_COUNT 2
+
+const uint8_t RELAY_PINS[PHASE_COUNT] = { 2, 4 };
+const char *PHASE_NAMES[PHASE_COUNT] = { "OPEN", "CLOSE" };
+const char *DEVICE_NAMES[DEVICE_COUNT] = { "BCM1", "BCM2" };
+
+// FEEDBACK_PINS[فاز][دستگاه]
+const uint8_t FEEDBACK_PINS[PHASE_COUNT][DEVICE_COUNT] = {
+  { 13, 16 },  // فاز OPEN : فیدبکِ «باز شد» برای BCM1 و BCM2
+  { 15, 17 },  // فاز CLOSE: فیدبکِ «بسته شد» برای BCM1 و BCM2
 };
 
-const ChannelConfig CHANNELS[] = {
-  { "BCM1", 2, 13, 15 },
-  { "BCM2", 4, 16, 17 },
-};
-const int CHANNEL_COUNT = sizeof(CHANNELS) / sizeof(CHANNELS[0]);
-
-// اگر true باشد، موفقیت یعنی هر دو فیدبک (Open و Close) دیده شوند.
-// اگر false باشد، دیدن حداقل یکی کافی است.
+// یک دستگاه وقتی سالم است که هم باز شدنش و هم بسته شدنش تأیید شود.
+// اگر false شود، دیدن یکی از دو فاز کافی است.
 const bool REQUIRE_BOTH_FEEDBACKS = true;
 
 // --- زمان‌بندی تست هر رله ---
-const uint32_t RELAY_PULSE_MS = 800;        // مدت تریگ رله (در حالت پالسی)
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
 const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
+const uint32_t PHASE_GAP_MS = 800;          // فاصله‌ی بین فاز باز و بسته
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const bool ENABLE_HAMMERING = true;         // ضربه‌های کوتاه در صورت گیر کردن
@@ -263,9 +272,8 @@ WebServer setupServer(80);
 volatile int currentGlobalID = 0;
 volatile WifiData globalSystemState;
 
-// نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ (ایندکس = ترتیب پین‌ها در CHANNELS)
-volatile bool fbOpenSeen[4] = { false, false, false, false };
-volatile bool fbCloseSeen[4] = { false, false, false, false };
+// نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ:  fbSeen[فاز][دستگاه]
+volatile bool fbSeen[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
 
 // پرچم‌های پورتال تنظیم ساعت
 volatile bool portalTimeSet = false;
@@ -371,11 +379,12 @@ void setup() {
   // ---------------- سنسور و پین‌ها ----------------
   if (!sht31.begin(0x44)) Serial.println("[SHT31] Error: sensor not found!");
 
-  for (int i = 0; i < CHANNEL_COUNT; i++) {
-    pinMode(CHANNELS[i].relayPin, OUTPUT);
-    digitalWrite(CHANNELS[i].relayPin, LOW);
-    pinMode(CHANNELS[i].fbOpenPin, INPUT_PULLDOWN);
-    pinMode(CHANNELS[i].fbClosePin, INPUT_PULLDOWN);
+  for (int p = 0; p < PHASE_COUNT; p++) {
+    pinMode(RELAY_PINS[p], OUTPUT);
+    digitalWrite(RELAY_PINS[p], LOW);
+    for (int d = 0; d < DEVICE_COUNT; d++) {
+      pinMode(FEEDBACK_PINS[p][d], INPUT_PULLDOWN);
+    }
   }
 
   xEventGroupSetBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE);
@@ -736,12 +745,11 @@ void connectToDataAp(uint32_t timeoutMs) {
 //     TASK: تست ترتیبی رله‌ها  (اول رله ۱ و BCM1 ، بعد رله ۲ و BCM2)
 // =====================================================================
 
-/** پنجره‌ی مانیتورینگ را باز می‌کند و پرچم‌های قبلی را صفر می‌کند */
+/** پنجره‌ی مانیتورینگ را باز می‌کند و پرچم‌های خام قبلی را صفر می‌کند */
 static void beginFeedbackWindow() {
-  for (int i = 0; i < 4; i++) {
-    fbOpenSeen[i] = false;
-    fbCloseSeen[i] = false;
-  }
+  for (int p = 0; p < PHASE_COUNT; p++)
+    for (int d = 0; d < DEVICE_COUNT; d++) fbSeen[p][d] = false;
+
   xEventGroupClearBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE);
   xEventGroupSetBits(xSystemEvents, BIT_START_DIGITAL_MONITORING);
 }
@@ -752,97 +760,108 @@ static void endFeedbackWindow() {
 }
 
 /**
- * تست کامل یک کانال (یک رله + BCM متناظرش)
- *
- * منطق تکرار — دقیقاً طبق درخواست:
- *   • حداکثر ۳ بار تلاش (RELAY_MAX_ATTEMPTS).
- *   • اگر در همان تلاش دیدیم که هم «باز شد» و هم «بسته شد»، کار تمام است
- *     و دیگر تکراری در کار نیست.
- *   • اگر یکی‌شان آمد و آن یکی نه، همان‌که آمده **حفظ می‌شود** و فقط
- *     برای بخشِ نیامده دوباره تلاش می‌کنیم — تا سقف سه بار.
- *   • نتیجه‌ی تجمعی است: اگر Open در تلاش ۱ و Close در تلاش ۲ دیده شود،
- *     کانال موفق حساب می‌شود.
+ * یک فاز کامل:  تحریک رله ► مانیتورینگ هم‌زمانِ هر دو BCM ► قطع رله
+ * نتیجه در got[phase][device] جمع می‌شود (تجمعی است و پاک نمی‌شود).
  */
-static bool testChannel(int ch) {
-  const ChannelConfig &cfg = CHANNELS[ch];
-  DEBUG_PRINTF("\n[TEST] ---- %s (relay pin %u) ----\n", cfg.name, cfg.relayPin);
+static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT]) {
+  uint8_t pin = RELAY_PINS[phase];
 
-  // نتیجه‌ی تجمعی این کانال در طول کل سیکل
-  bool gotOpen = false;
-  bool gotClose = false;
+  digitalWrite(pin, HIGH);                          // 1) تحریک رله
+  vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //    پایدار شدن کنتاکت
+  beginFeedbackWindow();                            // 2) مانیتورینگ فعال
+  vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3) زمان مجاز
+  endFeedbackWindow();                              // 4) مانیتورینگ غیرفعال
+  digitalWrite(pin, LOW);                           // 5) قطع رله
+
+  for (int d = 0; d < DEVICE_COUNT; d++) {
+    if (fbSeen[phase][d]) got[phase][d] = true;
+  }
+
+  DEBUG_PRINTF("[PHASE %s] %s:%s  %s:%s\n",
+               PHASE_NAMES[phase],
+               DEVICE_NAMES[0], fbSeen[phase][0] ? "YES" : "NO",
+               DEVICE_NAMES[1], fbSeen[phase][1] ? "YES" : "NO");
+}
+
+/** آیا کار این دستگاه تمام است؟ */
+static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
+  return REQUIRE_BOTH_FEEDBACKS
+           ? (got[PHASE_OPEN][d] && got[PHASE_CLOSE][d])
+           : (got[PHASE_OPEN][d] || got[PHASE_CLOSE][d]);
+}
+
+/** اگر همه‌ی دستگاه‌های ناقص، فیدبک این فاز را قبلاً داده‌اند، این فاز لازم نیست */
+static bool phaseNeeded(const bool got[PHASE_COUNT][DEVICE_COUNT], int phase) {
+  for (int d = 0; d < DEVICE_COUNT; d++) {
+    if (!deviceDone(got, d) && !got[phase][d]) return true;
+  }
+  return false;
+}
+
+/**
+ * یک سیکل کامل:
+ *   تحریک رله۱ ► مانیتورینگ هم‌زمان BCM1 و BCM2 ► قطع رله۱
+ *   تحریک رله۲ ► مانیتورینگ هم‌زمان BCM1 و BCM2 ► قطع رله۲
+ *
+ * اگر هر دو دستگاه هم «باز» و هم «بسته» را تأیید کردند، تکراری در کار نیست.
+ * اگر دستگاهی ناقص ماند، فقط فازِ ناقص دوباره اجرا می‌شود — تا سقف ۳ تلاش.
+ */
+static void runTestCycle(bool result[DEVICE_COUNT]) {
+  bool got[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
 
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
+    DEBUG_PRINTF("\n[TEST] ===== تلاش %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
 
-    if (attempt == 1) {
-      DEBUG_PRINTF("[TEST] %s attempt %u/%u\n", cfg.name, attempt, RELAY_MAX_ATTEMPTS);
-    } else {
-      DEBUG_PRINTF("[TEST] %s attempt %u/%u  (فقط برای: %s%s)\n",
-                   cfg.name, attempt, RELAY_MAX_ATTEMPTS,
-                   gotOpen ? "" : "Open ", gotClose ? "" : "Close");
+    for (int phase = 0; phase < PHASE_COUNT; phase++) {
+      if (attempt > 1 && !phaseNeeded(got, phase)) {
+        DEBUG_PRINTF("[PHASE %s] رد شد (قبلاً جواب گرفته)\n", PHASE_NAMES[phase]);
+        continue;
+      }
+
+      runPhase(phase, got);
+
+      bool missing = false;
+      for (int d = 0; d < DEVICE_COUNT; d++)
+        if (!got[phase][d]) missing = true;
+
+      if (ENABLE_HAMMERING && missing) {
+        DEBUG_PRINTF("[PHASE %s] جواب ناقص -> hammering %ux\n",
+                     PHASE_NAMES[phase], HAMMER_COUNT);
+        beginFeedbackWindow();
+        for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
+          digitalWrite(RELAY_PINS[phase], HIGH);
+          vTaskDelay(pdMS_TO_TICKS(HAMMER_ON_MS));
+          digitalWrite(RELAY_PINS[phase], LOW);
+          vTaskDelay(pdMS_TO_TICKS(HAMMER_OFF_MS));
+        }
+        vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
+        endFeedbackWindow();
+        for (int d = 0; d < DEVICE_COUNT; d++)
+          if (fbSeen[phase][d]) got[phase][d] = true;
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(PHASE_GAP_MS));  // فاصله‌ی بین فاز باز و بسته
     }
 
-    // =============================================================
-    //  ترتیب: رله فعال -> مانیتورینگ فعال -> زمان مجاز ->
-    //         مانیتورینگ غیرفعال -> رله غیرفعال
-    // =============================================================
-    digitalWrite(cfg.relayPin, HIGH);                 // 1
-    vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //   پایدار شدن کنتاکت
-    beginFeedbackWindow();                            // 2
-    vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3
-    endFeedbackWindow();                              // 4
-    digitalWrite(cfg.relayPin, LOW);                  // 5
-
-    bool newOpen = fbOpenSeen[ch];
-    bool newClose = fbCloseSeen[ch];
-
-    // آنچه یک بار تأیید شد، دیگر از دست نمی‌رود
-    gotOpen = gotOpen || newOpen;
-    gotClose = gotClose || newClose;
-
-    DEBUG_PRINTF("[TEST] %s این تلاش -> Open:%s Close:%s | مجموع -> Open:%s Close:%s\n",
-                 cfg.name,
-                 newOpen ? "YES" : "NO", newClose ? "YES" : "NO",
-                 gotOpen ? "YES" : "NO", gotClose ? "YES" : "NO");
-
-    bool done = REQUIRE_BOTH_FEEDBACKS ? (gotOpen && gotClose) : (gotOpen || gotClose);
-    if (done) {
-      DEBUG_PRINTF("[TEST] %s OK (در تلاش %u) — تکرار لازم نیست\n", cfg.name, attempt);
-      return true;
+    bool allDone = true;
+    for (int d = 0; d < DEVICE_COUNT; d++) {
+      DEBUG_PRINTF("[TEST] %s -> Open:%s Close:%s %s\n",
+                   DEVICE_NAMES[d],
+                   got[PHASE_OPEN][d] ? "YES" : "NO",
+                   got[PHASE_CLOSE][d] ? "YES" : "NO",
+                   deviceDone(got, d) ? "(OK)" : "(ناقص)");
+      if (!deviceDone(got, d)) allDone = false;
     }
 
-    // فقط یکی مانده -> حالت گیرکرده؛ چکش‌کاری برای همان بخشِ نیامده
-    bool jammed = (gotOpen != gotClose);
-    if (ENABLE_HAMMERING && jammed) {
-      DEBUG_PRINTF("[TEST] %s JAM (%s نیامده) -> hammering %ux\n",
-                   cfg.name, gotOpen ? "Close" : "Open", HAMMER_COUNT);
-
-      beginFeedbackWindow();
-      for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
-        digitalWrite(cfg.relayPin, HIGH);
-        vTaskDelay(pdMS_TO_TICKS(HAMMER_ON_MS));
-        digitalWrite(cfg.relayPin, LOW);
-        vTaskDelay(pdMS_TO_TICKS(HAMMER_OFF_MS));
-      }
-      vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
-      endFeedbackWindow();
-
-      gotOpen = gotOpen || fbOpenSeen[ch];
-      gotClose = gotClose || fbCloseSeen[ch];
-
-      done = REQUIRE_BOTH_FEEDBACKS ? (gotOpen && gotClose) : (gotOpen || gotClose);
-      if (done) {
-        DEBUG_PRINTF("[TEST] %s بعد از چکش‌کاری OK شد\n", cfg.name);
-        return true;
-      }
+    if (allDone) {
+      DEBUG_PRINTF("[TEST] هر دو دستگاه OK در تلاش %u — تکرار لازم نیست\n", attempt);
+      break;
     }
 
     if (attempt < RELAY_MAX_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
   }
 
-  DEBUG_PRINTF("[TEST] %s FAILED بعد از %u تلاش (Open:%s Close:%s)\n",
-               cfg.name, RELAY_MAX_ATTEMPTS,
-               gotOpen ? "YES" : "NO", gotClose ? "YES" : "NO");
-  return false;
+  for (int d = 0; d < DEVICE_COUNT; d++) result[d] = deviceDone(got, d);
 }
 
 void TaskRelayControl(void *pv) {
@@ -863,13 +882,10 @@ void TaskRelayControl(void *pv) {
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
-    bool result[4] = { false, false, false, false };
+    bool result[DEVICE_COUNT] = { false, false };
 
-    // ---- تست ترتیبی: اول کانال ۱ تا آخر، بعد کانال ۲ ----
-    for (int ch = 0; ch < CHANNEL_COUNT; ch++) {
-      result[ch] = testChannel(ch);
-      vTaskDelay(pdMS_TO_TICKS(1000));  // فاصله‌ی بین دو کانال
-    }
+    // یک سیکل: رله۱ + مانیتورینگ هر دو BCM ، سپس رله۲ + مانیتورینگ هر دو BCM
+    runTestCycle(result);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -882,8 +898,8 @@ void TaskRelayControl(void *pv) {
       globalSystemState.NUM = currentGlobalID;
       globalSystemState.NBCM1 = result[0];
       globalSystemState.NBCM2 = result[1];
-      globalSystemState.NBCM3 = (CHANNEL_COUNT > 2) ? result[2] : false;
-      globalSystemState.NBCM4 = (CHANNEL_COUNT > 3) ? result[3] : false;
+      globalSystemState.NBCM3 = false;   // رزرو
+      globalSystemState.NBCM4 = false;   // رزرو
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
@@ -891,8 +907,8 @@ void TaskRelayControl(void *pv) {
 
       DEBUG_PRINTF("[CYCLE] #%d  %s=%s  %s=%s  T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
-                   CHANNELS[0].name, snapshot.NBCM1 ? "OK" : "NOK",
-                   CHANNELS[1].name, snapshot.NBCM2 ? "OK" : "NOK",
+                   DEVICE_NAMES[0], snapshot.NBCM1 ? "OK" : "NOK",
+                   DEVICE_NAMES[1], snapshot.NBCM2 ? "OK" : "NOK",
                    snapshot.Temp, snapshot.Hum,
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
@@ -912,12 +928,12 @@ void TaskRelayControl(void *pv) {
 //        TASK: خواندن فیدبک‌های دیجیتال در طول پنجره‌ی مانیتورینگ
 // =====================================================================
 void TaskDigitalRead(void *pv) {
-  const int pinCount = CHANNEL_COUNT * 2;
-  uint8_t pins[8];
-  for (int i = 0; i < CHANNEL_COUNT; i++) {
-    pins[2 * i] = CHANNELS[i].fbOpenPin;
-    pins[2 * i + 1] = CHANNELS[i].fbClosePin;
-  }
+  // هر چهار پین فیدبک هم‌زمان مانیتور می‌شوند (هر دو BCM در آنِ واحد)
+  const int pinCount = PHASE_COUNT * DEVICE_COUNT;
+  uint8_t pins[PHASE_COUNT * DEVICE_COUNT];
+  for (int p = 0; p < PHASE_COUNT; p++)
+    for (int d = 0; d < DEVICE_COUNT; d++)
+      pins[p * DEVICE_COUNT + d] = FEEDBACK_PINS[p][d];
 
   bool lastState[8];
   uint32_t highSince[8];
@@ -956,10 +972,9 @@ void TaskDigitalRead(void *pv) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    for (int i = 0; i < CHANNEL_COUNT; i++) {
-      if (confirmed[2 * i]) fbOpenSeen[i] = true;
-      if (confirmed[2 * i + 1]) fbCloseSeen[i] = true;
-    }
+    for (int p = 0; p < PHASE_COUNT; p++)
+      for (int d = 0; d < DEVICE_COUNT; d++)
+        if (confirmed[p * DEVICE_COUNT + d]) fbSeen[p][d] = true;
 
     xEventGroupSetBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE);
   }

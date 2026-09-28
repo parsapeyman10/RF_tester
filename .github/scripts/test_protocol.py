@@ -121,8 +121,8 @@ if cycle_block:
           "هر تلاش هر دو فاز (رله۱ و رله۲) را اجرا می‌کند")
     check("if (allDone)" in cycle_block and "break;" in cycle_block,
           "به‌محض OK شدن هر دو دستگاه، تکرار متوقف می‌شود")
-    check("phaseNeeded(got, phase)" in cycle_block,
-          "در تلاش‌های بعدی فقط فازِ ناقص تکرار می‌شود")
+    check("phaseNeeded" not in cycle_block,
+          "هیچ فازی رد نمی‌شود: در هر سیکل هر دو فرمان داده می‌شود")
     check("got[phase][d] = true" in cycle_block or "got[phase][d] = true" in phase_block,
           "نتیجه‌ی فیدبک بین تلاش‌ها حفظ می‌شود (تجمعی)")
 
@@ -130,7 +130,27 @@ check("const uint8_t RELAY_PINS[PHASE_COUNT] = { 2, 4 };" in esp32,
       "دو رله به‌عنوان دو فرمان تعریف شده‌اند")
 check("{ 13, 16 }" in esp32 and "{ 15, 17 }" in esp32,
       "جدول فیدبک: هر فاز، یک پین برای هر BCM")
-check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سقف تکرار سه بار است")
+check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سیکل حداکثر سه بار تکرار می‌شود")
+
+# ------------------------- 5b) پایداری وای‌فای
+check("WiFi.setSleep(false)" in esp32, "[ESP32] Modem-Sleep خاموش است")
+check("WiFi.setAutoReconnect(true)" in esp32, "[ESP32] اتصال مجدد خودکار فعال است")
+check("USE_STATIC_IP" in esp32 and "WiFi.config(staticIP" in esp32,
+      "[ESP32] امکان IP ثابت برای اتصال سریع‌تر وجود دارد")
+check("WiFi.onEvent(onWiFiEvent)" in esp32, "[ESP32] رویدادهای وای‌فای لاگ می‌شوند")
+check("uploadClient.connected()" in esp32, "[ESP32] اتصال TCP بین رکوردها باز می‌ماند")
+check("WiFi.setSleepMode(WIFI_NONE_SLEEP)" in esp8266, "[ESP8266] حالت خواب AP خاموش است")
+check("AP_CHANNEL" in esp8266, "[ESP8266] کانال AP ثابت است")
+check("CLIENT_IDLE_TIMEOUT_MS = 60000" in esp8266,
+      "[ESP8266] تایم‌اوت بی‌کاری از ۱۰ به ۶۰ ثانیه رفته")
+
+# ------------------------- 5c) فایل‌های راه‌اندازی سرور
+import os as _os
+_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+for _f in ("requirements.txt", "run_server.bat", "run_server.sh",
+           "templates/index.html", "templates/history.html",
+           "templates/plot_display.html", "templates/upload.html"):
+    check(_os.path.isfile(_os.path.join(_root, _f)), f"فایل لازم سرور موجود است: {_f}")
 
 # ------------------------- 6) فرمت واحد دیتا برای همه‌ی مقصدها
 check("void formatRecordLine(" in esp32, "[ESP32] تابع واحد formatRecordLine تعریف شده")

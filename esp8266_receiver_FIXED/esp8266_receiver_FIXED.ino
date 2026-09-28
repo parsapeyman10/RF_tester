@@ -33,6 +33,13 @@ const long  SERIAL_BAUD = 115200;
 const uint8_t AP_INIT_RETRY = 5;      // طبق مستندات فنی: ۵ بار تلاش مجدد
 const unsigned long AP_RETRY_DELAY_MS = 1000;
 
+// --- پایداری اکسس‌پوینت ---
+const uint8_t  AP_CHANNEL = 6;            // کانال ثابت (کمترین تداخل معمول)
+const uint8_t  AP_MAX_CLIENTS = 4;
+const float    AP_TX_POWER = 20.5;        // حداکثر توان خروجی
+const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
+const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
+
 // ظرفیت بافر ورودی
 const int RX_BUFFER_SIZE = 512;
 char rxBuffer[RX_BUFFER_SIZE];
@@ -148,13 +155,30 @@ void loop() {
       }
     }
 
-    // بررسی Timeout - طبق مستندات فنی دقیقاً ۱۰ ثانیه (قبلاً به اشتباه ۱۵ ثانیه بود)
-    if (millis() - lastClientActivity > 10000) {
-      stopClient("Inactivity Timeout (10s)");
+    // بستن اتصالِ بی‌کار. قبلاً ۱۰ ثانیه بود و چون ESP32 بین دو سیکل حدود
+    // دو دقیقه ساکت است، هر بار سوکت بسته می‌شد و دوباره وصل می‌شد؛ همین
+    // «قطع و وصل شدن مداوم» را می‌ساخت. حالا اتصال بازِ بی‌کار حفظ می‌شود.
+    if (millis() - lastClientActivity > CLIENT_IDLE_TIMEOUT_MS) {
+      stopClient("Inactivity Timeout");
     }
   }
   else if (isClientConnected) {
     stopClient("Physical Disconnect");
+  }
+
+  // --- گزارش/نگهداری سلامت اکسس‌پوینت ---
+  static unsigned long lastHealth = 0;
+  if (millis() - lastHealth > AP_HEALTH_PERIOD_MS) {
+    lastHealth = millis();
+    uint8_t stations = WiFi.softAPgetStationNum();
+    DBG_PRINTF("[HEALTH] clients=%u heap=%u up=%lus\n",
+               stations, ESP.getFreeHeap(), millis() / 1000);
+
+    // اگر اکسس‌پوینت به هر دلیلی پایین آمده باشد، دوباره بالا می‌آید
+    if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() == IPAddress(0, 0, 0, 0)) {
+      DBG_PRINTLN("[HEALTH] AP پایین است -> راه‌اندازی مجدد");
+      initAccessPoint();
+    }
   }
 
   yield();
@@ -164,9 +188,20 @@ void initAccessPoint() {
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_AP);
 
+  // مهم‌ترین تنظیمات پایداری:
+  //  - خاموش کردن حالت خواب مودم (منبع اصلی قطع و وصل شدن‌های لحظه‌ای)
+  //  - توان خروجی کامل
+  //  - کانال ثابت به‌جای انتخاب خودکار
+  WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  WiFi.setOutputPower(AP_TX_POWER);
+  WiFi.setPhyMode(WIFI_PHY_MODE_11N);
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1),
+                    IPAddress(192, 168, 4, 1),
+                    IPAddress(255, 255, 255, 0));
+
   bool apOK = false;
   for (uint8_t attempt = 1; attempt <= AP_INIT_RETRY; attempt++) {
-    if (WiFi.softAP(SSID_NAME, PASSWORD)) {
+    if (WiFi.softAP(SSID_NAME, PASSWORD, AP_CHANNEL, false, AP_MAX_CLIENTS)) {
       apOK = true;
       DBG_PRINTF("AP READY - SSID: %s | IP: %s\n", SSID_NAME, WiFi.softAPIP().toString().c_str());
       break;

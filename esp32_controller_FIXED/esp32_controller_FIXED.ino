@@ -75,7 +75,9 @@ const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش�
 const uint32_t PHASE_GAP_MS = 800;          // فاصله‌ی بین فاز باز و بسته
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
-const bool ENABLE_HAMMERING = true;         // ضربه‌های کوتاه در صورت گیر کردن
+// چون تست‌ها توالی دارند (باز شدن و بسته شدن به هم وابسته‌اند) چکش‌کاری
+// به‌صورت پیش‌فرض خاموش است؛ در صورت نیاز true کنید.
+const bool ENABLE_HAMMERING = false;        // ضربه‌های کوتاه در صورت گیر کردن
 const uint8_t HAMMER_COUNT = 5;
 const uint32_t HAMMER_ON_MS = 50;
 const uint32_t HAMMER_OFF_MS = 100;
@@ -87,6 +89,17 @@ const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت 
 const char *DATA_AP_PASS = "12345678";
 IPAddress serverIP(192, 168, 4, 1);
 const int serverPort = 80;
+
+// --- پایداری اتصال ---
+// IP ثابت یعنی دیگر منتظر DHCP نمی‌مانیم؛ اتصال مجدد چند برابر سریع‌تر و
+// مطمئن‌تر انجام می‌شود (مهم‌ترین عامل «قطع و وصل شدن مداوم»).
+const bool USE_STATIC_IP = true;
+IPAddress staticIP(192, 168, 4, 50);
+IPAddress gatewayIP(192, 168, 4, 1);
+IPAddress subnetMask(255, 255, 255, 0);
+
+const uint32_t WIFI_RETRY_INTERVAL_MS = 5000;   // فاصله‌ی تلاش مجدد (قبلاً ۲۰ ثانیه)
+const char *DEVICE_HOSTNAME = "RF-TESTER";
 
 // شبکه‌هایی که برای گرفتن ساعت از NTP امتحان می‌شوند (مودم یا هات‌اسپات گوشی).
 // SSID و پسورد خودتان را اینجا بگذارید. خالی بودنش اشکالی ندارد؛
@@ -292,6 +305,7 @@ bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void connectToDataAp(uint32_t timeoutMs);
+void onWiFiEvent(WiFiEvent_t event);
 void saveToSD(const WifiData &data);
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
@@ -320,14 +334,18 @@ void setup() {
   Wire.begin();
   delay(200);
 
-  WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
+  // ---------- تنظیمات پایداری وای‌فای ----------
+  WiFi.persistent(false);        // ننوشتن روی فلش در هر اتصال (عمر فلش + سرعت)
+  WiFi.setAutoReconnect(true);   // اتصال مجدد خودکار توسط خود استک
+  WiFi.setSleep(false);          // خاموش کردن Modem-Sleep: مهم‌ترین علت قطعی‌های لحظه‌ای
+  WiFi.setHostname(DEVICE_HOSTNAME);
 
   xDataQueue = xQueueCreate(20, sizeof(WifiData));
   xSDMutex = xSemaphoreCreateMutex();
   xGlobalStateMutex = xSemaphoreCreateMutex();
   xSystemEvents = xEventGroupCreate();
 
+  WiFi.onEvent(onWiFiEvent);
   loadConfig();
   rtc.initClock();
 
@@ -725,7 +743,18 @@ void runSetupPortal(bool timeAlreadyValid) {
 /** اتصال (یا اتصال مجدد) به اکسس‌پوینت گیرنده‌ی دیتا */
 void connectToDataAp(uint32_t timeoutMs) {
   DEBUG_PRINTF("[NET] Connecting to %s ...\n", cfgDataSsid.c_str());
+
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+
+  if (USE_STATIC_IP) {
+    // بدون DHCP: اتصال سریع‌تر و بدون قطعی‌های ناشی از تمدید نشدن lease
+    if (!WiFi.config(staticIP, gatewayIP, subnetMask)) {
+      DEBUG_PRINTLN("[NET] هشدار: تنظیم IP ثابت ناموفق بود، DHCP استفاده می‌شود");
+    }
+  }
+
   WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
 
   uint32_t t0 = millis();
@@ -735,9 +764,27 @@ void connectToDataAp(uint32_t timeoutMs) {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    DEBUG_PRINTF("\n[NET] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
+    DEBUG_PRINTF("\n[NET] Connected. IP: %s  RSSI: %d dBm\n",
+                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
   } else {
-    DEBUG_PRINTLN("\n[NET] Not available now; data will be buffered on SD.");
+    DEBUG_PRINTF("\n[NET] وصل نشد (status=%d). دیتا روی SD می‌ماند.\n", (int)WiFi.status());
+  }
+}
+
+/** لاگ رویدادهای وای‌فای — برای اینکه دلیل قطعی‌ها معلوم شود */
+void onWiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      DEBUG_PRINTLN("[NET] لینک وای‌فای برقرار شد");
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      DEBUG_PRINTF("[NET] IP گرفت: %s\n", WiFi.localIP().toString().c_str());
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      DEBUG_PRINTLN("[NET] اتصال قطع شد -> تلاش مجدد");
+      break;
+    default:
+      break;
   }
 }
 
@@ -800,59 +847,54 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
            : (got[PHASE_OPEN][d] || got[PHASE_CLOSE][d]);
 }
 
-/** اگر همه‌ی دستگاه‌های ناقص، فیدبک این فاز را قبلاً داده‌اند، این فاز لازم نیست */
-static bool phaseNeeded(const bool got[PHASE_COUNT][DEVICE_COUNT], int phase) {
-  for (int d = 0; d < DEVICE_COUNT; d++) {
-    if (!deviceDone(got, d) && !got[phase][d]) return true;
-  }
-  return false;
-}
-
 /**
- * یک سیکل کامل:
- *   تحریک رله۱ ► مانیتورینگ هم‌زمان BCM1 و BCM2 ► قطع رله۱
- *   تحریک رله۲ ► مانیتورینگ هم‌زمان BCM1 و BCM2 ► قطع رله۲
+ * یک سیکل کامل تست:
  *
- * اگر هر دو دستگاه هم «باز» و هم «بسته» را تأیید کردند، تکراری در کار نیست.
- * اگر دستگاهی ناقص ماند، فقط فازِ ناقص دوباره اجرا می‌شود — تا سقف ۳ تلاش.
+ *      تحریک رله باز کردن  ► مانیتورینگ BCM1 و BCM2 ► قطع مانیتورینگ ► قطع رله
+ *      تحریک رله بستن      ► مانیتورینگ BCM1 و BCM2 ► قطع مانیتورینگ ► قطع رله
+ *
+ * این دو فاز به هم وابسته‌اند و توالی دارند، پس در هر تکرار **هر دو** فرمان
+ * حتماً داده می‌شوند؛ هیچ فازی رد نمی‌شود.
+ *
+ * کل سیکل حداکثر ۳ بار تکرار می‌شود. اگر بعد از یک سیکل هر دو دستگاه هم باز
+ * شدن و هم بسته شدن را تأیید کرده باشند، تکرار بعدی انجام نمی‌شود.
  */
 static void runTestCycle(bool result[DEVICE_COUNT]) {
   bool got[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
 
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
-    DEBUG_PRINTF("\n[TEST] ===== تلاش %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
+    DEBUG_PRINTF("\n[TEST] ===== سیکل %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
 
+    // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
     for (int phase = 0; phase < PHASE_COUNT; phase++) {
-      if (attempt > 1 && !phaseNeeded(got, phase)) {
-        DEBUG_PRINTF("[PHASE %s] رد شد (قبلاً جواب گرفته)\n", PHASE_NAMES[phase]);
-        continue;
-      }
-
       runPhase(phase, got);
 
-      bool missing = false;
-      for (int d = 0; d < DEVICE_COUNT; d++)
-        if (!got[phase][d]) missing = true;
-
-      if (ENABLE_HAMMERING && missing) {
-        DEBUG_PRINTF("[PHASE %s] جواب ناقص -> hammering %ux\n",
-                     PHASE_NAMES[phase], HAMMER_COUNT);
-        beginFeedbackWindow();
-        for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
-          digitalWrite(RELAY_PINS[phase], HIGH);
-          vTaskDelay(pdMS_TO_TICKS(HAMMER_ON_MS));
-          digitalWrite(RELAY_PINS[phase], LOW);
-          vTaskDelay(pdMS_TO_TICKS(HAMMER_OFF_MS));
-        }
-        vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
-        endFeedbackWindow();
+      if (ENABLE_HAMMERING) {
+        bool missing = false;
         for (int d = 0; d < DEVICE_COUNT; d++)
-          if (fbSeen[phase][d]) got[phase][d] = true;
+          if (!got[phase][d]) missing = true;
+
+        if (missing) {
+          DEBUG_PRINTF("[PHASE %s] جواب ناقص -> hammering %ux\n",
+                       PHASE_NAMES[phase], HAMMER_COUNT);
+          beginFeedbackWindow();
+          for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
+            digitalWrite(RELAY_PINS[phase], HIGH);
+            vTaskDelay(pdMS_TO_TICKS(HAMMER_ON_MS));
+            digitalWrite(RELAY_PINS[phase], LOW);
+            vTaskDelay(pdMS_TO_TICKS(HAMMER_OFF_MS));
+          }
+          vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
+          endFeedbackWindow();
+          for (int d = 0; d < DEVICE_COUNT; d++)
+            if (fbSeen[phase][d]) got[phase][d] = true;
+        }
       }
 
-      vTaskDelay(pdMS_TO_TICKS(PHASE_GAP_MS));  // فاصله‌ی بین فاز باز و بسته
+      vTaskDelay(pdMS_TO_TICKS(PHASE_GAP_MS));  // فاصله‌ی فاز باز تا فاز بستن
     }
 
+    // --- جمع‌بندی این سیکل ---
     bool allDone = true;
     for (int d = 0; d < DEVICE_COUNT; d++) {
       DEBUG_PRINTF("[TEST] %s -> Open:%s Close:%s %s\n",
@@ -864,11 +906,14 @@ static void runTestCycle(bool result[DEVICE_COUNT]) {
     }
 
     if (allDone) {
-      DEBUG_PRINTF("[TEST] هر دو دستگاه OK در تلاش %u — تکرار لازم نیست\n", attempt);
+      DEBUG_PRINTF("[TEST] هر دو دستگاه OK در سیکل %u — تکرار لازم نیست\n", attempt);
       break;
     }
 
-    if (attempt < RELAY_MAX_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
+    if (attempt < RELAY_MAX_ATTEMPTS) {
+      DEBUG_PRINTLN("[TEST] نتیجه ناقص -> کل سیکل دوباره تکرار می‌شود");
+      vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
+    }
   }
 
   for (int d = 0; d < DEVICE_COUNT; d++) result[d] = deviceDone(got, d);
@@ -1276,7 +1321,7 @@ void TaskInternalWiFiConnection(void *pv) {
 
         // ب) اگر شبکه قطع است، هر ۲۰ ثانیه دوباره تلاش کن (باگ نسخه‌ی قبل)
         if (WiFi.status() != WL_CONNECTED) {
-          if (millis() - lastReconnectTry > 20000) {
+          if (millis() - lastReconnectTry > WIFI_RETRY_INTERVAL_MS) {
             lastReconnectTry = millis();
             connectToDataAp(8000);
           }
@@ -1302,7 +1347,20 @@ void TaskInternalWiFiConnection(void *pv) {
                 bool readOk = (f.read((uint8_t *)&stored, REC_SIZE) == (int)REC_SIZE);
                 f.close();
 
-                if (readOk && uploadClient.connect(serverIP, serverPort)) {
+                // اتصال باز نگه داشته می‌شود؛ فقط اگر قطع بود دوباره وصل می‌شویم.
+                // (قبلاً برای هر رکورد یک اتصال جدید باز و بسته می‌شد که هم
+                //  کند بود و هم روی ESP8266 مدام «client connected/disconnected»
+                //  تولید می‌کرد.)
+                bool linkReady = uploadClient.connected();
+                if (!linkReady) {
+                  linkReady = uploadClient.connect(serverIP, serverPort);
+                  if (linkReady) {
+                    uploadClient.setNoDelay(true);
+                    DEBUG_PRINTLN("[UPLOAD] اتصال TCP برقرار شد");
+                  }
+                }
+
+                if (readOk && linkReady) {
                   // این فرمت باید دقیقاً با sscanf سمت ESP8266 و با
                   // parse_industrial_line در app.py یکی بماند (۱۳ فیلد)
                   char buf[300];
@@ -1319,8 +1377,6 @@ void TaskInternalWiFiConnection(void *pv) {
                     }
                     vTaskDelay(pdMS_TO_TICKS(5));
                   }
-                  uploadClient.stop();
-
                   if (ack) {
                     pos += REC_SIZE;
                     writeUploadPos(dayFile, pos);
@@ -1328,6 +1384,7 @@ void TaskInternalWiFiConnection(void *pv) {
                                  stored.NUM, (unsigned)pos, (unsigned)fileSize);
                   } else {
                     DEBUG_PRINTLN("[UPLOAD] No ACK, will retry same record.");
+                    uploadClient.stop();  // اتصال مشکوک -> دور بعد تازه باز شود
                   }
                 }
               } else {

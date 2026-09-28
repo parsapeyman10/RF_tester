@@ -568,9 +568,13 @@ def history():
                     
                     # دریافت داده‌ها با استفاده از ایندکس زمانی که قبلاً ساختیم
                     # ترتیب نزولی (DESC) یعنی جدیدترین داده‌ها اول نمایش داده شوند
+                    # باگ: قبلاً فقط ۶ ستون انتخاب می‌شد ولی DailyRecordAdapter
+                    # به row[6] (تاریخ) و row[7] (ساعت) نیاز دارد -> IndexError
+                    # و صفحه‌ی آرشیو روزانه همیشه خالی نمایش داده می‌شد.
                     c.execute("""
-                        SELECT id, num_value, nbcm_selected, temp, humidity, full_timestamp 
-                        FROM daily_records 
+                        SELECT id, num_value, nbcm_selected, temp, humidity,
+                               full_timestamp, log_date, log_time
+                        FROM daily_records
                         ORDER BY log_date DESC, log_time DESC
                     """)
                     
@@ -797,11 +801,28 @@ def clear_history():
     try:
         if target_date:
             MasterReading.query.filter(MasterReading.date == target_date).delete()
+            db.session.commit()
+            # باگ: قبلاً فقط Master پاک می‌شد و چون صفحه‌ی آرشیو اول از
+            # دیتابیس روزانه می‌خواند، داده‌ها انگار اصلاً حذف نمی‌شدند.
+            _daily = daily_db_file(target_date)
+            if os.path.exists(_daily):
+                try:
+                    os.remove(_daily)
+                    _daily_ready.discard(_daily)
+                except Exception as rm_err:
+                    print(f"[DB] حذف {_daily} ناموفق: {rm_err}")
             flash(f"داده‌های تاریخ {target_date} حذف شد.", "info")
         else:
             MasterReading.query.delete()
+            db.session.commit()
+            for _f in os.listdir(DAILY_DB_DIR):
+                if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.db", _f):
+                    try:
+                        os.remove(os.path.join(DAILY_DB_DIR, _f))
+                    except Exception:
+                        pass
+            _daily_ready.clear()
             flash("کل دیتابیس پاکسازی شد.", "warning")
-        db.session.commit()
     except Exception as e:
         db.session.rollback()
         flash(f"خطا: {e}", "danger")
@@ -811,7 +832,11 @@ def clear_history():
 def plot_display():
     return render_template('plot_display.html')
 
-@app.route('/api/sensor_data')
+# توجه: این تابع قبلاً روی همان آدرس '/api/sensor_data' ثبت شده بود؛ یعنی دو
+# مسیر کاملاً یکسان با دو تابع متفاوت. فلسک خطا نمی‌دهد ولی اینکه کدام یکی
+# سرویس بدهد قابل اتکا نیست و این نسخه فیلد 'date' را ندارد (که plot_display
+# به آن نیاز دارد). به یک آدرس جدا منتقل شد تا رفتار قطعی باشد.
+@app.route('/api/sensor_data_extended')
 def get_sensor_data_api():
     try:
         # دریافت 50 داده آخر

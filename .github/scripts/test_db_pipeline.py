@@ -162,12 +162,30 @@ check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
 flask_app.app.config["TESTING"] = True
 client = flask_app.app.test_client()
-for route in ("/", "/history", "/plot_display", "/upload_dat", "/api/sensor_data"):
+for route in ("/", "/history", "/plot_display", "/upload_dat",
+              "/api/sensor_data", "/api/sensor_data_extended"):
     try:
         resp = client.get(route)
         check(resp.status_code == 200, f"{route} -> {resp.status_code}")
     except Exception as exc:
         check(False, f"{route} -> {type(exc).__name__}: {exc}")
+
+print("\n[10] صفحه‌ی آرشیو روزانه واقعاً دیتا نشان می‌دهد")
+resp = client.get("/history?date=2026-01-05")
+body = resp.get_data(as_text=True)
+check(resp.status_code == 200, f"/history?date=2026-01-05 -> {resp.status_code}")
+check("خطا در بارگذاری فایل روزانه" not in body, "خطای بارگذاری فایل روزانه رخ نداد")
+check("42" in body and "43" in body, "رکوردهای روزانه در صفحه دیده می‌شوند")
+
+print("\n[11] پاک کردن آرشیو، دیتابیس روزانه را هم پاک می‌کند")
+client.post("/clear_history?date=2026-01-05")
+check(not os.path.exists(os.path.join(WORKDIR, "2026-01-05.db")),
+      "فایل دیتابیس روزانه حذف شد")
+with flask_app.app.app_context():
+    left = flask_app.db.session.query(flask_app.MasterReading).filter_by(date="2026-01-05").count()
+check(left == 0, f"رکوردهای آن روز از دیتابیس اصلی هم پاک شدند (باقی‌مانده: {left})")
+body2 = client.get("/history?date=2026-01-05").get_data(as_text=True)
+check(">42<" not in body2, "بعد از پاک کردن، رکورد قدیمی در جدول نیست")
 
 # ---------------------------------------------------------------- گزارش
 with flask_app.app.app_context():

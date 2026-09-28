@@ -37,6 +37,7 @@ const unsigned long AP_RETRY_DELAY_MS = 1000;
 const int RX_BUFFER_SIZE = 512;
 char rxBuffer[RX_BUFFER_SIZE];
 int rxIndex = 0;
+bool overflowed = false;   // خط ورودی از ظرفیت بافر رد شد؟
 
 // ساختار داده‌ای صنعتی
 struct WifiData {
@@ -112,7 +113,10 @@ void loop() {
         if (c == '\n') {
           rxBuffer[rxIndex] = '\0';
 
-          if (rxIndex > 0) {
+          if (overflowed) {
+            currentClient.println("ERR:TOOLONG");
+            DBG_PRINTLN("[RESPONSE]: line too long, discarded");
+          } else if (rxIndex > 0) {
             DBG_PRINTLN();
             DBG_PRINT("[LINE RECV]: ");
             DBG_PRINTLN(rxBuffer);
@@ -133,8 +137,13 @@ void loop() {
           }
           clearRxBuffer();
           lastClientActivity = millis();
-        } else if (c != '\r' && rxIndex < RX_BUFFER_SIZE - 1) {
-          rxBuffer[rxIndex++] = c;
+        } else if (c != '\r') {
+          if (rxIndex < RX_BUFFER_SIZE - 1) {
+            rxBuffer[rxIndex++] = c;
+          } else {
+            // سرریز بافر: خط را باطل کن تا نیمه‌کاره پارس نشود
+            overflowed = true;
+          }
         }
       }
     }
@@ -186,6 +195,7 @@ void stopClient(const char* reason) {
 void clearRxBuffer() { 
   rxIndex = 0; 
   rxBuffer[0] = '\0'; 
+  overflowed = false;
 }
 
 bool strToBool(const char* str) {

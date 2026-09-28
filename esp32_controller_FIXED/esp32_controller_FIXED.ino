@@ -99,7 +99,8 @@ const char *TIMEZONE_TZ = "<+0330>-3:30";
 
 const char *SETUP_AP_SSID = "SetClock";
 const char *SETUP_AP_PASS = "12345678";
-const uint32_t SETUP_PORTAL_TIMEOUT_MS = 120000;  // ۲ دقیقه فرصت برای گوشی
+const uint32_t SETUP_PORTAL_TIMEOUT_MS = 120000;  // وقتی ساعت نامعتبر است
+const uint32_t SETUP_PORTAL_GRACE_MS = 20000;     // وقتی RTC از قبل معتبر است
 const uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 
 // =====================================================================
@@ -632,12 +633,16 @@ void handlePortalSaveWifi() {
 }
 
 void handlePortalScan() {
+  // اسکن نیاز به رابط STA دارد؛ اگر در حالت فقط-AP اسکن کنیم ممکن است
+  // اکسس‌پوینت لحظه‌ای بیفتد و گوشی از پورتال پرت شود.
+  WiFi.mode(WIFI_AP_STA);
   int n = WiFi.scanNetworks();
   String out = "";
   for (int i = 0; i < n && i < 15; i++) {
     out += WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + "dBm)<br>";
   }
   WiFi.scanDelete();
+  WiFi.mode(WIFI_AP);
   if (!out.length()) out = "شبکه‌ای پیدا نشد";
   setupServer.send(200, "text/html; charset=utf-8", out);
 }
@@ -676,8 +681,15 @@ void runSetupPortal(bool timeAlreadyValid) {
   portalModeChosen = false;
   portalWantsDataView = false;
 
+  // باگ: قبلاً حتی وقتی ساعت RTC معتبر بود، هر بوت ۲ دقیقه کامل منتظر
+  // می‌ماند. حالا اگر ساعت درست باشد فقط ۲۰ ثانیه فرصت می‌دهد و می‌رود
+  // سراغ کار عادی، تا بعد از قطع و وصل برق دستگاه سریع برگردد.
+  const uint32_t portalLimit =
+      timeAlreadyValid ? SETUP_PORTAL_GRACE_MS : SETUP_PORTAL_TIMEOUT_MS;
+  DEBUG_PRINTF("[PORTAL] waiting up to %u s\n", (unsigned)(portalLimit / 1000));
+
   uint32_t start = millis();
-  while (millis() - start < SETUP_PORTAL_TIMEOUT_MS) {
+  while (millis() - start < portalLimit) {
     setupServer.handleClient();
     // وقتی هم ساعت آمد و هم مود انتخاب شد، دیگر منتظر نمی‌مانیم
     if (portalTimeSet && portalModeChosen) {

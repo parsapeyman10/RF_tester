@@ -781,6 +781,16 @@ static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT]) {
                PHASE_NAMES[phase],
                DEVICE_NAMES[0], fbSeen[phase][0] ? "YES" : "NO",
                DEVICE_NAMES[1], fbSeen[phase][1] ? "YES" : "NO");
+
+  // تشخیص خطای سیم‌کشی: در فاز باز کردن نباید فیدبکِ «بسته شد» بیاید و برعکس.
+  // این پالس‌ها عمداً به نتیجه اضافه نمی‌شوند، فقط هشدار داده می‌شود.
+  int other = (phase == PHASE_OPEN) ? PHASE_CLOSE : PHASE_OPEN;
+  for (int d = 0; d < DEVICE_COUNT; d++) {
+    if (fbSeen[other][d]) {
+      DEBUG_PRINTF("[PHASE %s] هشدار: در این فاز فیدبک %s از %s دیده شد (سیم‌کشی؟)\n",
+                   PHASE_NAMES[phase], PHASE_NAMES[other], DEVICE_NAMES[d]);
+    }
+  }
 }
 
 /** آیا کار این دستگاه تمام است؟ */

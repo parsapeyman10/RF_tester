@@ -13,7 +13,7 @@
 //  هر رکورد در دیتابیس Flask می‌شدند چون همان کلیدواژه NUM= را هم در
 //  خط اکو خام و هم در خط [LINE RECV] تکرار می‌کردند)
 // =====================================================================
-#define DEBUG_ENABLE true
+#define DEBUG_ENABLE false
 
 #if DEBUG_ENABLE
 #define DBG_PRINT(x) Serial.print(x)
@@ -24,6 +24,24 @@
 #define DBG_PRINTLN(x)
 #define DBG_PRINTF(...)
 #endif
+
+// =====================================================================
+// خطوط وضعیت (سلامت، اتصال کلاینت، خطاها) مستقل از حالت دیباگ چاپ می‌شوند.
+// این‌ها با کلیدواژه‌ی NUM= شروع نمی‌شوند، پس پارسر سخت‌گیرِ app.py آن‌ها را
+// نادیده می‌گیرد و هیچ رکورد اضافه‌ای ثبت نمی‌شود — ولی شما همیشه می‌بینید
+// که گیرنده در چه حالی است. برای سکوت کامل، false کنید.
+// =====================================================================
+#define STATUS_ENABLE true
+
+#if STATUS_ENABLE
+#define ST_PRINTLN(x) Serial.println(x)
+#define ST_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+#define ST_PRINTLN(x)
+#define ST_PRINTF(...)
+#endif
+
+#define FW_VERSION "2.0"
 
 // تنظیمات شبکه و ارتباطی
 const char* SSID_NAME = "ESP8266_AP";
@@ -39,6 +57,7 @@ const uint8_t  AP_MAX_CLIENTS = 8;        // سخت‌گیری بی‌دلیل �
 const float    AP_TX_POWER = 20.5;        // حداکثر توان خروجی
 const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
 const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
+const uint32_t LOW_HEAP_LIMIT = 6000;                 // آستانه‌ی حافظه‌ی بحرانی
 
 // ظرفیت بافر ورودی
 const int RX_BUFFER_SIZE = 512;
@@ -63,6 +82,27 @@ WiFiClient currentClient;
 bool isClientConnected = false;
 unsigned long lastClientActivity = 0;
 
+// --- آمار کارکرد (مثل سمت ESP32) ---
+struct ReceiverStats {
+  uint32_t linesOk = 0;        // رکوردهای معتبر تحویل‌شده به کامپیوتر
+  uint32_t linesBad = 0;       // خطوطی که فرمتشان درست نبود
+  uint32_t pings = 0;          // keep-alive های پاسخ داده‌شده
+  uint32_t sessions = 0;       // چند بار کلاینت وصل شده
+  uint32_t apRestarts = 0;     // چند بار AP بازسازی شده
+};
+ReceiverStats stats;
+
+// هندلرهای رویداد اکسس‌پوینت (باید سراسری بمانند)
+WiFiEventHandler onStationConnectedHandler;
+WiFiEventHandler onStationDisconnectedHandler;
+
+static String macToString(const uint8_t *mac) {
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
 // پروتوتایپ توابع
 void initAccessPoint();
 bool parseData(char* inputBuffer);
@@ -71,9 +111,25 @@ void clearRxBuffer();
 void stopClient(const char* reason);
 bool strToBool(const char* str);
 
+/** وقتی ESP32 (یا هر کلاینتی) به اکسس‌پوینت می‌پیوندد */
+void handleStationConnected(const WiFiEventSoftAPModeStationConnected &evt) {
+  stats.sessions++;
+  ST_PRINTF("[AP] کلاینت وصل شد: %s (مجموع نشست‌ها: %u)\n",
+            macToString(evt.mac).c_str(), stats.sessions);
+}
+
+void handleStationDisconnected(const WiFiEventSoftAPModeStationDisconnected &evt) {
+  ST_PRINTF("[AP] کلاینت جدا شد: %s\n", macToString(evt.mac).c_str());
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(1000);
+
+  ST_PRINTF("\n[BOOT] ESP8266 Receiver FW %s\n", FW_VERSION);
+
+  onStationConnectedHandler = WiFi.onSoftAPModeStationConnected(&handleStationConnected);
+  onStationDisconnectedHandler = WiFi.onSoftAPModeStationDisconnected(&handleStationDisconnected);
 
   DBG_PRINTLN("\n\n========================================");
   DBG_PRINTLN("SYSTEM BOOTING... (PORT 80 ACTIVE)");
@@ -83,10 +139,8 @@ void setup() {
   server.begin();
   server.setNoDelay(true);
 
-  DBG_PRINT("Server Started on Port: ");
-  DBG_PRINTLN(SERVER_PORT);
-  DBG_PRINTLN("Monitoring every incoming byte...");
-  DBG_PRINTLN("========================================\n");
+  ST_PRINTF("[BOOT] AP='%s' ch=%u port=%d  |  آماده‌ی دریافت\n",
+            SSID_NAME, AP_CHANNEL, SERVER_PORT);
 }
 
 void loop() {
@@ -132,11 +186,13 @@ void loop() {
             // سوکت زنده بماند. نباید به‌عنوان خطای فرمت جواب داده شود.
             if (strcmp(rxBuffer, "PING") == 0) {
               currentClient.println("PONG");
+              stats.pings++;
             }
             // تحلیل دیتا و بررسی مطابقت با فرمت درخواستی
             else if (parseData(rxBuffer)) {
               // ارسال تاییدیه OK به فرستنده (ESP32)
               currentClient.println("OK");
+              stats.linesOk++;
               DBG_PRINTLN("[RESPONSE]: Sent 'OK' to Client (Handshake Complete)");
               // تنها خروجی غیرمشروط به کامپیوتر: همیشه چاپ می‌شود
               // چون Flask دقیقاً منتظر همین یک خط با فرمت NUM=... است
@@ -144,7 +200,8 @@ void loop() {
             } else {
               // در صورت عدم تطابق فرمت
               currentClient.println("ERR:FORMAT");
-              DBG_PRINTLN("[RESPONSE]: Sent 'ERR:FORMAT' to Client");
+              stats.linesBad++;
+              ST_PRINTF("[WARN] خط با فرمت نامعتبر رد شد (مجموع: %u)\n", stats.linesBad);
             }
           }
           clearRxBuffer();
@@ -171,32 +228,48 @@ void loop() {
     stopClient("Physical Disconnect");
   }
 
-  // --- گزارش/نگهداری سلامت اکسس‌پوینت ---
+  // =====================================================================
+  //  نگهداری و گزارش سلامت (هم‌تراز با ناظر سلامت ESP32)
+  // =====================================================================
   static unsigned long lastHealth = 0;
   if (millis() - lastHealth > AP_HEALTH_PERIOD_MS) {
     lastHealth = millis();
     uint8_t stations = WiFi.softAPgetStationNum();
-    DBG_PRINTF("[HEALTH] ssid=%s ch=%u clients=%u heap=%u up=%lus\n",
-               SSID_NAME, WiFi.channel(), stations, ESP.getFreeHeap(), millis() / 1000);
+    uint32_t heap = ESP.getFreeHeap();
 
-    // اگر اکسس‌پوینت به هر دلیلی پایین آمده باشد، دوباره بالا می‌آید
+    ST_PRINTF("[HEALTH] ssid=%s ch=%u clients=%u | ok=%u bad=%u ping=%u "
+              "sessions=%u apRst=%u | heap=%u up=%lus\n",
+              SSID_NAME, WiFi.channel(), stations,
+              stats.linesOk, stats.linesBad, stats.pings,
+              stats.sessions, stats.apRestarts,
+              heap, millis() / 1000);
+
+    // ۱) اگر اکسس‌پوینت پایین آمده باشد، دوباره بالا می‌آید
     if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() == IPAddress(0, 0, 0, 0)) {
-      DBG_PRINTLN("[HEALTH] AP پایین است -> راه‌اندازی مجدد");
+      ST_PRINTLN("[HEALTH] AP پایین است -> راه‌اندازی مجدد");
+      stats.apRestarts++;
       initAccessPoint();
     }
 
-    // اگر خیلی طولانی هیچ کلاینتی وصل نشد، AP را تازه می‌کنیم.
-    // (گاهی SoftAP بدون اینکه پایین بیاید، دیگر کسی را نمی‌پذیرد.)
+    // ۲) گاهی SoftAP بدون اینکه پایین بیاید دیگر کسی را نمی‌پذیرد
     static uint8_t noClientRounds = 0;
     if (stations == 0) {
       noClientRounds++;
-      if (noClientRounds >= 10) {   // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
-        DBG_PRINTLN("[HEALTH] ۵ دقیقه بدون کلاینت -> AP تازه‌سازی می‌شود");
+      if (noClientRounds >= 10) {   // ۵ دقیقه
+        ST_PRINTLN("[HEALTH] ۵ دقیقه بدون کلاینت -> AP تازه‌سازی می‌شود");
         noClientRounds = 0;
+        stats.apRestarts++;
         initAccessPoint();
       }
     } else {
       noClientRounds = 0;
+    }
+
+    // ۳) محافظ حافظه: با هیپ خیلی کم، پشته‌ی شبکه ناپایدار می‌شود
+    if (heap < LOW_HEAP_LIMIT) {
+      ST_PRINTF("[HEALTH] حافظه بحرانی (%u) -> ریست کنترل‌شده\n", heap);
+      delay(200);
+      ESP.restart();
     }
   }
 

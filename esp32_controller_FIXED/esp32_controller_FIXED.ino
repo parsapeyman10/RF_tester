@@ -37,6 +37,7 @@
 //                            USER CONFIG
 // =====================================================================
 #define DEBUG_MODE 1  // برای Production صفر شود
+#define FW_VERSION "2.3"
 
 // --- ساختار واقعی سخت‌افزار -------------------------------------------------
 //  دو رله = دو «فرمان» ، دو BCM = دو «دستگاه»
@@ -333,7 +334,7 @@ void TaskInternalWiFiConnection(void *pv);
 void setup() {
   Serial.begin(115200);
   delay(300);
-  DEBUG_PRINTLN("\n[BOOT] Industrial Controller V2.0");
+  DEBUG_PRINTF("\n[BOOT] ESP32 Industrial Controller FW %s\n", FW_VERSION);
 
   Wire.begin();
   delay(200);

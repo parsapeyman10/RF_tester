@@ -160,6 +160,19 @@ check("AP_CHANNEL" in esp8266, "[ESP8266] کانال AP ثابت است")
 check("CLIENT_IDLE_TIMEOUT_MS = 60000" in esp8266,
       "[ESP8266] تایم‌اوت بی‌کاری از ۱۰ به ۶۰ ثانیه رفته")
 
+# ------------------------- 5d) سطح صنعتی سمت گیرنده
+check("#define STATUS_ENABLE" in esp8266,
+      "[ESP8266] خروجی وضعیت مستقل از حالت دیباگ است")
+check("struct ReceiverStats" in esp8266 and "stats.linesOk" in esp8266,
+      "[ESP8266] آمار کارکرد نگه داشته می‌شود")
+check("onSoftAPModeStationConnected" in esp8266 and "onSoftAPModeStationDisconnected" in esp8266,
+      "[ESP8266] پیوستن و جدا شدن کلاینت رویدادی گزارش می‌شود")
+check("LOW_HEAP_LIMIT" in esp8266 and "ESP.restart()" in esp8266,
+      "[ESP8266] محافظ حافظه‌ی بحرانی دارد")
+check("FW_VERSION" in esp8266 and "FW_VERSION" in esp32,
+      "[هر دو برد] نسخه‌ی فریمور در بوت چاپ می‌شود")
+check("stats.apRestarts" in esp8266, "[ESP8266] بازسازی‌های AP شمرده می‌شود")
+
 # ------------------------- 5c) فایل‌های راه‌اندازی سرور
 import os as _os
 _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))

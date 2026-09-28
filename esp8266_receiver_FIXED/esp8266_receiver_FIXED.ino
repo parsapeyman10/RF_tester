@@ -35,7 +35,7 @@ const unsigned long AP_RETRY_DELAY_MS = 1000;
 
 // --- پایداری اکسس‌پوینت ---
 const uint8_t  AP_CHANNEL = 6;            // کانال ثابت (کمترین تداخل معمول)
-const uint8_t  AP_MAX_CLIENTS = 4;
+const uint8_t  AP_MAX_CLIENTS = 8;        // سخت‌گیری بی‌دلیل نکنیم
 const float    AP_TX_POWER = 20.5;        // حداکثر توان خروجی
 const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
 const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
@@ -183,6 +183,20 @@ void loop() {
     if (WiFi.getMode() != WIFI_AP || WiFi.softAPIP() == IPAddress(0, 0, 0, 0)) {
       DBG_PRINTLN("[HEALTH] AP پایین است -> راه‌اندازی مجدد");
       initAccessPoint();
+    }
+
+    // اگر خیلی طولانی هیچ کلاینتی وصل نشد، AP را تازه می‌کنیم.
+    // (گاهی SoftAP بدون اینکه پایین بیاید، دیگر کسی را نمی‌پذیرد.)
+    static uint8_t noClientRounds = 0;
+    if (stations == 0) {
+      noClientRounds++;
+      if (noClientRounds >= 10) {   // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
+        DBG_PRINTLN("[HEALTH] ۵ دقیقه بدون کلاینت -> AP تازه‌سازی می‌شود");
+        noClientRounds = 0;
+        initAccessPoint();
+      }
+    } else {
+      noClientRounds = 0;
     }
   }
 

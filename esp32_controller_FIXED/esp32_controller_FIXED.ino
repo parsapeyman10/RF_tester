@@ -88,16 +88,19 @@ const uint32_t CYCLE_PERIOD_MS = 120000;    // فاصله‌ی بین سیکل�
 const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت کامپیوتر)
 const char *DATA_AP_PASS = "12345678";
 
-// اگر true شود، تنظیمات ذخیره‌شده در NVS نادیده گرفته می‌شوند و همین دو مقدار
-// بالا استفاده می‌شوند. برای وقتی که مطمئن نیستید در پورتال چه ذخیره کرده‌اید.
-const bool FORCE_DEFAULT_WIFI = false;
+// اتصال به گیرنده همیشه با همین دو مقدار بالا انجام می‌شود. این دو، سخت‌افزار
+// ثابت پروژه‌اند و دلیلی ندارد از NVS خوانده شوند؛ تنظیمات ذخیره‌شده‌ی خراب
+// (مثلاً رمز خالی) بزرگ‌ترین منبع «وصل نشدن» بود.
+// اگر روزی خواستید از روی پورتال عوضش کنید، این را false کنید.
+const bool FORCE_DEFAULT_WIFI = true;
 IPAddress serverIP(192, 168, 4, 1);
 const int serverPort = 80;
 
 // --- پایداری اتصال ---
-// IP ثابت یعنی دیگر منتظر DHCP نمی‌مانیم؛ اتصال مجدد چند برابر سریع‌تر و
-// مطمئن‌تر انجام می‌شود (مهم‌ترین عامل «قطع و وصل شدن مداوم»).
-const bool USE_STATIC_IP = true;
+// IP ثابت سریع‌تر است ولی اگر با تنظیمات DHCP گیرنده جور نباشد، اتصال را
+// خراب می‌کند. پیش‌فرض روی DHCP است که همیشه کار می‌کند؛ بعد از اینکه لینک
+// پایدار شد می‌توانید true کنید.
+const bool USE_STATIC_IP = false;
 IPAddress staticIP(192, 168, 4, 50);
 IPAddress gatewayIP(192, 168, 4, 1);
 IPAddress subnetMask(255, 255, 255, 0);
@@ -777,45 +780,70 @@ void runSetupPortal(bool timeAlreadyValid) {
 void connectToDataAp(uint32_t timeoutMs) {
   static uint8_t failStreak = 0;
 
-  DEBUG_PRINTF("[NET] Connecting to '%s' (passLen=%u) ...\n",
+  DEBUG_PRINTF("[NET] اتصال به '%s' (passLen=%u) ...\n",
                cfgDataSsid.c_str(), (unsigned)cfgDataPass.length());
 
-  // وضعیت قبلی کاملاً پاک شود تا تلاش‌های روی‌هم‌افتاده نداشته باشیم
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  // بعد از ۳ شکست پیاپی، IP ثابت را کنار می‌گذاریم و با DHCP امتحان می‌کنیم
-  bool useStatic = USE_STATIC_IP && (failStreak < 3);
-  if (useStatic) {
-    if (!WiFi.config(staticIP, gatewayIP, subnetMask)) {
-      DEBUG_PRINTLN("[NET] هشدار: تنظیم IP ثابت ناموفق بود");
-    }
+  // بعضی اکسس‌پوینت‌های ESP8266 به‌صورت WPA/WPA2 مختلط (TKIP) تبلیغ می‌شوند و
+  // ESP32 در حالت پیش‌فرض (حداقل WPA2) از اتصال به آن‌ها خودداری می‌کند.
+  // این خط همان حالت را هم می‌پذیرد.
+#if defined(WIFI_AUTH_WPA_PSK)
+  WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+#endif
+
+  if (USE_STATIC_IP && failStreak < 2) {
+    WiFi.config(staticIP, gatewayIP, subnetMask);
   } else {
-    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // برگشت به DHCP
-    if (USE_STATIC_IP) DEBUG_PRINTLN("[NET] IP ثابت جواب نداد -> تلاش با DHCP");
+    WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);  // DHCP
   }
 
-  WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
+  // --- پیدا کردن کانال و BSSID دقیق قبل از اتصال ---
+  // وقتی کانال و BSSID را بدهیم، ESP32 دیگر همه‌ی کانال‌ها را جستجو نمی‌کند؛
+  // اتصال هم سریع‌تر و هم به‌مراتب مطمئن‌تر می‌شود.
+  int32_t bestChannel = 0;
+  uint8_t bestBssid[6];
+  bool haveBssid = false;
+  int32_t bestRssi = -127;
+
+  int found = WiFi.scanNetworks(false, true, false, 200);
+  for (int i = 0; i < found; i++) {
+    if (WiFi.SSID(i) == cfgDataSsid && WiFi.RSSI(i) > bestRssi) {
+      bestRssi = WiFi.RSSI(i);
+      bestChannel = WiFi.channel(i);
+      memcpy(bestBssid, WiFi.BSSID(i), 6);
+      haveBssid = true;
+    }
+  }
+  WiFi.scanDelete();
+
+  if (haveBssid) {
+    DEBUG_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d -> اتصال مستقیم\n",
+                 (int)bestChannel, (int)bestRssi);
+    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), bestChannel, bestBssid);
+  } else {
+    DEBUG_PRINTLN("[NET] AP در اسکن دیده نشد؛ اتصال عادی امتحان می‌شود");
+    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
+  }
 
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
-    delay(300);
+    delay(250);
     DEBUG_PRINT(".");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     failStreak = 0;
-    DEBUG_PRINTF("\n[NET] Connected. IP: %s  RSSI: %d dBm  ch=%d\n",
+    DEBUG_PRINTF("\n[NET] وصل شد. IP: %s  RSSI: %d dBm  ch=%d\n",
                  WiFi.localIP().toString().c_str(), WiFi.RSSI(), WiFi.channel());
   } else {
     failStreak++;
     DEBUG_PRINTF("\n[NET] وصل نشد (status=%d، شکست پیاپی=%u)\n",
                  (int)WiFi.status(), (unsigned)failStreak);
-
-    // هر ۵ شکست یک بار اسکن تشخیصی بزن تا معلوم شود AP اصلاً هست یا نه
     if (failStreak % 5 == 0) scanForDataAp();
   }
 }
@@ -1685,6 +1713,22 @@ void TaskHealthMonitor(void *pv) {
     } else {
       netStall = 0;
       lastNet = hbNet;
+    }
+
+    // اگر وای‌فای خیلی طولانی قطع بماند، یک ریست کنترل‌شده معمولاً
+    // درایور را از حالت گیرکرده بیرون می‌آورد (دیتا روی SD امن است)
+    static uint32_t wifiDownRounds = 0;
+    if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
+      if (WiFi.status() != WL_CONNECTED) {
+        wifiDownRounds++;
+        if (wifiDownRounds >= 10) {   // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
+          Serial.println("[HEALTH] وای‌فای ۵ دقیقه قطع بوده -> ریست کنترل‌شده");
+          delay(200);
+          ESP.restart();
+        }
+      } else {
+        wifiDownRounds = 0;
+      }
     }
 
     // تسک رله در حالت نمایش دیتا حذف شده است؛ فقط در حالت عادی چک می‌شود

@@ -5,6 +5,9 @@
     <string name="port_hint">پورت</string>
     <string name="btn_sync">آخرین رکورد (sync)</string>
     <string name="btn_sync10">۱۰ رکورد آخر (sync10)</string>
+    <string name="btn_syncall">کل امروز</string>
+    <string name="btn_push">ارسال به app.py</string>
+    <string name="server_hint">آدرس سرور app.py (مثال: http://192.168.1.100:5000)</string>
     <string name="btn_clear">پاک کردن</string>
     <string name="status_idle">آماده</string>
     <string name="status_connecting">در حال اتصال…</string>

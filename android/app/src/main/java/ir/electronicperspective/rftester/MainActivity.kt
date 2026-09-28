@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var lastRecords: List<EspProtocol.Reading> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -19,7 +20,12 @@ class MainActivity : AppCompatActivity() {
 
         binding.syncButton.setOnClickListener { run(EspProtocol.CMD_SYNC_LAST) }
         binding.sync10Button.setOnClickListener { run(EspProtocol.CMD_SYNC_10) }
-        binding.clearButton.setOnClickListener { binding.outputText.text = "" }
+        binding.syncAllButton.setOnClickListener { run(EspProtocol.CMD_SYNC_ALL) }
+        binding.pushButton.setOnClickListener { pushToServer() }
+        binding.clearButton.setOnClickListener {
+            binding.outputText.text = ""
+            lastRecords = emptyList()
+        }
     }
 
     private fun run(command: String) {
@@ -47,6 +53,7 @@ class MainActivity : AppCompatActivity() {
 
                     else -> {
                         val records = EspProtocol.parseRecords(raw)
+                        lastRecords = records
                         binding.statusText.text = "دریافت شد: ${records.size} رکورد"
                         binding.outputText.text = if (records.isEmpty()) {
                             raw
@@ -61,8 +68,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** همان دیتا، همان فرمت، همان مقصد که کلاینت دسکتاپ استفاده می‌کند */
+    private fun pushToServer() {
+        if (lastRecords.isEmpty()) {
+            binding.statusText.text = "اول دیتا بگیرید"
+            return
+        }
+        val server = binding.serverInput.text.toString().trim()
+        if (server.isEmpty()) {
+            binding.statusText.text = "آدرس سرور app.py را وارد کنید"
+            return
+        }
+
+        setBusy(true)
+        binding.statusText.text = "در حال ارسال به app.py …"
+        val lines = EspProtocol.toServerLines(lastRecords)
+
+        lifecycleScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                runCatching { ServerClient.push(server, lines) }
+            }
+            setBusy(false)
+            res.onSuccess {
+                binding.statusText.text =
+                    "app.py: ${it.saved} ذخیره، ${it.duplicates} تکراری، ${it.invalid} نامعتبر"
+            }.onFailure { e ->
+                binding.statusText.text = "خطای ارسال: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+    }
+
     private fun setBusy(busy: Boolean) {
         binding.syncButton.isEnabled = !busy
         binding.sync10Button.isEnabled = !busy
+        binding.syncAllButton.isEnabled = !busy
+        binding.pushButton.isEnabled = !busy
     }
 }

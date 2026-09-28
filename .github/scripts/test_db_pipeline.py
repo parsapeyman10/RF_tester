@@ -135,7 +135,29 @@ idx = [r[1] for r in conn.execute("PRAGMA index_list(daily_records)").fetchall()
 conn.close()
 check("uq_daily_record" in idx, f"ایندکس یکتا ساخته شد (ایندکس‌ها: {idx})")
 
-print("\n[8] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
+print("\n[8] مسیر واحد دیتا: /api/ingest (همان چیزی که گوشی و دسکتاپ می‌فرستند)")
+flask_app.app.config["TESTING"] = True
+_c = flask_app.app.test_client()
+_lines = [
+    "NUM=900,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,Temp=25.00,Humidity=44.00,Date=2026-01-07,Time=08:00:00",
+    "NUM=901,NBCM1=NOK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,Temp=25.50,Humidity=44.50,Date=2026-01-07,Time=08:02:00",
+    "END",
+    "چرند",
+]
+r1 = _c.post("/api/ingest", json={"lines": _lines})
+check(r1.status_code == 200, f"/api/ingest -> {r1.status_code}")
+j1 = r1.get_json()
+check(j1["saved"] == 2, f"۲ رکورد ذخیره شد (خروجی: {j1})")
+check(j1["invalid"] == 1, "خط نامعتبر شمرده شد")
+check(daily_count("2026-01-07") == 2, "رکوردها در دیتابیس روزانه نشستند")
+
+# همان دیتا دوباره (گوشی و کامپیوتر هر دو بفرستند) -> نباید تکراری ثبت شود
+r2 = _c.post("/api/ingest", data="\n".join(_lines), content_type="text/plain")
+j2 = r2.get_json()
+check(j2["saved"] == 0 and j2["duplicates"] == 2, f"ارسال دوباره تکراری شمرده شد ({j2})")
+check(daily_count("2026-01-07") == 2, "رکورد تکراری اضافه نشد")
+
+print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
 flask_app.app.config["TESTING"] = True

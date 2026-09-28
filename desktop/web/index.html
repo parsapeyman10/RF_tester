@@ -76,6 +76,12 @@
       </div>
       <button id="b1">آخرین رکورد (sync)</button>
       <button id="b10">۱۰ رکورد آخر (sync10)</button>
+      <button id="ball">کل امروز (syncall)</button>
+      <div>
+        <label for="server">آدرس app.py</label>
+        <input id="server" value="http://127.0.0.1:5000" dir="ltr" style="min-width:190px" />
+      </div>
+      <button id="bpush">ارسال به app.py</button>
       <button id="bcsv" class="ghost">خروجی CSV</button>
       <button id="bclr" class="ghost">پاک کردن</button>
     </div>
@@ -99,8 +105,10 @@
 const $ = id => document.getElementById(id);
 let records = [];
 
+let lastCmd = 'sync';
 fetch('api/defaults').then(r => r.json()).then(d => {
   $('host').value = d.host; $('port').value = d.port;
+  if (d.server) $('server').value = d.server;
 }).catch(() => {});
 
 function setStatus(text, cls){ $('msg').textContent = text; $('dot').className = 'dot ' + (cls||''); }
@@ -122,14 +130,16 @@ function render(){
     </div>`).join('');
 }
 
-async function run(cmd){
+async function run(cmd, push){
+  lastCmd = cmd;
   const btns = document.querySelectorAll('button');
   btns.forEach(b => b.disabled = true);
   setStatus('در حال اتصال و ارسال «' + cmd + '»…', 'busy');
   try{
     const res = await fetch('api/query', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({host:$('host').value.trim(), port:$('port').value.trim(), cmd})
+      body: JSON.stringify({host:$('host').value.trim(), port:$('port').value.trim(),
+                            cmd, push: !!push, server: $('server').value.trim()})
     });
     const data = await res.json();
     $('raw').textContent = data.raw || data.error || '—';
@@ -138,7 +148,13 @@ async function run(cmd){
     else{
       records = data.records.slice().sort((a,b)=>b.id-a.id);
       render();
-      setStatus(records.length + ' رکورد دریافت شد.', 'ok');
+      let msg = records.length + ' رکورد دریافت شد.';
+      if (data.push_result){
+        const p = data.push_result;
+        msg += `  |  ارسال به app.py: ${p.saved} ذخیره، ${p.duplicates} تکراری، ${p.invalid} نامعتبر`;
+      }
+      if (data.push_error){ msg += '  |  خطای ارسال: ' + data.push_error; }
+      setStatus(msg, data.push_error ? 'err' : 'ok');
     }
   }catch(e){ setStatus('خطای شبکه: ' + e.message, 'err'); }
   finally{ btns.forEach(b => b.disabled = false); }
@@ -146,6 +162,8 @@ async function run(cmd){
 
 $('b1').onclick  = () => run('sync');
 $('b10').onclick = () => run('sync10');
+$('ball').onclick = () => run('syncall');
+$('bpush').onclick = () => run(lastCmd, true);
 $('bclr').onclick = () => { records = []; render(); $('raw').textContent='—'; setStatus('پاک شد.'); };
 $('bcsv').onclick = () => {
   if(!records.length) return setStatus('چیزی برای خروجی گرفتن نیست.', 'err');

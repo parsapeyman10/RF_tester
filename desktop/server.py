@@ -66,7 +66,8 @@ def _resolve_web_dir() -> str:
 
 
 WEB_DIR = _resolve_web_dir()
-DEFAULTS = {"host": "192.168.1.1", "port": 80}
+DEFAULTS = {"host": "192.168.1.1", "port": 80,
+            "server": "http://127.0.0.1:5000"}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -103,7 +104,8 @@ class Handler(SimpleHTTPRequestHandler):
         host = (req.get("host") or DEFAULTS["host"]).strip()
         port = int(req.get("port") or DEFAULTS["port"])
         cmd = req.get("cmd") or esp_protocol.CMD_SYNC_LAST
-        if cmd not in (esp_protocol.CMD_SYNC_LAST, esp_protocol.CMD_SYNC_10):
+        if cmd not in (esp_protocol.CMD_SYNC_LAST, esp_protocol.CMD_SYNC_10,
+                       esp_protocol.CMD_SYNC_ALL, esp_protocol.CMD_INFO):
             return self._json(400, {"error": "دستور نامعتبر"})
 
         try:
@@ -121,8 +123,20 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True, "records": [], "raw": raw,
                                     "note": "دستگاه رکوردی روی SD ندارد"})
 
-        records = [r.to_dict() for r in esp_protocol.parse_records(raw)]
-        return self._json(200, {"ok": True, "records": records, "raw": raw})
+        parsed = esp_protocol.parse_records(raw)
+        records = [r.to_dict() for r in parsed]
+
+        result = {"ok": True, "records": records, "raw": raw}
+
+        # --- ارسال خودکار/دستی به app.py ---
+        if req.get("push") and parsed:
+            server = (req.get("server") or DEFAULTS["server"]).strip()
+            try:
+                result["push_result"] = esp_protocol.send_to_app_server(
+                    server, parsed, device="desktop-client")
+            except Exception as exc:
+                result["push_error"] = f"{type(exc).__name__}: {exc}"
+        return self._json(200, result)
 
 
 def main():
@@ -134,10 +148,13 @@ def main():
     ap.add_argument("--simulate", action="store_true",
                     help="بالا آوردن شبیه‌ساز ESP32 و اتصال به آن")
     ap.add_argument("--no-browser", action="store_true", help="مرورگر باز نشود")
+    ap.add_argument("--app-server", default=DEFAULTS["server"],
+                    help="آدرس سرور Flask برای ارسال دیتا (app.py)")
     args = ap.parse_args()
 
     DEFAULTS["host"] = args.esp_host
     DEFAULTS["port"] = args.esp_port
+    DEFAULTS["server"] = args.app_server
 
     if args.simulate:
         import simulator

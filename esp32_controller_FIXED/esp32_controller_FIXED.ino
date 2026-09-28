@@ -61,7 +61,9 @@ const int CHANNEL_COUNT = sizeof(CHANNELS) / sizeof(CHANNELS[0]);
 const bool REQUIRE_BOTH_FEEDBACKS = true;
 
 // --- زمان‌بندی تست هر رله ---
-const uint32_t RELAY_PULSE_MS = 800;        // مدت تریگ رله
+const uint32_t RELAY_PULSE_MS = 800;        // مدت تریگ رله (در حالت پالسی)
+const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
+const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const bool ENABLE_HAMMERING = true;         // ضربه‌های کوتاه در صورت گیر کردن
@@ -269,7 +271,11 @@ volatile bool portalTimeSet = false;
 volatile bool portalModeChosen = false;
 volatile bool portalWantsDataView = false;
 
+// --- ضربان تسک‌ها برای ناظر پایداری ---
+volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
+
 // Prototypes
+void TaskHealthMonitor(void *pv);
 void loadConfig();
 void saveWifiConfig(const String &dSsid, const String &dPass,
                     const String &tSsid, const String &tPass);
@@ -285,6 +291,7 @@ static void writeUploadPos(const String &datPath, uint32_t pos);
 static String baseNameOf(const char *rawName);
 static String pickDayFile(bool oldest);
 static int lastRecordIdOnSD();
+void formatRecordLine(const WifiData &d, char *out, size_t outSize);
 void sendRecord(WiFiClient &cl, const WifiData &d);
 int getNextPersistentID();
 void saveNextPersistentID(int id);
@@ -372,10 +379,26 @@ void setup() {
 
   xEventGroupSetBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE);
 
+  // =============================================================
+  //  تقسیم هسته‌ها برای ران‌تایم دائمی و بدون کرش
+  //
+  //  Core 1 (هسته‌ی کاربردی) : کارهای زمان‌بندی‌شده و GPIO
+  //      - DigiRead  اولویت 6  : خواندن فیدبک، حساس‌ترین بخش زمانی
+  //      - RelayCtrl اولویت 5  : تریگ رله‌ها
+  //      - SHTRead   اولویت 3  : I2C
+  //
+  //  Core 0 (هسته‌ی شبکه)     : هرچه ممکن است بلاک شود
+  //      - WiFiConn  اولویت 2  : TCP/SD، کنار خود درایور وای‌فای
+  //      - Health    اولویت 1  : ناظر سلامت
+  //
+  //  دلیل: وقتی تسک شبکه روی همان هسته‌ی رله بود، بلاک شدن TCP
+  //  باعث لرزش زمان‌بندی پالس‌ها و در بدترین حالت ریست واچ‌داگ می‌شد.
+  // =============================================================
   xTaskCreatePinnedToCore(TaskDigitalRead, "DigiRead", 4096, NULL, 6, NULL, 1);
-  xTaskCreatePinnedToCore(TaskRelayControl, "RelayCtrl", 4096, NULL, 5, NULL, 1);
+  xTaskCreatePinnedToCore(TaskRelayControl, "RelayCtrl", 6144, NULL, 5, NULL, 1);
   xTaskCreatePinnedToCore(TaskReadSHT, "SHTRead", 4096, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(TaskInternalWiFiConnection, "WiFiConn", 8192, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(TaskInternalWiFiConnection, "WiFiConn", 10240, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(TaskHealthMonitor, "Health", 3072, NULL, 1, NULL, 0);
 
   DEBUG_PRINTLN("[BOOT] Tasks started.");
 }
@@ -716,12 +739,6 @@ static void endFeedbackWindow() {
   xEventGroupWaitBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE, pdTRUE, pdTRUE, pdMS_TO_TICKS(500));
 }
 
-static void pulseRelay(uint8_t pin, uint32_t ms) {
-  digitalWrite(pin, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(ms));
-  digitalWrite(pin, LOW);
-}
-
 static bool channelSucceeded(int ch) {
   bool o = fbOpenSeen[ch];
   bool c = fbCloseSeen[ch];
@@ -736,13 +753,20 @@ static bool testChannel(int ch) {
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
     DEBUG_PRINTF("[TEST] %s attempt %u/%u\n", cfg.name, attempt, RELAY_MAX_ATTEMPTS);
 
-    // ۱) پنجره‌ی شنود فیدبک باز شود، بعد رله تریگ شود
-    beginFeedbackWindow();
-    pulseRelay(cfg.relayPin, RELAY_PULSE_MS);
-
-    // ۲) مهلت پاسخ BCM
-    vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));
-    endFeedbackWindow();
+    // =============================================================
+    //  ترتیب دقیق درخواستی:
+    //    1) رله فعال
+    //    2) مانیتورینگ فعال
+    //    3) صبر به اندازه‌ی زمان مجاز
+    //    4) مانیتورینگ غیرفعال
+    //    5) رله غیرفعال
+    // =============================================================
+    digitalWrite(cfg.relayPin, HIGH);                 // 1
+    vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       // فرصت پایدار شدن کنتاکت
+    beginFeedbackWindow();                            // 2
+    vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3
+    endFeedbackWindow();                              // 4
+    digitalWrite(cfg.relayPin, LOW);                  // 5
 
     bool openSeen = fbOpenSeen[ch];
     bool closeSeen = fbCloseSeen[ch];
@@ -754,10 +778,11 @@ static bool testChannel(int ch) {
       return true;
     }
 
-    // ۳) نیمه‌کاره (مثلاً باز شد ولی بسته نشد) -> چکش‌کاری
+    // نیمه‌کاره (مثلاً باز شد ولی بسته نشد) -> چکش‌کاری با همان ترتیب
     bool jammed = (openSeen != closeSeen);
     if (ENABLE_HAMMERING && jammed) {
       DEBUG_PRINTF("[TEST] %s JAM -> hammering %ux\n", cfg.name, HAMMER_COUNT);
+
       beginFeedbackWindow();
       for (uint8_t k = 0; k < HAMMER_COUNT; k++) {
         digitalWrite(cfg.relayPin, HIGH);
@@ -774,7 +799,7 @@ static bool testChannel(int ch) {
       }
     }
 
-    if (attempt < RELAY_MAX_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(2000));
+    if (attempt < RELAY_MAX_ATTEMPTS) vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
   }
 
   DEBUG_PRINTF("[TEST] %s FAILED\n", cfg.name);
@@ -795,6 +820,7 @@ void TaskRelayControl(void *pv) {
   }
 
   for (;;) {
+    hbRelay++;
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
@@ -860,6 +886,7 @@ void TaskDigitalRead(void *pv) {
 
   for (;;) {
     xEventGroupWaitBits(xSystemEvents, BIT_START_DIGITAL_MONITORING, pdTRUE, pdFALSE, portMAX_DELAY);
+    hbDigital++;
 
     for (int i = 0; i < pinCount; i++) {
       lastState[i] = digitalRead(pins[i]);
@@ -913,6 +940,7 @@ void TaskReadSHT(void *pv) {
 
   for (;;) {
     xEventGroupWaitBits(xSystemEvents, BIT_START_SHT_READ, pdTRUE, pdFALSE, portMAX_DELAY);
+    hbSht++;
 
     float sumT = 0, sumH = 0;
     int valid = 0;
@@ -1098,12 +1126,30 @@ void saveToSD(const WifiData &data) {
   }
 }
 
+/**
+ * تنها جایی که فرمت خروجی دیتا ساخته می‌شود.
+ * دقیقاً همان خطی که:
+ *   - از طریق ESP8266 روی سریال به app.py می‌رسد
+ *   - و در «حالت دیتا» به هر کلاینتی (گوشی یا کامپیوتر) داده می‌شود
+ * یعنی گوشی و سیستم عیناً یک فرمت می‌بینند و هر دو مستقیم به app.py
+ * (تابع parse_industrial_line) خورانده می‌شوند.
+ */
+void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
+  snprintf(out, outSize,
+           "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+           d.NUM,
+           d.NBCM1 ? "OK" : "NOK",
+           d.NBCM2 ? "OK" : "NOK",
+           d.NBCM3 ? "OK" : "NOK",
+           d.NBCM4 ? "OK" : "NOK",
+           d.Temp, d.Hum,
+           d.Year, d.Month, d.Day,
+           d.Hour, d.Minute, d.Second);
+}
+
 void sendRecord(WiFiClient &cl, const WifiData &d) {
-  char buf[220];
-  snprintf(buf, sizeof(buf),
-           "{\"ID\":%d,\"T\":%.2f,\"H\":%.2f,\"N1\":%d,\"N2\":%d,\"Time\":\"%04d-%02d-%02d %02d:%02d:%02d\"}",
-           d.NUM, d.Temp, d.Hum, d.NBCM1, d.NBCM2,
-           d.Year, d.Month, d.Day, d.Hour, d.Minute, d.Second);
+  char buf[300];
+  formatRecordLine(d, buf, sizeof(buf));
   cl.println(buf);
 }
 
@@ -1140,6 +1186,7 @@ void TaskInternalWiFiConnection(void *pv) {
   uint32_t lastReconnectTry = 0;
 
   for (;;) {
+    hbNet++;
     int mode = (xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)
                  ? MODE_HOTSPOT_VIEW
                  : MODE_CLIENT_UPLOAD;
@@ -1195,16 +1242,7 @@ void TaskInternalWiFiConnection(void *pv) {
                   // این فرمت باید دقیقاً با sscanf سمت ESP8266 و با
                   // parse_industrial_line در app.py یکی بماند (۱۳ فیلد)
                   char buf[300];
-                  snprintf(buf, sizeof(buf),
-                           "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
-                           stored.NUM,
-                           stored.NBCM1 ? "OK" : "NOK",
-                           stored.NBCM2 ? "OK" : "NOK",
-                           stored.NBCM3 ? "OK" : "NOK",
-                           stored.NBCM4 ? "OK" : "NOK",
-                           stored.Temp, stored.Hum,
-                           stored.Year, stored.Month, stored.Day,
-                           stored.Hour, stored.Minute, stored.Second);
+                  formatRecordLine(stored, buf, sizeof(buf));  // فرمت واحد پروژه
                   uploadClient.println(buf);
 
                   uint32_t t0 = millis();
@@ -1276,12 +1314,19 @@ void TaskInternalWiFiConnection(void *pv) {
               String cmd = remote.readStringUntil('\n');
               cmd.trim();
 
+              // ---------------------------------------------------------
+              //  «حالت دیتا» — پاسخ برای هر وسیله‌ای که وصل شود یکسان است
+              //  (گوشی، لپ‌تاپ، اسکریپت پایتون ... فرقی نمی‌کند)
+              //  خروجی: خط(های) NUM=... که مستقیماً خوراک app.py هستند،
+              //          و در انتها یک خط "END".
+              // ---------------------------------------------------------
               if (cmd.equalsIgnoreCase("sync")) {
                 if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
                   WifiData one;
                   int n = readLastRecords(&one, 1);
                   if (n == 1) sendRecord(remote, one);
                   else remote.println("NO_DATA");
+                  remote.println("END");
                   xSemaphoreGive(xSDMutex);
                 }
               } else if (cmd.equalsIgnoreCase("sync10")) {
@@ -1291,15 +1336,38 @@ void TaskInternalWiFiConnection(void *pv) {
                   if (n == 0) {
                     remote.println("NO_DATA");
                   } else {
-                    remote.println("[");
-                    for (int i = 0; i < n; i++) {
-                      sendRecord(remote, last10[i]);
-                      if (i < n - 1) remote.print(",");
-                    }
-                    remote.println("]");
+                    for (int i = n - 1; i >= 0; i--) sendRecord(remote, last10[i]);
                   }
+                  remote.println("END");
                   xSemaphoreGive(xSDMutex);
                 }
+              } else if (cmd.equalsIgnoreCase("syncall")) {
+                // کل فایل روزِ جاری: برای وقتی که می‌خواهید همه‌چیز را
+                // یک‌جا به app.py بدهید
+                if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
+                  String newest = pickDayFile(false);
+                  int sent = 0;
+                  if (newest.length()) {
+                    File f = SD.open(newest, FILE_READ);
+                    if (f) {
+                      WifiData d;
+                      while (f.read((uint8_t *)&d, REC_SIZE) == (int)REC_SIZE) {
+                        sendRecord(remote, d);
+                        sent++;
+                        if ((sent % 20) == 0) vTaskDelay(pdMS_TO_TICKS(10));
+                      }
+                      f.close();
+                    }
+                  }
+                  if (sent == 0) remote.println("NO_DATA");
+                  remote.println("END");
+                  xSemaphoreGive(xSDMutex);
+                }
+              } else if (cmd.equalsIgnoreCase("info")) {
+                rtc.read();
+                remote.printf("DEVICE=RF_TESTER,FW=2.2,TIME=%s,HEAP=%u\n",
+                              rtc.isoString().c_str(), (unsigned)ESP.getFreeHeap());
+                remote.println("END");
               } else if (cmd.length()) {
                 remote.println("ERR:CMD");
               }
@@ -1314,5 +1382,71 @@ void TaskInternalWiFiConnection(void *pv) {
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+
+// =====================================================================
+//   ناظر سلامت — ران‌تایم دائمی
+//
+//   هر ۳۰ ثانیه:
+//     • حافظه‌ی آزاد و کمترین حافظه‌ی تجربه‌شده را لاگ می‌کند
+//     • ته‌مانده‌ی استک هر تسک را چاپ می‌کند (هشدار قبل از سرریز)
+//     • ضربان تسک‌ها را می‌سنجد؛ اگر تسک شبکه یا رله برای مدت طولانی
+//       هیچ پیشرفتی نداشته باشد، برد را کنترل‌شده ری‌استارت می‌کند تا
+//       دستگاه در حالت نیمه‌مرده باقی نماند.
+//
+//   عمداً از esp_task_wdt استفاده نشده چون امضای آن بین نسخه‌های
+//   core 2.x و 3.x فرق دارد و کد را غیرقابل‌کامپایل می‌کند.
+// =====================================================================
+void TaskHealthMonitor(void *pv) {
+  const TickType_t period = pdMS_TO_TICKS(30000);
+  const uint32_t STALL_LIMIT = 10;  // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
+
+  uint32_t lastRelay = 0, lastNet = 0;
+  uint32_t relayStall = 0, netStall = 0;
+  TickType_t lastWake = xTaskGetTickCount();
+
+  for (;;) {
+    vTaskDelayUntil(&lastWake, period);
+
+    size_t freeHeap = ESP.getFreeHeap();
+    size_t minHeap = ESP.getMinFreeHeap();
+
+    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | up=%lus\n",
+                 (unsigned)freeHeap, (unsigned)minHeap,
+                 (unsigned)hbRelay, (unsigned)hbDigital,
+                 (unsigned)hbSht, (unsigned)hbNet,
+                 (unsigned long)(millis() / 1000));
+
+    if (freeHeap < 20000) {
+      DEBUG_PRINTLN("[HEALTH] WARNING: low heap!");
+    }
+
+    // تسک شبکه باید در هر دور چند بار بچرخد
+    if (hbNet == lastNet) {
+      if (++netStall >= STALL_LIMIT) {
+        Serial.println("[HEALTH] Network task stalled -> restarting device");
+        delay(200);
+        ESP.restart();
+      }
+    } else {
+      netStall = 0;
+      lastNet = hbNet;
+    }
+
+    // تسک رله در حالت نمایش دیتا حذف شده است؛ فقط در حالت عادی چک می‌شود
+    if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
+      if (hbRelay == lastRelay) {
+        // هر سیکل ۲ دقیقه است؛ ۵ دقیقه بی‌حرکتی یعنی گیر کرده
+        if (++relayStall >= STALL_LIMIT) {
+          Serial.println("[HEALTH] Relay task stalled -> restarting device");
+          delay(200);
+          ESP.restart();
+        }
+      } else {
+        relayStall = 0;
+        lastRelay = hbRelay;
+      }
+    }
   }
 }

@@ -19,7 +19,7 @@ class EspClient(
     private val port: Int,
     private val connectTimeoutMs: Int = 4000,
     private val readTimeoutMs: Int = 1500,
-    private val overallTimeoutMs: Long = 8000
+    private val overallTimeoutMs: Long = 20000
 ) {
 
     /** دستور را می‌فرستد و پاسخ خام را برمی‌گرداند. */
@@ -50,10 +50,10 @@ class EspClient(
 
                 sb.append(line).append('\n')
 
-                if (EspProtocol.isNoData(line)) break
-                // پایان آرایه‌ی sync10
+                // فرمت واحد جدید: پاسخ با خط END تمام می‌شود
+                if (line.trim() == EspProtocol.END_MARK) break
+                // --- سازگاری با فریمور قدیمی (JSON) ---
                 if (line.trim() == "]") break
-                // پاسخ تک‌رکوردی sync
                 if (command == EspProtocol.CMD_SYNC_LAST && line.contains('}')) break
             }
             return sb.toString().trim()

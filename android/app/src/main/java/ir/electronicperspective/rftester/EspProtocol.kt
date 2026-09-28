@@ -18,7 +18,22 @@ object EspProtocol {
 
     const val CMD_SYNC_LAST = "sync"
     const val CMD_SYNC_10 = "sync10"
+    const val CMD_SYNC_ALL = "syncall"
+    const val CMD_INFO = "info"
     const val NO_DATA = "NO_DATA"
+    const val END_MARK = "END"
+
+    /** فرمت واحد پروژه — عیناً همان چیزی که app.py هم پارس می‌کند */
+    private val LINE_RE = Regex(
+        "NUM=(-?\\d+)," +
+            "NBCM1=([A-Za-z0-9]+),NBCM2=([A-Za-z0-9]+)," +
+            "NBCM3=([A-Za-z0-9]+),NBCM4=([A-Za-z0-9]+)," +
+            "Temp=(-?\\d+(?:\\.\\d+)?),Humidity=(-?\\d+(?:\\.\\d+)?)," +
+            "Date=(\\d{4})-(\\d{1,2})-(\\d{1,2})," +
+            "Time=(\\d{1,2}):(\\d{1,2}):(\\d{1,2})"
+    )
+
+    private fun truthy(v: String) = v.uppercase() in setOf("OK", "1", "TRUE", "YES")
 
     data class Reading(
         val id: Int,
@@ -26,7 +41,11 @@ object EspProtocol {
         val humidity: Double,
         val nbcm1: Boolean,
         val nbcm2: Boolean,
-        val timestamp: String
+        val timestamp: String,
+        val nbcm3: Boolean = false,
+        val nbcm4: Boolean = false,
+        /** خط خام NUM=... که بدون تغییر به app.py فرستاده می‌شود */
+        val rawLine: String = ""
     ) {
         fun pretty(): String = buildString {
             append("#").append(id).append("  ").append(timestamp).append('\n')
@@ -47,8 +66,36 @@ object EspProtocol {
      * برسد؛ بنابراین به‌جای پارس کل رشته، هر آبجکت {...} جدا پارس می‌شود.
      */
     fun parseRecords(raw: String): List<Reading> {
-        val objects = Regex("\\{[^{}]*}").findAll(raw).map { it.value }
         val result = ArrayList<Reading>()
+
+        // 1) فرمت واحد NUM=...  (اولویت)
+        for (line in raw.lineSequence()) {
+            val t = line.trim()
+            if (t.isEmpty() || t == END_MARK || t == NO_DATA) continue
+            val m = LINE_RE.find(t) ?: continue
+            val g = m.groupValues
+            result.add(
+                Reading(
+                    id = g[1].toIntOrNull() ?: continue,
+                    nbcm1 = truthy(g[2]),
+                    nbcm2 = truthy(g[3]),
+                    nbcm3 = truthy(g[4]),
+                    nbcm4 = truthy(g[5]),
+                    temp = g[6].toDoubleOrNull() ?: Double.NaN,
+                    humidity = g[7].toDoubleOrNull() ?: Double.NaN,
+                    timestamp = String.format(
+                        "%04d-%02d-%02d %02d:%02d:%02d",
+                        g[8].toInt(), g[9].toInt(), g[10].toInt(),
+                        g[11].toInt(), g[12].toInt(), g[13].toInt()
+                    ),
+                    rawLine = m.value
+                )
+            )
+        }
+        if (result.isNotEmpty()) return result
+
+        // 2) سازگاری عقب‌رو با فریمور قدیمی (JSON)
+        val objects = Regex("\\{[^{}]*}").findAll(raw).map { it.value }
         for (chunk in objects) {
             val reading = parseSingle(chunk) ?: continue
             result.add(reading)
@@ -56,10 +103,18 @@ object EspProtocol {
         return result
     }
 
-    // عمداً از org.json استفاده نمی‌کنیم: در unit test های JVM موجود نیست
-    // و پیام «not mocked» می‌دهد. فرمت هم ثابت و ساده است.
-    private fun field(chunk: String, key: String): String? =
-        Regex("\"$key\"\\s*:\\s*\"?([^,\"}]*)\"?").find(chunk)?.groupValues?.get(1)?.trim()
+    /** خط‌های آماده برای POST به /api/ingest سرور Flask */
+    fun toServerLines(records: List<Reading>): List<String> = records.map { r ->
+        if (r.rawLine.isNotEmpty()) r.rawLine else String.format(
+            "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s",
+            r.id,
+            if (r.nbcm1) "OK" else "NOK", if (r.nbcm2) "OK" else "NOK",
+            if (r.nbcm3) "OK" else "NOK", if (r.nbcm4) "OK" else "NOK",
+            r.temp, r.humidity,
+            r.timestamp.substringBefore(" ").ifEmpty { "1970-01-01" },
+            r.timestamp.substringAfter(" ", "00:00:00")
+        )
+    }
 
     private fun parseSingle(chunk: String): Reading? {
         val id = field(chunk, "ID")?.toIntOrNull() ?: return null

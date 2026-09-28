@@ -21,14 +21,17 @@ _NEXT_ID = [101]
 
 
 def _make_record(rid: int) -> str:
+    """خط دقیقاً با همان فرمت واحد فریمور (formatRecordLine)"""
     now = datetime.datetime.now() - datetime.timedelta(minutes=2 * (200 - rid))
     temp = 22.0 + random.uniform(-1.5, 3.5)
     hum = 45.0 + random.uniform(-5, 12)
-    n1 = 1 if random.random() > 0.15 else 0
-    n2 = 1 if random.random() > 0.2 else 0
+    n1 = "OK" if random.random() > 0.15 else "NOK"
+    n2 = "OK" if random.random() > 0.2 else "NOK"
     return (
-        '{"ID":%d,"T":%.2f,"H":%.2f,"N1":%d,"N2":%d,"Time":"%s"}'
-        % (rid, temp, hum, n1, n2, now.strftime("%Y-%m-%d %H:%M:%S"))
+        "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=NOK,NBCM4=NOK,"
+        "Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s"
+        % (rid, n1, n2, temp, hum,
+           now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"))
     )
 
 
@@ -46,19 +49,21 @@ class _Handler(socketserver.StreamRequestHandler):
                     rid = _NEXT_ID[0]
                     _NEXT_ID[0] += 1
                 self.wfile.write((_make_record(rid) + "\r\n").encode())
-            elif cmd == "sync10":
+                self.wfile.write(b"END\r\n")
+            elif cmd in ("sync10", "syncall"):
+                count = 10 if cmd == "sync10" else 25
                 with _LOCK:
                     start = _NEXT_ID[0]
-                    _NEXT_ID[0] += 10
-                self.wfile.write(b"[\r\n")
-                for i in range(10):
-                    sep = b",\r\n" if i < 9 else b"\r\n"
-                    self.wfile.write(_make_record(start + i).encode() + sep)
-                self.wfile.write(b"]\r\n")
+                    _NEXT_ID[0] += count
+                for i in range(count):
+                    self.wfile.write((_make_record(start + i) + "\r\n").encode())
+                self.wfile.write(b"END\r\n")
+            elif cmd == "info":
+                self.wfile.write(b"DEVICE=RF_TESTER,FW=SIM,HEAP=999999\r\nEND\r\n")
             elif cmd in ("empty", "nodata"):
-                self.wfile.write(b"NO_DATA\r\n")
+                self.wfile.write(b"NO_DATA\r\nEND\r\n")
             else:
-                self.wfile.write(b"ERR:CMD\r\n")
+                self.wfile.write(b"ERR:CMD\r\nEND\r\n")
             self.wfile.flush()
 
 

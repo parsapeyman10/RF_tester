@@ -690,6 +690,59 @@ def get_master_data():
 
     return jsonify(output)
 
+# =====================================================================
+#  ورودی واحد دیتا — «هر وسیله‌ای وصل شد، دیتا برود توی app.py»
+#
+#  گوشی، لپ‌تاپ، اسکریپت پایتون یا هر کلاینت دیگری که به ESP32 وصل
+#  می‌شود، همان خط‌های استاندارد NUM=... را می‌گیرد و عیناً به اینجا
+#  POST می‌کند. یعنی مسیر داده در گوشی و سیستم دقیقاً یکی است:
+#
+#      ESP32 --(NUM=... خط)--> کلاینت --POST /api/ingest--> دیتابیس
+#      ESP32 --(NUM=... خط)--> ESP8266 --Serial--------------> دیتابیس
+#
+#  بدنه‌ی درخواست می‌تواند متن خام (چند خط) یا JSON باشد:
+#      {"lines": ["NUM=...", "NUM=..."]}
+#  پاسخ: تعداد ذخیره‌شده / تکراری / نامعتبر
+# =====================================================================
+@app.route('/api/ingest', methods=['POST'])
+def api_ingest():
+    raw_lines = []
+    payload_json = request.get_json(silent=True)
+
+    if isinstance(payload_json, dict) and 'lines' in payload_json:
+        raw_lines = payload_json.get('lines') or []
+    elif isinstance(payload_json, list):
+        raw_lines = payload_json
+    else:
+        body = request.get_data(as_text=True) or ''
+        raw_lines = body.splitlines()
+
+    saved = 0
+    duplicates = 0
+    invalid = 0
+    device = request.headers.get('X-Device', request.remote_addr or 'unknown')
+
+    for line in raw_lines:
+        line = (line or '').strip()
+        if not line or line in ('END', 'NO_DATA'):
+            continue
+        parsed = parse_industrial_line(line)
+        if not parsed:
+            invalid += 1
+            continue
+        if master_exists(safe_int(parsed['num_value']), parsed['date'], parsed['time']):
+            duplicates += 1
+            continue
+        if save_sensor_data(parsed):
+            saved += 1
+        else:
+            invalid += 1
+
+    print(f"[INGEST] from {device}: saved={saved} dup={duplicates} bad={invalid}")
+    return jsonify({'status': 'success', 'saved': saved,
+                    'duplicates': duplicates, 'invalid': invalid})
+
+
 @app.route('/api/serial_ports')
 def list_serial_ports():
     ports = [port.device for port in serial.tools.list_ports.comports()]

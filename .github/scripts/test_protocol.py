@@ -94,7 +94,40 @@ if m:
           f"EXPECTED_SIZE={m.group(1)} با struct پک‌شده‌ی ESP32 ({expected_size}) نمی‌خواند")
 check("#pragma pack(1)" in esp32, "[ESP32] struct باید با pragma pack(1) پک شده باشد")
 
-# --------------------------------- 5) هشدارهای آماده‌سازی برای Production
+# ------------------------- 5) ساختار فریمور: ترتیب رله و مانیتورینگ
+# ترتیب درخواستی: رله فعال -> مانیتورینگ فعال -> زمان مجاز -> مانیتورینگ
+# غیرفعال -> رله غیرفعال
+tc_start = esp32.find("static bool testChannel(int ch)")
+tc_end = esp32.find("void TaskRelayControl(void *pv) {")
+block = esp32[tc_start:tc_end] if tc_start != -1 else ""
+check(bool(block), "تابع testChannel پیدا شد")
+if block:
+    i_on = block.find("digitalWrite(cfg.relayPin, HIGH)")
+    i_begin = block.find("beginFeedbackWindow()")
+    i_end = block.find("endFeedbackWindow()")
+    i_off = block.find("digitalWrite(cfg.relayPin, LOW)")
+    check(-1 < i_on < i_begin < i_end < i_off,
+          f"ترتیب رله/مانیتورینگ درست است (on={i_on} mon+={i_begin} mon-={i_end} off={i_off})")
+
+# ------------------------- 6) فرمت واحد دیتا برای همه‌ی مقصدها
+check("void formatRecordLine(" in esp32, "[ESP32] تابع واحد formatRecordLine تعریف شده")
+check(esp32.count("formatRecordLine(") >= 3,
+      "[ESP32] هم مسیر آپلود و هم حالت دیتا از همان فرمت‌کننده استفاده می‌کنند")
+check(esp32.count('snprintf(buf, sizeof(buf),\n                           "NUM=') == 0,
+      "[ESP32] نسخه‌ی تکراری فرمت NUM= باقی نمانده")
+for cmd in ('"sync"', '"sync10"', '"syncall"', '"info"'):
+    check(cmd in esp32, f"[ESP32] دستور {cmd} در حالت دیتا پشتیبانی می‌شود")
+check('remote.println("END")' in esp32, "[ESP32] پاسخ با خط END بسته می‌شود")
+
+# ------------------------- 7) تنظیم هسته‌ها و ناظر پایداری
+check('xTaskCreatePinnedToCore(TaskInternalWiFiConnection, "WiFiConn", 10240, NULL, 2, NULL, 0)' in esp32,
+      "[ESP32] تسک شبکه روی هسته‌ی ۰ پین شده")
+check('xTaskCreatePinnedToCore(TaskDigitalRead, "DigiRead", 4096, NULL, 6, NULL, 1)' in esp32,
+      "[ESP32] تسک خواندن فیدبک روی هسته‌ی ۱ با بالاترین اولویت")
+check("void TaskHealthMonitor(" in esp32, "[ESP32] ناظر سلامت (ران‌تایم دائمی) اضافه شده")
+check("ESP.getFreeHeap()" in esp32, "[ESP32] پایش حافظه فعال است")
+
+# --------------------------------- 8) هشدارهای آماده‌سازی برای Production
 warn("#define DEBUG_ENABLE false" in esp8266,
      "[ESP8266] DEBUG_ENABLE روی true است: اکوی خام سریال باعث ثبت چندباره‌ی "
      "هر رکورد در دیتابیس Flask می‌شود. قبل از فلش نهایی false شود.")

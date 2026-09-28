@@ -38,6 +38,16 @@
             android:text="80" />
     </LinearLayout>
 
+    <EditText
+        android:id="@+id/serverInput"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:hint="@string/server_hint"
+        android:importantForAutofill="no"
+        android:inputType="textUri"
+        android:text="http://192.168.1.100:5000" />
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -57,7 +67,21 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/btn_sync10" />
+
+        <Button
+            android:id="@+id/syncAllButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/btn_syncall" />
     </LinearLayout>
+
+    <Button
+        android:id="@+id/pushButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/btn_push" />
 
     <TextView
         android:id="@+id/statusText"

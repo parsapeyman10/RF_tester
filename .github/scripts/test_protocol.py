@@ -72,7 +72,10 @@ payload = flask_app.parse_industrial_line(sample)
 check(payload is not None, "parse_industrial_line خط استاندارد را پارس نکرد")
 if payload:
     check(payload["num_value"] == "42", f"NUM اشتباه پارس شد: {payload['num_value']}")
-    check(payload["nbcm"] == ["NBCM1", "NBCM3"], f"NBCM اشتباه: {payload['nbcm']}")
+    # سیستم دو کاناله است: NBCM3/NBCM4 در پروتکل هستند ولی ثبت نمی‌شوند
+    check(payload["nbcm"] == ["NBCM1"], f"NBCM اشتباه: {payload['nbcm']}")
+    check(flask_app.NBCM_CHANNELS == ("NBCM1", "NBCM2"),
+          "تعریف واحد کانال‌ها در app.py دو تایی است")
     check(payload["temp"] == "23.45", f"Temp اشتباه: {payload['temp']}")
     check(payload["humidity"] == "51.20", f"Humidity اشتباه: {payload['humidity']}")
     check(payload["date"] == "2026-01-05", f"Date اشتباه: {payload['date']}")

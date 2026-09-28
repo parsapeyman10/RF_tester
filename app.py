@@ -41,6 +41,14 @@ def _resolve_templates():
     return os.path.join(BASE_DIR, 'templates')
 
 
+# =====================================================================
+#  تعداد کانال‌های BCM — تنها جای تعریف
+#  سخت‌افزار دو دستگاه دارد (BCM1 و BCM2). فریمور به‌دلیل سازگاری با
+#  پروتکل ۱۳ فیلدی همچنان NBCM3/NBCM4 را با مقدار NOK می‌فرستد، ولی
+#  هیچ‌وقت وارد دیتابیس یا رابط کاربری نمی‌شوند.
+# =====================================================================
+NBCM_CHANNELS = ("NBCM1", "NBCM2")
+
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
@@ -275,6 +283,8 @@ def save_sensor_data(data_source):
             real_timestamp = now_tehran
         # -------------------------------------------------------
 
+        # هرچه غیر از کانال‌های تعریف‌شده باشد کنار گذاشته می‌شود
+        nbcm_checked_list = [n for n in nbcm_checked_list if n in NBCM_CHANNELS]
         nbcm_str = ",".join(nbcm_checked_list)
         log_str = f"NUM:{num_int}, H:{h_val}, T:{t_val}"
 
@@ -339,7 +349,8 @@ def parse_industrial_line(line):
         return None
     g = m.groupdict()
     try:
-        nbcm = [f"NBCM{i}" for i in range(1, 5)
+        # فقط دو کانال واقعی ثبت می‌شوند؛ n3/n4 در پروتکل هستند ولی رزروند
+        nbcm = [f"NBCM{i}" for i in (1, 2)
                 if g[f"n{i}"].strip().upper() in TRUE_TOKENS]
         date_str = "%04d-%02d-%02d" % (int(g["y"]), int(g["mo"]), int(g["d"]))
         time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
@@ -467,11 +478,11 @@ def upload_dat_page():
                             hum_str = str(hum_val_float) # <--- فیکس اصلی اینجاست
                         
                         # لاژیک NBCM
+                        # data[5] و data[6] در ساختار باینری رزروند و
+                        # عمداً خوانده نمی‌شوند (سیستم دو کاناله است)
                         nbcm_list = []
                         if data[3]: nbcm_list.append('NBCM1')
                         if data[4]: nbcm_list.append('NBCM2')
-                        if data[5]: nbcm_list.append('NBCM3')
-                        if data[6]: nbcm_list.append('NBCM4')
                         nbcm_str = ",".join(nbcm_list)
 
                         # زمان سنسور
@@ -496,7 +507,10 @@ def upload_dat_page():
                             temp=temp_str,    # اینجا قبلا Float بود که باعث خطا می‌شد
                             time=device_time_str,   
                             date=device_date_str,   
-                            timestamp=upload_time_server,
+                            # ناهم‌خوانی: قبلاً Master زمان آپلود سرور را ثبت
+                            # می‌کرد ولی دیتابیس روزانه زمان RTC دستگاه را.
+                            # مرجع زمان در کل سیستم، RTC دستگاه است.
+                            timestamp=sensor_dt,
                             formatted_log=formatted_log
                         )
                         # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
@@ -624,8 +638,8 @@ def get_sensor_data():
         for r in readings:
             # پارس کردن وضعیت‌های NBCM برای روشن/خاموش کردن چراغ‌ها
             nbcm_map = {
-                f"NBCM{i}": ("active" if r.nbcm_selected and f"NBCM{i}" in r.nbcm_selected else "notactive") 
-                for i in range(1, 5)
+                key: ("active" if r.nbcm_selected and key in r.nbcm_selected else "notactive")
+                for key in NBCM_CHANNELS
             }
             
             output.append({
@@ -671,9 +685,7 @@ def get_master_data():
     for r in readings:
         # پارس کردن وضعیت‌های NBCM
         nbcm_map = {}
-        for i in range(1, 5):
-            key = f"NBCM{i}"
-            # بررسی اینکه آیا در رشته ذخیره شده وجود دارد یا خیر
+        for key in NBCM_CHANNELS:
             nbcm_map[key] = "active" if r.nbcm_selected and key in r.nbcm_selected else "inactive"
 
         # *** بخش حیاتی: ساخت فرمت استاندارد ISO با حرف T ***
@@ -874,7 +886,7 @@ def get_sensor_data_api():
 
 # تابع کمکی برای پارس کردن NBCM ها (اگر ندارید اضافه کنید)
 def parse_nbcm(nbcm_str):
-    status = {'NBCM1': 'inactive', 'NBCM2': 'inactive', 'NBCM3': 'inactive', 'NBCM4': 'inactive'}
+    status = {key: 'inactive' for key in NBCM_CHANNELS}
     if nbcm_str:
         selected = nbcm_str.split(',')
         for item in selected:

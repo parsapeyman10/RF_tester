@@ -80,7 +80,8 @@ LINE2 = ("NUM=43,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,"
 print("\n[1] پارس و ذخیره‌ی یک خط استاندارد")
 payload = flask_app.parse_industrial_line(LINE)
 check(payload is not None, "خط استاندارد پارس شد")
-check(payload and payload["nbcm"] == ["NBCM1", "NBCM3"], "NBCM ها درست تفکیک شدند")
+check(payload and payload["nbcm"] == ["NBCM1"],
+      f"فقط کانال‌های واقعی ثبت می‌شوند، NBCM3/4 نادیده گرفته شد ({payload['nbcm'] if payload else None})")
 with flask_app.app.app_context():
     flask_app.save_sensor_data(payload)
 check(master_count() == 1, "یک رکورد در master ثبت شد")
@@ -134,6 +135,35 @@ conn = sqlite3.connect(os.path.join(WORKDIR, "2026-01-05.db"))
 idx = [r[1] for r in conn.execute("PRAGMA index_list(daily_records)").fetchall()]
 conn.close()
 check("uq_daily_record" in idx, f"ایندکس یکتا ساخته شد (ایندکس‌ها: {idx})")
+
+print("\n[7b] سیستم دو کاناله: NBCM3 و NBCM4 هیچ‌جا ذخیره نمی‌شوند")
+with flask_app.app.app_context():
+    rows = flask_app.db.session.query(flask_app.MasterReading.nbcm_selected).all()
+joined = " ".join(r[0] or "" for r in rows)
+check("NBCM3" not in joined and "NBCM4" not in joined,
+      f"ستون nbcm_selected فقط کانال‌های واقعی دارد ({joined!r})")
+check(tuple(flask_app.NBCM_CHANNELS) == ("NBCM1", "NBCM2"),
+      "تعریف واحد کانال‌ها دو تایی است")
+check(set(flask_app.parse_nbcm("NBCM1,NBCM2").keys()) == {"NBCM1", "NBCM2"},
+      "parse_nbcm فقط دو کلید برمی‌گرداند")
+
+print("\n[7c] مرجع زمان، RTC دستگاه است (نه ساعت سرور)")
+_blob = struct.pack("<iff????iBBBBB", 777, 22.00, 43.00,
+                    True, False, False, False, 2026, 3, 9, 7, 45, 12)
+import io as _io
+_resp = _c_dat = flask_app.app.test_client().post(
+    "/upload_dat",
+    data={"folder_upload": (_io.BytesIO(_blob), "20260309.dat")},
+    content_type="multipart/form-data")
+check(_resp.status_code == 200, f"/upload_dat -> {_resp.status_code}")
+with flask_app.app.app_context():
+    rec = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=777).first()
+check(rec is not None, "رکورد آپلودشده ثبت شد")
+if rec:
+    check(rec.date == "2026-03-09" and rec.time == "07:45:12",
+          f"تاریخ و ساعت از RTC خوانده شد ({rec.date} {rec.time})")
+    check(rec.timestamp.strftime("%Y-%m-%d %H:%M:%S") == "2026-03-09 07:45:12",
+          f"timestamp هم زمان RTC است نه زمان آپلود سرور ({rec.timestamp})")
 
 print("\n[8] مسیر واحد دیتا: /api/ingest (همان چیزی که گوشی و دسکتاپ می‌فرستند)")
 flask_app.app.config["TESTING"] = True

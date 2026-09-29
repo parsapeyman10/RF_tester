@@ -297,6 +297,7 @@ volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
 
 // آمار پایداری شبکه
 volatile uint32_t wifiDropCount = 0;   // چند بار لینک قطع شده
+const char *relayPhaseText = "بوت";    // الان در چه مرحله‌ای هستیم
 uint32_t lastTxMillis = 0;             // آخرین باری که چیزی روی سوکت فرستادیم
 
 // Prototypes
@@ -377,12 +378,13 @@ void setup() {
 
   // ---------------- گرفتن خودکار تاریخ و ساعت ----------------
   // مرحله ۱: NTP از طریق مودم یا هات‌اسپات گوشی
+  DEBUG_PRINTLN("[BOOT] مرحله ۱/۳ : گرفتن ساعت از NTP (حداکثر چند ثانیه)");
   bool timeOk = syncTimeFromNtp();
 
   // مرحله ۲/۳: پورتال محلی — صفحه‌ی وب ساعتِ گوشی را خودکار می‌فرستد،
   // و اگر کسی وصل نشد، با ساعت فعلی RTC ادامه می‌دهیم.
   if (!timeOk) {
-    DEBUG_PRINTLN("[TIME] NTP failed -> opening SetClock portal");
+    DEBUG_PRINTLN("[BOOT] مرحله ۲/۳ : پورتال تنظیم ساعت");
     runSetupPortal(rtcTimeLooksValid());
     timeOk = rtcTimeLooksValid();
   } else {
@@ -397,6 +399,7 @@ void setup() {
 
   // ---------------- اتصال به گیرنده‌ی دیتا ----------------
   if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
+    DEBUG_PRINTLN("[BOOT] مرحله ۳/۳ : اتصال به گیرنده (حداکثر ۲۰ ثانیه)");
     waitForDataLink(20000);
   }
 
@@ -434,7 +437,7 @@ void setup() {
   xTaskCreatePinnedToCore(TaskInternalWiFiConnection, "WiFiConn", 10240, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(TaskHealthMonitor, "Health", 3072, NULL, 1, NULL, 0);
 
-  DEBUG_PRINTLN("[BOOT] Tasks started.");
+  DEBUG_PRINTLN("[BOOT] همه‌ی تسک‌ها شروع شدند؛ سیکل اول تا چند ثانیه‌ی دیگر.");
 }
 
 void loop() {
@@ -743,8 +746,18 @@ void runSetupPortal(bool timeAlreadyValid) {
   DEBUG_PRINTF("[PORTAL] waiting up to %u s\n", (unsigned)(portalLimit / 1000));
 
   uint32_t start = millis();
+  uint32_t lastTick = 0;
   while (millis() - start < portalLimit) {
     setupServer.handleClient();
+
+    // هر ۵ ثانیه یک خط چاپ می‌شود تا این انتظار «گیر کردن» به نظر نرسد
+    uint32_t elapsed = millis() - start;
+    if (elapsed / 5000 != lastTick) {
+      lastTick = elapsed / 5000;
+      DEBUG_PRINTF("[PORTAL] منتظر گوشی... %u ثانیه دیگر خودکار ادامه می‌دهیم "
+                   "(SSID: %s)\n",
+                   (unsigned)((portalLimit - elapsed) / 1000), SETUP_AP_SSID);
+    }
     // وقتی هم ساعت آمد و هم مود انتخاب شد، دیگر منتظر نمی‌مانیم
     if (portalTimeSet && portalModeChosen) {
       delay(400);  // فرصت ارسال پاسخ آخر به مرورگر
@@ -990,7 +1003,10 @@ static void beginFeedbackWindow() {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) fbSeen[p][d] = false;
 
-  xEventGroupClearBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE);
+  // باگ: اگر بیت STOP از پنجره‌ی قبلی باقی مانده باشد، تسک خواندن به‌محض
+  // شروع، پنجره را می‌بندد و هیچ پالسی دیده نمی‌شود (همه‌چیز NOK می‌شود).
+  xEventGroupClearBits(xSystemEvents,
+                       BIT_STOP_DIGITAL_MONITORING | BIT_DIGITAL_READ_COMPLETE);
   xEventGroupSetBits(xSystemEvents, BIT_START_DIGITAL_MONITORING);
 }
 
@@ -1057,6 +1073,7 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
     for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
 
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
+    relayPhaseText = "سیکل تست";
     DEBUG_PRINTF("\n[TEST] ===== سیکل %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
 
     // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
@@ -1105,6 +1122,7 @@ void TaskRelayControl(void *pv) {
 
   for (;;) {
     hbRelay++;
+    relayPhaseText = "شروع سیکل";
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
@@ -1151,6 +1169,7 @@ void TaskRelayControl(void *pv) {
     }
 
     xEventGroupSetBits(xSystemEvents, BIT_WIFI_PERMIT);
+    relayPhaseText = "انتظار تا سیکل بعد";
     vTaskDelayUntil(&lastWake, period);
   }
 }
@@ -1701,8 +1720,8 @@ void TaskInternalWiFiConnection(void *pv) {
 //   core 2.x و 3.x فرق دارد و کد را غیرقابل‌کامپایل می‌کند.
 // =====================================================================
 void TaskHealthMonitor(void *pv) {
-  const TickType_t period = pdMS_TO_TICKS(30000);
-  const uint32_t STALL_LIMIT = 10;  // ۱۰ دور ۳۰ ثانیه‌ای = ۵ دقیقه
+  const TickType_t period = pdMS_TO_TICKS(15000);
+  const uint32_t STALL_LIMIT = 20;  // ۲۰ دور ۱۵ ثانیه‌ای = ۵ دقیقه
 
   uint32_t lastRelay = 0, lastNet = 0;
   uint32_t relayStall = 0, netStall = 0;
@@ -1722,6 +1741,8 @@ void TaskHealthMonitor(void *pv) {
                  WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                  (unsigned)wifiDropCount,
                  (unsigned long)(millis() / 1000));
+    DEBUG_PRINTF("[STATE] مرحله: %s | سیکل بعدی هر %lu ثانیه\n",
+                 relayPhaseText, (unsigned long)(CYCLE_PERIOD_MS / 1000));
     DEBUG_PRINTF("[LINK] connects=%u failures=%u linkUp=%lus\n",
                  (unsigned)wifiLink.connects, (unsigned)wifiLink.failures,
                  (unsigned long)(wifiLink.upSinceMs ? (millis() - wifiLink.upSinceMs) / 1000 : 0));
@@ -1745,10 +1766,19 @@ void TaskHealthMonitor(void *pv) {
     // اگر وای‌فای خیلی طولانی قطع بماند، یک ریست کنترل‌شده معمولاً
     // درایور را از حالت گیرکرده بیرون می‌آورد (دیتا روی SD امن است)
     if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-      if (wifiLink.downSinceMs != 0 && millis() - wifiLink.downSinceMs > LINK_DOWN_RESET_MS) {
-        Serial.println("[HEALTH] لینک بیش از حد مجاز قطع بوده -> ریست کنترل‌شده");
+      // فقط وقتی ریست می‌کنیم که قبلاً یک بار وصل شده باشیم؛ یعنی درایور
+      // وای‌فای گیر کرده. اگر برد گیرنده اصلاً روشن نباشد، ریست کردن هر پنج
+      // دقیقه فقط دستگاه را در حلقه‌ی بوت می‌انداخت و کار مفیدی نمی‌کرد
+      // (دیتا در همین حالت هم روی SD ذخیره می‌شود).
+      if (wifiLink.connects > 0 && wifiLink.downSinceMs != 0 &&
+          millis() - wifiLink.downSinceMs > LINK_DOWN_RESET_MS) {
+        Serial.println("[HEALTH] لینک بعد از اتصال موفق، طولانی قطع مانده -> ریست کنترل‌شده");
         delay(200);
         ESP.restart();
+      } else if (wifiLink.connects == 0 && wifiLink.failures > 0 &&
+                 (wifiLink.failures % 10) == 0) {
+        Serial.println("[HEALTH] هنوز هیچ‌وقت وصل نشده‌ایم؛ کار ادامه دارد و "
+                       "دیتا روی SD ذخیره می‌شود (گیرنده روشن است؟)");
       }
     }
 

@@ -151,6 +151,11 @@ check("channel, bssid, false)" in esp32,
 check("pmf_cfg.capable = false" in esp32,
       "[ESP32] PMF خاموش است (ریشه‌ی 4WAY_HANDSHAKE_TIMEOUT با AP های ESP8266)")
 check("esp_wifi_connect()" in esp32, "[ESP32] اتصال بعد از اعمال تنظیمات شروع می‌شود")
+check("bool pmfCapable = (failStreak == 4 || failStreak == 5)" in esp32,
+      "[ESP32] نردبان تلاش: اگر PMF خاموش جواب نداد، روشن هم امتحان می‌شود")
+check("rssi <= -75" in esp32, "[ESP32] کیفیت سیگنال بعد از اتصال گزارش می‌شود")
+check("راهنمای عیب‌یابی اتصال" in esp32,
+      "[ESP32] بعد از ۱۰ شکست راهنمای کامل چاپ می‌شود")
 check("STA_TX_POWER_NEAR" in esp32 and "STA_TX_POWER_FAR" in esp32,
       "[ESP32] توان فرستنده بر اساس فاصله تطبیقی است")
 check("WIFI_BACKOFF_MIN_MS" in esp32 and "WIFI_BACKOFF_MAX_MS" in esp32,

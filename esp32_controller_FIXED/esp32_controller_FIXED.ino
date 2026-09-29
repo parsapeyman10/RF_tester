@@ -1052,15 +1052,27 @@ static bool wifiConnectOnce() {
     }
   }
 
+  // نردبان تلاش: اگر ترکیب اول جواب نداد، خودکار سراغ بعدی می‌رود.
+  //   تلاش ۰ تا ۲ : PMF خاموش + کانال و BSSID مشخص   (حالت درست برای ESP8266)
+  //   تلاش ۳       : PMF خاموش، بدون قید کانال
+  //   تلاش ۴ و ۵   : PMF روشن (برای اکسس‌پوینت‌هایی که PMF می‌خواهند)
+  //   تلاش ۶       : راه‌اندازی مجدد کامل درایور و شروع دوباره‌ی نردبان
+  bool pmfCapable = (failStreak == 4 || failStreak == 5);
+
   wifi_config_t conf;
   if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
-    conf.sta.pmf_cfg.capable = false;   // ESP8266 اصلاً PMF ندارد
+    conf.sta.pmf_cfg.capable = pmfCapable;
     conf.sta.pmf_cfg.required = false;
     conf.sta.threshold.authmode =
         (cfgDataPass.length() == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
     conf.sta.scan_method = WIFI_FAST_SCAN;
     esp_wifi_set_config(WIFI_IF_STA, &conf);
   }
+
+  VERBOSE_PRINTF("[NET] تلاش %u | PMF=%s | BSSID=%s\n",
+                 (unsigned)failStreak, pmfCapable ? "on" : "off",
+                 haveBssid ? "yes" : "no");
+
   esp_wifi_connect();
 
   uint32_t t0 = millis();
@@ -1069,10 +1081,31 @@ static bool wifiConnectOnce() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    int rssi = WiFi.RSSI();
+    const char *quality = (rssi > -55) ? "عالی"
+                          : (rssi > -67) ? "خوب"
+                          : (rssi > -75) ? "قابل قبول" : "ضعیف";
+    DEBUG_PRINTF("[NET] اتصال برقرار شد (تلاش %u) | rssi=%d dBm (%s) | PMF=%s\n",
+                 (unsigned)failStreak, rssi, quality, pmfCapable ? "on" : "off");
+    if (rssi <= -75) {
+      DEBUG_PRINTLN("[NET] سیگنال ضعیف است: فاصله/مانع را کم کنید یا "
+                    "تغذیه‌ی گیرنده را بررسی کنید");
+    }
     failStreak = 0;
     return true;
   }
+
   failStreak++;
+
+  // بعد از ۱۰ شکست، یک بار راهنمای کامل چاپ می‌شود
+  if (failStreak == 10) {
+    Serial.println("[NET] ---- راهنمای عیب‌یابی اتصال ----");
+    Serial.println("  ۱) گیرنده روشن است و SSID در اسکن دیده می‌شود؟");
+    Serial.println("  ۲) رمز دو طرف یکی است؟ (DATA_AP_PASS و PASSWORD)");
+    Serial.println("  ۳) بردها حداقل نیم متر فاصله دارند؟");
+    Serial.println("  ۴) تغذیه‌ی ESP8266 پایدار است؟ (افت ولتاژ = هندشیک ناموفق)");
+    Serial.println("  ۵) برای تست قطعی: AP_OPEN_TEST=true و DATA_AP_PASS=\"\"");
+  }
   return false;
 }
 

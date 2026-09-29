@@ -20,6 +20,7 @@ import threading
 import time
 import serial.tools.list_ports 
 import os
+import sys
 import sqlite3
 import math
 import struct
@@ -1235,4 +1236,16 @@ if __name__ == '__main__':
     # با مقدار پیش‌فرض (127.0.0.1) فقط از خود همان کامپیوتر در دسترس بود.
     print('[INIT] سرور روی http://0.0.0.0:5000 بالا آمد '
           '(از گوشی: http://<IP کامپیوتر>:5000)')
-    app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)
+
+    # حالت Production: پایدارتر برای روشن ماندن طولانی‌مدت
+    #   python app.py --prod        یا       RF_PROD=1 python app.py
+    if '--prod' in sys.argv or os.environ.get('RF_PROD') == '1':
+        try:
+            from waitress import serve
+            print('[INIT] حالت Production (waitress) — بدون دیباگر، پایدار')
+            serve(app, host='0.0.0.0', port=5000, threads=8)
+        except ImportError:
+            print('[INIT] waitress نصب نیست؛ با سرور توسعه ادامه می‌دهیم')
+            app.run(host='0.0.0.0', debug=False, port=5000, use_reloader=False)
+    else:
+        app.run(host='0.0.0.0', debug=True, port=5000, use_reloader=False)

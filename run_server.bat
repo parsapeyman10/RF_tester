@@ -21,7 +21,7 @@ echo   روی همین کامپیوتر :  http://127.0.0.1:5000
 echo   از گوشی / شبکه    :  http://[IP این کامپیوتر]:5000
 echo   (برای دیدن IP دستور ipconfig را بزنید)
 echo.
-".venv\Scripts\python.exe" app.py
+".venv\Scripts\python.exe" app.py %*
 goto :eof
 
 :error

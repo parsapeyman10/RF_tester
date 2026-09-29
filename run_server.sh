@@ -15,4 +15,4 @@ echo "[2/3] نصب/بررسی پیش‌نیازها..."
 echo "[3/3] اجرای سرور..."
 echo "  محلی : http://127.0.0.1:5000"
 echo "  شبکه : http://$(hostname -I 2>/dev/null | awk '{print $1}'):5000"
-exec .venv/bin/python app.py
+exec .venv/bin/python app.py "$@"

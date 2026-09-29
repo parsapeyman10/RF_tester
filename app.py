@@ -34,11 +34,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _resolve_templates():
-    for cand in (os.path.join(BASE_DIR, 'templates'),
-                 os.path.join(BASE_DIR, 'test', 'lab_web_server', 'templates')):
-        if os.path.isfile(os.path.join(cand, 'index.html')):
-            return cand
-    return os.path.join(BASE_DIR, 'templates')
+    cand = os.path.join(BASE_DIR, 'templates')
+    if not os.path.isfile(os.path.join(cand, 'index.html')):
+        print(f"[INIT] هشدار: پوشه‌ی قالب‌ها پیدا نشد: {cand}")
+    return cand
 
 
 # =====================================================================

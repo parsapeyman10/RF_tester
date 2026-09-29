@@ -4,92 +4,63 @@
 
 ```
 ESP32 (تست رله‌ها، SD، RTC) ──WiFi──► ESP8266 (گیرنده) ──USB/Serial──► app.py ──► SQLite
-        │
-        └──WiFi (حالت دیتا)──► گوشی / کلاینت دسکتاپ ──HTTP──► app.py
 ```
 
----
-
-## کدام فایل‌ها را استفاده کنم؟
-
-### ۱) روی برد ESP32 فلش می‌شود
+## ساختار پروژه
 
 ```
-esp32_controller_FIXED/esp32_controller_FIXED.ino
+esp32_controller_FIXED/     ← فلش روی ESP32  (رله‌ها، SHT31، RTC، کارت SD)
+esp8266_receiver_FIXED/     ← فلش روی ESP8266 (اکسس‌پوینت گیرنده، به USB کامپیوتر)
+
+app.py                      ← سرور
+requirements.txt            ← پیش‌نیازهای پایتون
+run_server.bat              ← اجرای یک‌کلیکی روی ویندوز
+run_server.sh               ← اجرا روی لینوکس/مک
+templates/                  ← صفحات وب (index، history، plot_display، upload)
+
+docs/SERVER_SETUP.md        ← راه‌اندازی سرور
+docs/FIELD_TEST.md          ← چک‌لیست تست روی سخت‌افزار
+.github/scripts/            ← تست‌های خودکار (اختیاری، برای توسعه)
 ```
 
-بردی که رله‌ها، سنسور SHT31، RTC و کارت SD به آن وصل است.
-قبل از فلش، بلاک `USER CONFIG` بالای فایل را ببینید (پین‌ها، زمان‌بندی، شبکه).
-
-### ۲) روی برد ESP8266 فلش می‌شود
-
-```
-esp8266_receiver_FIXED/esp8266_receiver_FIXED.ino
-```
-
-بردی که با USB به کامپیوتر وصل است و نقش اکسس‌پوینت گیرنده را دارد.
-
-### ۳) روی کامپیوتر (سرور)
-
-| فایل | نقش |
-|---|---|
-| `app.py` | خود سرور |
-| `requirements.txt` | پیش‌نیازها |
-| `run_server.bat` | **ویندوز: همین را دوبار کلیک کنید** |
-| `run_server.sh` | لینوکس / مک |
-| `templates/` | ۴ فایل HTML — بدون این پوشه سرور بالا نمی‌آید |
-
-راهنما: [`docs/SERVER_SETUP.md`](docs/SERVER_SETUP.md)
-
-### ۴) کلاینت کامپیوتر (اختیاری — برای حالت دیتا)
-
-| فایل | نقش |
-|---|---|
-| `dist/RFTester.pyz` | بسته‌ی آماده، تک‌فایل: `python RFTester.pyz` |
-| `desktop/` | سورس همان برنامه |
-
-### ۵) اپ اندروید (اختیاری)
-
-```
-android/            ← پروژه‌ی Android Studio
-```
-
-برای ساخت APK بدون نصب Android Studio: ورک‌فلوی `ci/workflows/release.yml` را
-فعال کنید (یک دستور، در [`docs/CI_AND_APP.md`](docs/CI_AND_APP.md)).
-
----
-
-## چیزهایی که لازم ندارید
-
-| مسیر | توضیح |
-|---|---|
-| `test/` | نسخه‌های قدیمی و دیتابیس‌های نمونه |
-| `.github/scripts/` | تست‌های خودکار CI |
-| `ci/workflows/` | فقط اگر می‌خواهید CI/ساخت APK فعال شود |
-| `docs/` | مستندات |
-
----
+فایل‌هایی که خودکار ساخته می‌شوند: `instance/master_industrial.db`،
+`YYYY-MM-DD.db`، `.venv/`، و در صورت خطا `unsaved_records.log`.
 
 ## شروع سریع
 
-1. `esp8266_receiver_FIXED.ino` را روی ESP8266 فلش کنید و با USB به کامپیوتر بزنید.
+1. `esp8266_receiver_FIXED.ino` را روی ESP8266 فلش و با USB به کامپیوتر وصل کنید.
 2. `esp32_controller_FIXED.ino` را روی ESP32 فلش کنید.
-3. با گوشی به وای‌فای `SetClock` (رمز `12345678`) وصل شوید، `http://192.168.1.1`
-   را باز کنید؛ ساعت خودکار ست می‌شود. «شروع کار عادی» را بزنید.
-4. روی کامپیوتر `run_server.bat` را اجرا کنید و در داشبورد پورت COM را انتخاب کنید.
-5. تمام — رکوردها هر ۲ دقیقه می‌آیند.
+3. با گوشی به وای‌فای `SetClock` (رمز `12345678`) وصل شوید و `http://192.168.1.1`
+   را باز کنید؛ ساعت خودکار تنظیم می‌شود. «شروع کار عادی» را بزنید.
+4. روی کامپیوتر `run_server.bat` را اجرا و در داشبورد پورت COM را انتخاب کنید.
 
-چک‌لیست کامل تست واقعی: [`docs/FIELD_TEST.md`](docs/FIELD_TEST.md)
+## فرمت داده
 
----
+هر سیکل یک رکورد با چهار نتیجه‌ی تفکیکی تولید می‌کند:
 
-## مستندات
+```
+NUM=1178,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,
+Temp=24.50,Humidity=40.00,Date=2026-09-29,Time=11:00:00
+```
 
-| فایل | محتوا |
+همین یک فرمت، هم روی سریال به سرور می‌رسد و هم در حالت دیتا به هر کلاینتی
+داده می‌شود. مرجع زمان، RTC خودِ دستگاه است.
+
+## فرمان‌های سریال ESP32
+
+| فرمان | کار |
 |---|---|
-| [`docs/SERVER_SETUP.md`](docs/SERVER_SETUP.md) | راه‌اندازی سرور روی کامپیوتر |
-| [`docs/FIELD_TEST.md`](docs/FIELD_TEST.md) | چک‌لیست تست روی سخت‌افزار |
-| [`docs/DATA_MODE.md`](docs/DATA_MODE.md) | حالت دیتا، ترتیب رله‌ها، پایداری وای‌فای، هسته‌ها |
-| [`docs/DATABASE_METHOD.md`](docs/DATABASE_METHOD.md) | ذخیره‌سازی SD و متد دیتابیس |
-| [`docs/FIRMWARE_V2.md`](docs/FIRMWARE_V2.md) | تغییرات فریمور |
-| [`docs/CI_AND_APP.md`](docs/CI_AND_APP.md) | فعال‌سازی CI و ساخت APK |
+| `STATUS` | وضعیت لحظه‌ای (مرحله، وای‌فای، شماره‌ی رکورد بعدی، حافظه) |
+| `FORMAT SD` | پاک‌سازی کامل کارت حافظه |
+
+## تنظیمات مهم بالای اسکچ ESP32
+
+```cpp
+#define LOG_LEVEL 1                 // 0=کمینه ، 1=معمولی ، 2=عیب‌یابی کامل
+const uint8_t RELAY_PINS[2] = { 2, 4 };          // رله باز کردن / بستن
+const uint8_t FEEDBACK_PINS[2][2] = {
+  { 13, 16 },   // فیدبک «باز شد» : BCM1 , BCM2
+  { 15, 17 },   // فیدبک «بسته شد»: BCM1 , BCM2
+};
+const uint32_t CYCLE_PERIOD_MS = 120000;         // فاصله‌ی سیکل‌ها
+```

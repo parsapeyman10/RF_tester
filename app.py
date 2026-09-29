@@ -936,6 +936,89 @@ def save_data():
         return jsonify({'status': 'error', 'message': str(exc)}), 500
 
 
+@app.route('/import_csv', methods=['POST'])
+def import_csv():
+    """
+    ورود همان CSV‌ای که خودِ سیستم با «خروجی اکسل» می‌سازد.
+
+    ستون‌های مورد انتظار (ترتیب مهم نیست، ستون اضافه اشکالی ندارد):
+        NUM, BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE,
+        Temp, Humidity, Time, Date
+
+    مقدار هر سیگنال می‌تواند OK/NOK یا 1/0 یا true/false باشد.
+    ستون‌های ID و *_OK و Timestamp نادیده گرفته می‌شوند چون از روی
+    بقیه دوباره ساخته می‌شوند.
+    """
+    if 'csv_file' not in request.files:
+        return jsonify({'status': 'error', 'message': 'فایلی ارسال نشد'}), 400
+
+    saved = duplicates = invalid = 0
+    errors = []
+
+    for fh in request.files.getlist('csv_file'):
+        if not fh.filename:
+            continue
+        try:
+            text = fh.read().decode('utf-8-sig', errors='ignore')
+        except Exception as exc:
+            errors.append(f"{fh.filename}: {exc}")
+            continue
+
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            errors.append(f"{fh.filename}: سرستون پیدا نشد")
+            continue
+
+        # نگاشت نام ستون‌ها بدون حساسیت به بزرگی/کوچکی و فاصله
+        cols = {(c or '').strip().upper(): c for c in reader.fieldnames}
+
+        def pick(row, *names):
+            for n in names:
+                real = cols.get(n)
+                if real is not None and row.get(real) not in (None, ''):
+                    return str(row[real]).strip()
+            return ''
+
+        for row in reader:
+            num = pick(row, 'NUM', 'NUM_VALUE')
+            date_s = pick(row, 'DATE')
+            time_s = pick(row, 'TIME')
+            if not num or not date_s or not time_s:
+                invalid += 1
+                continue
+
+            fields = []
+            for name in RESULT_FIELDS:
+                legacy = [k for k, v in LEGACY_FIELD_MAP.items() if v == name]
+                val = pick(row, name, *legacy).upper()
+                if val in TRUE_TOKENS:
+                    fields.append(name)
+
+            payload = {
+                'num_value': num,
+                'nbcm': fields,
+                'temp': pick(row, 'TEMP') or '0',
+                'humidity': pick(row, 'HUMIDITY', 'HUM') or '0',
+                'date': date_s,
+                'time': time_s,
+            }
+
+            if master_exists(safe_int(num), date_s, time_s):
+                duplicates += 1
+                continue
+            if save_sensor_data(payload):
+                saved += 1
+            else:
+                invalid += 1
+
+    print(f"[CSV] ورود از فایل: saved={saved} dup={duplicates} bad={invalid}")
+    result = {'status': 'success', 'saved': saved,
+              'duplicates': duplicates, 'invalid': invalid}
+    if errors:
+        result['errors'] = errors
+    return jsonify(result)
+
+
 @app.route('/paste')
 def paste_page():
     """صفحه‌ی افزودن دستی رکورد با چسباندن متن خام سریال"""

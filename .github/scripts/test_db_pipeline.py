@@ -17,6 +17,7 @@
 اجرا در یک پوشه‌ی موقت انجام می‌شود تا دیتابیس‌های واقعی دست نخورند.
 """
 
+import io
 import os
 import shutil
 import sqlite3
@@ -278,7 +279,8 @@ check("st[key] === 'active'" in _idx and "'1' : '0'" in _idx,
       "پنل کنار دما/رطوبت مقدار ۱ یا ۰ را از وضعیت واقعی می‌سازد")
 
 _hist = _c3.get("/history?date=2026-01-05").get_data(as_text=True)
-check("سطح منطقی" in _hist, "ستون سطح منطقی در آرشیو هست")
+check("وضعیت تست" in _hist, "ستون وضعیت تست در آرشیو هست")
+check("bg-green-500 shadow" in _hist, "آرشیو با دایره‌های سبز نمایش می‌دهد")
 
 _plot = _c3.get("/plot_display").get_data(as_text=True)
 check("'BCM1_OPEN', 'BCM1_CLOSE', 'BCM2_OPEN', 'BCM2_CLOSE'" in _plot,
@@ -293,6 +295,27 @@ check(_bk.headers.get("Content-Disposition", "").startswith("attachment"),
       "فایل پشتیبان به‌صورت دانلود برمی‌گردد")
 check(_bk.data[:16].startswith(b"SQLite format 3"),
       "محتوای فایل، یک دیتابیس معتبر SQLite است")
+
+print("\n[8d] رفت‌وبرگشت CSV: خروجی اکسل دوباره به‌عنوان ورودی پذیرفته شود")
+_cc = flask_app.app.test_client()
+_csv = _cc.get("/export_excel").get_data(as_text=True)
+check(_csv.splitlines()[0].startswith("ID,NUM,BCM1_OPEN"), "سرستون خروجی درست است")
+_before = None
+with flask_app.app.app_context():
+    _before = flask_app.db.session.query(flask_app.MasterReading).count()
+    flask_app.MasterReading.query.delete()
+    flask_app.db.session.commit()
+
+_imp = _cc.post("/import_csv",
+                data={"csv_file": (io.BytesIO(_csv.encode("utf-8")), "report.csv")},
+                content_type="multipart/form-data").get_json()
+check(_imp["saved"] == _before,
+      f"همه‌ی {_before} رکورد از CSV برگشتند (خروجی: {_imp})")
+_again = _cc.post("/import_csv",
+                  data={"csv_file": (io.BytesIO(_csv.encode("utf-8")), "report.csv")},
+                  content_type="multipart/form-data").get_json()
+check(_again["saved"] == 0 and _again["duplicates"] == _before,
+      f"ورود دوباره تکراری نمی‌سازد ({_again})")
 
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),

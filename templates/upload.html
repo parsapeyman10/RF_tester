@@ -95,9 +95,80 @@
 
         </div>
     </div>
+
+    <!-- ======================= ورود فایل CSV ======================= -->
+    <div class="max-w-3xl mx-auto mt-8">
+        <div class="bg-slate-800/70 border border-slate-700 rounded-2xl p-6 md:p-8">
+            <h2 class="text-xl font-bold mb-1">ورود از فایل اکسل (CSV)</h2>
+            <p class="text-slate-400 text-sm mb-5">
+                همان فایلی که با دکمه‌ی «خروجی اکسل» گرفته‌اید را می‌توانید دوباره وارد کنید.
+            </p>
+
+            <div class="bg-slate-900/60 rounded-xl p-3 mb-5 text-[11px] font-mono text-slate-400 overflow-x-auto" dir="ltr">
+                NUM,BCM1_OPEN,BCM1_CLOSE,BCM2_OPEN,BCM2_CLOSE,Temp,Humidity,Time,Date
+            </div>
+
+            <div class="flex flex-col md:flex-row gap-3">
+                <input type="file" id="csvInput" accept=".csv,text/csv" multiple
+                       class="flex-1 text-sm text-slate-300 bg-slate-900/60 border border-slate-700 rounded-xl p-3
+                              file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0
+                              file:bg-emerald-600 file:text-white file:font-bold file:cursor-pointer">
+                <button id="csvBtn" onclick="uploadCsv()"
+                        class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-bold transition-all">
+                    ورود به دیتابیس
+                </button>
+            </div>
+
+            <div id="csvResult" class="hidden mt-5 grid grid-cols-3 gap-3 text-center">
+                <div class="bg-slate-900/70 rounded-xl p-4">
+                    <div id="csvSaved" class="text-3xl font-black text-emerald-400">0</div>
+                    <div class="text-xs text-slate-400 mt-1">ذخیره شد</div>
+                </div>
+                <div class="bg-slate-900/70 rounded-xl p-4">
+                    <div id="csvDup" class="text-3xl font-black text-amber-400">0</div>
+                    <div class="text-xs text-slate-400 mt-1">تکراری</div>
+                </div>
+                <div class="bg-slate-900/70 rounded-xl p-4">
+                    <div id="csvBad" class="text-3xl font-black text-red-400">0</div>
+                    <div class="text-xs text-slate-400 mt-1">نامعتبر</div>
+                </div>
+            </div>
+            <p id="csvMsg" class="text-sm text-slate-400 mt-4"></p>
+        </div>
+    </div>
 </div>
 
 <script>
+async function uploadCsv() {
+    const input = document.getElementById('csvInput');
+    if (!input.files.length) { alert('اول فایل CSV را انتخاب کنید'); return; }
+
+    const btn = document.getElementById('csvBtn');
+    btn.disabled = true; btn.textContent = 'در حال ورود…';
+
+    const fd = new FormData();
+    for (const f of input.files) fd.append('csv_file', f);
+
+    try {
+        const resp = await fetch('/import_csv', { method: 'POST', body: fd });
+        const d = await resp.json();
+        document.getElementById('csvSaved').textContent = d.saved ?? 0;
+        document.getElementById('csvDup').textContent = d.duplicates ?? 0;
+        document.getElementById('csvBad').textContent = d.invalid ?? 0;
+        document.getElementById('csvResult').classList.remove('hidden');
+        let m = '';
+        if (d.saved) m += `${d.saved} رکورد جدید وارد شد. `;
+        if (d.duplicates) m += `${d.duplicates} رکورد از قبل موجود بود. `;
+        if (d.invalid) m += `${d.invalid} سطر ناقص رد شد. `;
+        if (d.errors) m += d.errors.join(' | ');
+        document.getElementById('csvMsg').textContent = m || 'چیزی برای افزودن نبود.';
+    } catch (e) {
+        document.getElementById('csvMsg').textContent = 'خطا: ' + e;
+    } finally {
+        btn.disabled = false; btn.textContent = 'ورود به دیتابیس';
+    }
+}
+
     const fileInput = document.getElementById('fileInput');
     const startBtn = document.getElementById('startUploadBtn');
     const fileCountLabel = document.getElementById('file-count');

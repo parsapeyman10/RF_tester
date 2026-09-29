@@ -141,7 +141,7 @@
                         <tr class="bg-slate-800/50 border-b border-slate-700">
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">شناسه (ID)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">شماره (NUM)</th>
-                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">سطح منطقی (۱/۰)</th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">وضعیت تست (باز / بسته)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">دما (Temp)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">رطوبت (Humidity)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">زمان دستگاه (Device)</th>
@@ -163,11 +163,9 @@
                                     {% for dev, motion, fa in [('BCM1','open','B1 باز'), ('BCM1','close','B1 بسته'),
                                                                ('BCM2','open','B2 باز'), ('BCM2','close','B2 بسته')] %}
                                     {% set one = res and res[dev][motion] %}
-                                    <div class="flex flex-col items-center px-1">
-                                        <span class="text-[9px] text-slate-500 whitespace-nowrap">{{ fa }}</span>
-                                        <span class="text-base font-black leading-tight {% if one %}text-green-400{% else %}text-red-400{% endif %}">
-                                            {{ 1 if one else 0 }}
-                                        </span>
+                                    <div class="flex flex-col items-center gap-1 px-1">
+                                        <div class="w-3 h-3 rounded-full transition-all duration-300 {% if one %}bg-green-500 shadow-[0_0_10px_#22c55e]{% else %}bg-slate-700/50 border border-slate-600{% endif %}"></div>
+                                        <span class="text-[9px] font-bold whitespace-nowrap {% if one %}text-green-400{% else %}text-slate-600{% endif %}">{{ fa }}</span>
                                     </div>
                                     {% endfor %}
                                 </div>

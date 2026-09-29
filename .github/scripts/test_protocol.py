@@ -48,6 +48,7 @@ def warn(cond, msg):
 
 esp32 = read(ESP32_INO)
 esp8266 = read(ESP8266_INO)
+app_src = read(os.path.join(ROOT, 'app.py'))
 
 # ---------------------------------------------------------------- 1) کلیدها
 for blob, name in ((esp32, "ESP32 snprintf"), (esp8266, "ESP8266")):
@@ -197,6 +198,40 @@ for _f in ("requirements.txt", "run_server.bat", "run_server.sh",
            "templates/index.html", "templates/history.html",
            "templates/plot_display.html", "templates/upload.html"):
     check(_os.path.isfile(_os.path.join(_root, _f)), f"فایل لازم سرور موجود است: {_f}")
+
+# ------------------------- 5e) ترتیب فیلدها در هر سه لایه یکی باشد
+def field_order(text, keys):
+    """ترتیب ظهور کلیدها در یک رشته"""
+    found = [(text.find(k), k) for k in keys if text.find(k) != -1]
+    return [k for _, k in sorted(found)]
+
+ORDER = ["NUM=", "BCM1_OPEN=", "BCM1_CLOSE=", "BCM2_OPEN=", "BCM2_CLOSE=",
+         "Temp=", "Humidity=", "Date=", "Time="]
+
+# لایه ۱: snprintf فریمور ESP32
+_esp32_fmt = esp32.split("void formatRecordLine(")[1][:900]
+check(field_order(_esp32_fmt, ORDER) == ORDER,
+      f"[ESP32] ترتیب فیلدهای خروجی درست است ({field_order(_esp32_fmt, ORDER)})")
+
+# لایه ۲: sscanf و printf گیرنده
+_rx_parse = esp8266.split("int itemsParsed = sscanf(")[1][:600]
+check(field_order(_rx_parse, ORDER) == ORDER,
+      f"[ESP8266] ترتیب فیلدهای ورودی درست است ({field_order(_rx_parse, ORDER)})")
+_rx_out = esp8266.split("void sendDataToComputer() {")[1][:800]
+check(field_order(_rx_out, ORDER) == ORDER,
+      "[ESP8266] ترتیب فیلدهای خروجی سریال درست است")
+
+# لایه ۳: رجکس سرور
+_srv_re = app_src.split("INDUSTRIAL_LINE_RE = re.compile(")[1][:700]
+check(field_order(_srv_re, ORDER) == ORDER,
+      f"[app.py] ترتیب فیلدها در رجکس درست است ({field_order(_srv_re, ORDER)})")
+
+# و در نهایت: یک خط واقعی با همان ترتیب باید پارس شود
+_line = ("NUM=9,BCM1_OPEN=OK,BCM1_CLOSE=NOK,BCM2_OPEN=NOK,BCM2_CLOSE=OK,"
+         "Temp=21.00,Humidity=55.50,Date=2026-09-29,Time=08:30:00")
+_p = flask_app.parse_industrial_line(_line)
+check(_p is not None and _p["nbcm"] == ["BCM1_OPEN", "BCM2_CLOSE"],
+      f"خط نمونه با همان ترتیب درست پارس شد ({_p['nbcm'] if _p else None})")
 
 # ------------------------- 6) فرمت واحد دیتا برای همه‌ی مقصدها
 check("void formatRecordLine(" in esp32, "[ESP32] تابع واحد formatRecordLine تعریف شده")

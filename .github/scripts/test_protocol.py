@@ -214,7 +214,7 @@ check('setupServer.on("/formatsd"' in esp32, "[ESP32] پاک‌سازی از پ�
 check('cmd.equalsIgnoreCase("format CONFIRM")' in esp32,
       "[ESP32] دستور پاک‌سازی در حالت دیتا نیاز به تأیید دارد")
 check('buf.equalsIgnoreCase("FORMAT SD")' in esp32, "[ESP32] فرمان سریال FORMAT SD وجود دارد")
-check("xSemaphoreTake(xSDMutex" in esp32.split("SdEraseResult eraseSdData()")[1][:600],
+check("xSemaphoreTake(xSDMutex" in esp32.split("SdEraseResult eraseSdData() {")[1][:600],
       "[ESP32] پاک‌سازی با قفل SD انجام می‌شود (بدون تداخل با نوشتن)")
 check("ESP.getFreeHeap()" in esp32, "[ESP32] پایش حافظه فعال است")
 

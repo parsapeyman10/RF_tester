@@ -269,17 +269,32 @@ def stash_unsaved(line, reason):
         print(f"[DB] حتی ذخیره‌ی پشتیبان هم ناموفق بود: {exc}")
 
 
-def device_clock_order(newest_first=True):
-    """
-    ترتیب استاندارد نمایش در کل سیستم: بر اساس «ساعت ذخیره‌شده توسط دستگاه»
-    (RTC خود ESP32)، نه زمان آپلود یا ساعت سرور.
+# ترتیب مرتب‌سازی کل سیستم — همیشه بر اساس ساعت و تاریخی که «دستگاه»
+# ذخیره کرده (RTC روی ESP32)، نه زمان آپلود یا ساعت سرور.
+#
+#   True  -> اول ساعت، بعد تاریخ   (خواسته‌ی فعلی)
+#   False -> اول تاریخ، بعد ساعت   (ترتیب تقویمی معمول)
+SORT_BY_TIME_FIRST = True
 
-    مرتب‌سازی روی (تاریخ، ساعت) انجام می‌شود تا رکوردهای روزهای مختلف
-    درهم نروند؛ یعنی جدیدترین لحظه‌ی دستگاه همیشه اول می‌آید.
-    """
+
+def device_clock_order(newest_first=True):
+    """کلیدهای مرتب‌سازی استاندارد بر اساس ساعت ذخیره‌شده توسط دستگاه"""
+    if SORT_BY_TIME_FIRST:
+        keys = (MasterReading.time, MasterReading.date)
+    else:
+        keys = (MasterReading.date, MasterReading.time)
+
     if newest_first:
-        return (MasterReading.date.desc(), MasterReading.time.desc())
-    return (MasterReading.date.asc(), MasterReading.time.asc())
+        return tuple(k.desc() for k in keys)
+    return tuple(k.asc() for k in keys)
+
+
+def daily_order_sql(newest_first=True):
+    """همان ترتیب، برای کوئری خام دیتابیس روزانه"""
+    direction = "DESC" if newest_first else "ASC"
+    if SORT_BY_TIME_FIRST:
+        return f"ORDER BY log_time {direction}, log_date {direction}"
+    return f"ORDER BY log_date {direction}, log_time {direction}"
 
 
 def master_exists(num_value, date_str, time_str):
@@ -690,11 +705,11 @@ def history():
                     # باگ: قبلاً فقط ۶ ستون انتخاب می‌شد ولی DailyRecordAdapter
                     # به row[6] (تاریخ) و row[7] (ساعت) نیاز دارد -> IndexError
                     # و صفحه‌ی آرشیو روزانه همیشه خالی نمایش داده می‌شد.
-                    c.execute("""
+                    c.execute(f"""
                         SELECT id, num_value, nbcm_selected, temp, humidity,
                                full_timestamp, log_date, log_time
                         FROM daily_records
-                        ORDER BY log_date DESC, log_time DESC
+                        {daily_order_sql()}
                     """)
                     
                     rows = c.fetchall()

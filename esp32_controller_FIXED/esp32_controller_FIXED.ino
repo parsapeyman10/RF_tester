@@ -138,8 +138,11 @@ const char *TIMEZONE_TZ = "<+0330>-3:30";
 
 const char *SETUP_AP_SSID = "SetClock";
 const char *SETUP_AP_PASS = "12345678";
+// مهلت باز ماندن پورتال SetClock (۲ دقیقه در هر دو حالت).
+// اگر کسی وصل شود و ساعت را ست کند و حالت کاری را انتخاب کند، پورتال
+// بلافاصله بسته می‌شود و منتظر پایان این زمان نمی‌ماند.
 const uint32_t SETUP_PORTAL_TIMEOUT_MS = 120000;  // وقتی ساعت نامعتبر است
-const uint32_t SETUP_PORTAL_GRACE_MS = 20000;     // وقتی RTC از قبل معتبر است
+const uint32_t SETUP_PORTAL_GRACE_MS = 120000;    // وقتی RTC از قبل معتبر است
 const uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 
 // =====================================================================
@@ -807,9 +810,8 @@ void runSetupPortal(bool timeAlreadyValid) {
   portalModeChosen = false;
   portalWantsDataView = false;
 
-  // باگ: قبلاً حتی وقتی ساعت RTC معتبر بود، هر بوت ۲ دقیقه کامل منتظر
-  // می‌ماند. حالا اگر ساعت درست باشد فقط ۲۰ ثانیه فرصت می‌دهد و می‌رود
-  // سراغ کار عادی، تا بعد از قطع و وصل برق دستگاه سریع برگردد.
+  // در هر دو حالت ۲ دقیقه فرصت داده می‌شود تا با گوشی وصل شوید.
+  // به‌محض اینکه ساعت ست شد و حالت کاری انتخاب شد، پورتال زودتر بسته می‌شود.
   const uint32_t portalLimit =
       timeAlreadyValid ? SETUP_PORTAL_GRACE_MS : SETUP_PORTAL_TIMEOUT_MS;
   DEBUG_PRINTF("[PORTAL] waiting up to %u s\n", (unsigned)(portalLimit / 1000));

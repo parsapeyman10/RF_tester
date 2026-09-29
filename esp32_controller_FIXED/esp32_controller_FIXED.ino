@@ -27,6 +27,7 @@
 #include <time.h>
 #include <Preferences.h>
 #include "SD.h"
+#include <LittleFS.h>
 #include "SPI.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -321,6 +322,23 @@ EventGroupHandle_t xSystemEvents;
 
 #define SD_CS_PIN 5
 
+// =====================================================================
+//                     لایه‌ی ذخیره‌سازی دو سطحی
+//
+//  اولویت با کارت SD است. اگر کارت نبود یا خراب بود، همان ساختار فایل‌ها
+//  روی حافظه‌ی داخلی خود ESP32 (LittleFS) نوشته می‌شود تا هیچ رکوردی گم
+//  نشود. هر ۶۰ ثانیه دوباره دنبال کارت می‌گردیم؛ به‌محض پیدا شدن، فایل‌های
+//  باقی‌مانده از حافظه‌ی داخلی به کارت منتقل و ذخیره‌سازی روی کارت ادامه
+//  پیدا می‌کند.
+//
+//  ظرفیت حافظه‌ی داخلی با پارتیشن ۱ مگابایتی ≈ ۴۰٬۰۰۰ رکورد.
+// =====================================================================
+fs::FS *gFs = nullptr;         // به SD یا LittleFS اشاره می‌کند
+bool usingSD = false;          // الان روی کارت می‌نویسیم؟
+uint32_t lastSdProbeMs = 0;    // آخرین باری که دنبال کارت گشتیم
+
+const char *storageName() { return usingSD ? "SD" : "حافظه داخلی"; }
+
 #define BIT_START_DIGITAL_MONITORING (1UL << 0)
 #define BIT_STOP_DIGITAL_MONITORING (1UL << 1)
 #define BIT_START_SHT_READ (1UL << 2)
@@ -377,6 +395,9 @@ void waitForDataLink(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void scanForDataAp();
 static const char *wifiReasonText(uint8_t reason);
+static bool mountInternalFs();
+bool initStorage();
+void probeSdCard();
 void saveToSD(const WifiData &data);
 
 /** نتیجه‌ی پاک‌سازی کارت حافظه */
@@ -430,11 +451,9 @@ void setup() {
 
   // ---------------- SD & شماره‌ی رکورد ----------------
   if (xSemaphoreTake(xSDMutex, portMAX_DELAY)) {
-    if (!SD.begin(SD_CS_PIN)) {
-      Serial.println("[SD] Critical Error: SD Card not detected!");
+    if (!initStorage()) {
+      Serial.println("[STORE] هیچ حافظه‌ای در دسترس نیست؛ دیتا فقط ارسال می‌شود");
     } else {
-      DEBUG_PRINTLN("[SD] Card OK.");
-      if (!SD.exists("/data")) SD.mkdir("/data");
 
       // مدل ذخیره‌سازی بهینه: به‌جای «یک فایل برای هر رکورد»، هر روز یک فایل
       // /data/YYYYMMDD.dat که رکوردهای ۲۵ بایتی پشت سر هم به آن append می‌شوند.
@@ -1131,9 +1150,10 @@ void handleSerialCommands() {
         Serial.println("[CMD] پاک‌سازی کارت حافظه ...");
         eraseSdData();
       } else if (buf.equalsIgnoreCase("STATUS")) {
-        Serial.printf("[CMD] مرحله=%s | wifi=%s | رکورد بعدی=%d | heap=%uk\n",
+        Serial.printf("[CMD] مرحله=%s | wifi=%s | حافظه=%s | رکورد بعدی=%d | heap=%uk\n",
                       relayPhaseText,
                       WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+                      storageName(),
                       currentGlobalID + 1, (unsigned)(ESP.getFreeHeap() / 1024));
       } else if (buf.length()) {
         Serial.println("[CMD] فرمان‌ها: FORMAT SD | STATUS");
@@ -1629,10 +1649,110 @@ void TaskReadSHT(void *pv) {
 // =====================================================================
 //                     SD HELPERS
 // =====================================================================
+/** کارت SD را سوار می‌کند؛ در صورت موفقیت gFs به آن اشاره می‌کند */
+static bool mountSdCard() {
+  if (!SD.begin(SD_CS_PIN)) return false;
+  gFs = &SD;
+  usingSD = true;
+  if (!gFs->exists("/data")) gFs->mkdir("/data");
+  return true;
+}
+
+/** حافظه‌ی داخلی را سوار می‌کند (در صورت نیاز فرمت می‌شود) */
+static bool mountInternalFs() {
+  if (!LittleFS.begin(true)) return false;   // true = اگر خالی بود فرمت کن
+  gFs = &LittleFS;
+  usingSD = false;
+  if (!gFs->exists("/data")) gFs->mkdir("/data");
+  return true;
+}
+
+/** انتخاب محل ذخیره‌سازی در بوت: اول کارت، بعد حافظه‌ی داخلی */
+bool initStorage() {
+  if (mountSdCard()) {
+    DEBUG_PRINTF("[STORE] کارت SD آماده است (%llu مگابایت)\n",
+                 SD.cardSize() / (1024ULL * 1024ULL));
+    return true;
+  }
+
+  DEBUG_PRINTLN("[STORE] کارت SD پیدا نشد -> استفاده از حافظه‌ی داخلی");
+  if (mountInternalFs()) {
+    DEBUG_PRINTF("[STORE] حافظه‌ی داخلی آماده است (%u کیلوبایت آزاد)\n",
+                 (unsigned)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024));
+    return true;
+  }
+
+  Serial.println("[STORE] بحرانی: هیچ حافظه‌ای در دسترس نیست!");
+  gFs = nullptr;
+  return false;
+}
+
+/** یک فایل را از حافظه‌ی داخلی به کارت کپی می‌کند */
+static bool copyFileToSd(const String &path) {
+  File src = LittleFS.open(path, FILE_READ);
+  if (!src) return false;
+
+  File dst = SD.open(path, FILE_WRITE);
+  if (!dst) {
+    src.close();
+    return false;
+  }
+
+  uint8_t buf[256];
+  size_t n;
+  while ((n = src.read(buf, sizeof(buf))) > 0) dst.write(buf, n);
+
+  src.close();
+  dst.close();
+  return true;
+}
+
+/**
+ * وقتی روی حافظه‌ی داخلی کار می‌کنیم، هر ۶۰ ثانیه دنبال کارت می‌گردیم.
+ * به‌محض پیدا شدن، فایل‌های باقی‌مانده منتقل و ذخیره‌سازی روی کارت ادامه
+ * پیدا می‌کند.
+ */
+void probeSdCard() {
+  if (usingSD || gFs == nullptr) return;
+  if (millis() - lastSdProbeMs < 60000) return;
+  lastSdProbeMs = millis();
+
+  if (!SD.begin(SD_CS_PIN)) return;   // هنوز کارتی نیست
+
+  DEBUG_PRINTLN("[STORE] کارت SD پیدا شد -> انتقال داده‌های حافظه‌ی داخلی");
+  if (!SD.exists("/data")) SD.mkdir("/data");
+
+  uint32_t moved = 0;
+  File root = LittleFS.open("/data");
+  if (root) {
+    File e = root.openNextFile();
+    while (e) {
+      String name = String(e.name());
+      if (!name.startsWith("/")) name = "/data/" + name;
+      e.close();
+
+      if (copyFileToSd(name)) {
+        LittleFS.remove(name);
+        moved++;
+      }
+      e = root.openNextFile();
+    }
+    root.close();
+  }
+  if (LittleFS.exists("/last_id.txt")) {
+    if (copyFileToSd("/last_id.txt")) LittleFS.remove("/last_id.txt");
+  }
+
+  gFs = &SD;
+  usingSD = true;
+  DEBUG_PRINTF("[STORE] از این پس روی کارت نوشته می‌شود (%u فایل منتقل شد)\n",
+               (unsigned)moved);
+}
+
 int getNextPersistentID() {
   int id = 0;
-  if (SD.exists("/last_id.txt")) {
-    File f = SD.open("/last_id.txt", FILE_READ);
+  if (gFs->exists("/last_id.txt")) {
+    File f = gFs->open("/last_id.txt", FILE_READ);
     if (f) {
       id = f.parseInt();
       f.close();
@@ -1642,7 +1762,7 @@ int getNextPersistentID() {
 }
 
 void saveNextPersistentID(int id) {
-  File f = SD.open("/last_id.txt", FILE_WRITE);
+  File f = gFs->open("/last_id.txt", FILE_WRITE);
   if (f) {
     f.print(id);
     f.close();
@@ -1677,8 +1797,8 @@ static String posPathOf(const String &datPath) {
 
 static uint32_t readUploadPos(const String &datPath) {
   String pp = posPathOf(datPath);
-  if (!SD.exists(pp)) return 0;
-  File f = SD.open(pp, FILE_READ);
+  if (!gFs->exists(pp)) return 0;
+  File f = gFs->open(pp, FILE_READ);
   if (!f) return 0;
   uint32_t v = (uint32_t)f.parseInt();
   f.close();
@@ -1686,7 +1806,7 @@ static uint32_t readUploadPos(const String &datPath) {
 }
 
 static void writeUploadPos(const String &datPath, uint32_t pos) {
-  File f = SD.open(posPathOf(datPath), FILE_WRITE);
+  File f = gFs->open(posPathOf(datPath), FILE_WRITE);
   if (f) {
     f.print(pos);
     f.close();
@@ -1703,7 +1823,7 @@ static String baseNameOf(const char *rawName) {
 /** قدیمی‌ترین (یا جدیدترین) فایل روزانه‌ی موجود. نام فایل‌ها تاریخی است پس
     ترتیب الفبایی = ترتیب زمانی. */
 static String pickDayFile(bool oldest) {
-  File root = SD.open("/data");
+  File root = gFs->open("/data");
   if (!root) return "";
   String best = "";
   File e = root.openNextFile();
@@ -1726,7 +1846,7 @@ static String pickDayFile(bool oldest) {
 static int lastRecordIdOnSD() {
   String newest = pickDayFile(false);
   if (!newest.length()) return 0;
-  File f = SD.open(newest, FILE_READ);
+  File f = gFs->open(newest, FILE_READ);
   if (!f) return 0;
   int id = 0;
   size_t size = f.size();
@@ -1771,7 +1891,7 @@ SdEraseResult eraseSdData() {
   Serial.println("[SD] شروع پاک‌سازی کارت حافظه ...");
 
   // ۱) همه‌ی فایل‌های پوشه‌ی داده
-  File root = SD.open("/data");
+  File root = gFs->open("/data");
   if (root) {
     File e = root.openNextFile();
     while (e) {
@@ -1780,7 +1900,7 @@ SdEraseResult eraseSdData() {
       uint32_t sz = e.size();
       e.close();
 
-      if (SD.remove(path)) {
+      if (gFs->remove(path)) {
         res.files++;
         res.bytes += sz;
       } else {
@@ -1792,10 +1912,10 @@ SdEraseResult eraseSdData() {
   }
 
   // ۲) شمارنده‌ی شماره‌ی رکورد
-  if (SD.exists("/last_id.txt") && SD.remove("/last_id.txt")) res.files++;
+  if (gFs->exists("/last_id.txt") && gFs->remove("/last_id.txt")) res.files++;
 
   // ۳) ساخت دوباره‌ی ساختار پوشه‌ها
-  if (!SD.exists("/data")) SD.mkdir("/data");
+  if (!gFs->exists("/data")) gFs->mkdir("/data");
 
   // ۴) شماره‌گذاری از صفر
   currentGlobalID = 0;
@@ -1812,11 +1932,20 @@ SdEraseResult eraseSdData() {
 }
 
 void saveToSD(const WifiData &data) {
+  if (gFs == nullptr) {
+    // هیچ حافظه‌ای سوار نیست؛ آخرین تلاش برای سوار کردن
+    if (!initStorage()) {
+      sdWriteFailures++;
+      DEBUG_PRINTLN("[STORE] رکورد ذخیره نشد: حافظه‌ای در دسترس نیست");
+      return;
+    }
+  }
+
   String path = dayFilePath(data.Year, data.Month, data.Day);
 
   for (int attempt = 0; attempt < 2; attempt++) {
-    File f = SD.open(path, FILE_APPEND);
-    if (!f) f = SD.open(path, FILE_WRITE);  // اولین رکورد امروز
+    File f = gFs->open(path, FILE_APPEND);
+    if (!f) f = gFs->open(path, FILE_WRITE);  // اولین رکورد امروز
 
     if (f) {
       size_t written = f.write((const uint8_t *)&data, REC_SIZE);
@@ -1833,11 +1962,20 @@ void saveToSD(const WifiData &data) {
     }
 
     if (attempt == 0) {
-      DEBUG_PRINTLN("[SD] تلاش دوم: مقداردهی مجدد کارت حافظه");
-      SD.end();
-      delay(50);
-      if (!SD.begin(SD_CS_PIN)) DEBUG_PRINTLN("[SD] مقداردهی مجدد ناموفق بود");
-      if (!SD.exists("/data")) SD.mkdir("/data");
+      if (usingSD) {
+        DEBUG_PRINTLN("[STORE] تلاش دوم: مقداردهی مجدد کارت حافظه");
+        SD.end();
+        delay(50);
+        if (!SD.begin(SD_CS_PIN)) {
+          // کارت واقعاً از دسترس خارج شده -> برو روی حافظه‌ی داخلی
+          DEBUG_PRINTLN("[STORE] کارت از دسترس خارج شد -> حافظه‌ی داخلی");
+          if (!mountInternalFs()) {
+            gFs = nullptr;
+            break;
+          }
+        }
+      }
+      if (gFs && !gFs->exists("/data")) gFs->mkdir("/data");
     }
   }
 
@@ -1878,7 +2016,7 @@ void sendRecord(WiFiClient &cl, const WifiData &d) {
 static int readLastRecords(WifiData *out, int maxCount) {
   String newest = pickDayFile(false);
   if (!newest.length()) return 0;
-  File f = SD.open(newest, FILE_READ);
+  File f = gFs->open(newest, FILE_READ);
   if (!f) return 0;
 
   size_t total = f.size() / REC_SIZE;
@@ -1908,6 +2046,7 @@ void TaskInternalWiFiConnection(void *pv) {
   for (;;) {
     hbNet++;
     handleSerialCommands();   // FORMAT SD / STATUS
+    probeSdCard();            // اگر روی حافظه‌ی داخلی هستیم، دنبال کارت بگرد
     int mode = (xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)
                  ? MODE_HOTSPOT_VIEW
                  : MODE_CLIENT_UPLOAD;
@@ -1959,7 +2098,7 @@ void TaskInternalWiFiConnection(void *pv) {
           String dayFile = pickDayFile(true);
           if (dayFile.length()) {
             uint32_t pos = readUploadPos(dayFile);
-            File f = SD.open(dayFile, FILE_READ);
+            File f = gFs->open(dayFile, FILE_READ);
             if (f) {
               size_t fileSize = f.size();
 
@@ -2016,8 +2155,8 @@ void TaskInternalWiFiConnection(void *pv) {
                 rtc.read();
                 String today = dayFilePath(2000 + rtc.getYear(), rtc.getMonth(), rtc.getDay());
                 if (dayFile != today) {
-                  SD.remove(posPathOf(dayFile));
-                  SD.remove(dayFile);
+                  gFs->remove(posPathOf(dayFile));
+                  gFs->remove(dayFile);
                   DEBUG_PRINTF("[UPLOAD] %s fully uploaded -> removed\n", dayFile.c_str());
                 }
               }
@@ -2092,7 +2231,7 @@ void TaskInternalWiFiConnection(void *pv) {
                   String newest = pickDayFile(false);
                   int sent = 0;
                   if (newest.length()) {
-                    File f = SD.open(newest, FILE_READ);
+                    File f = gFs->open(newest, FILE_READ);
                     if (f) {
                       WifiData d;
                       while (f.read((uint8_t *)&d, REC_SIZE) == (int)REC_SIZE) {
@@ -2185,12 +2324,18 @@ void TaskHealthMonitor(void *pv) {
     size_t minHeap = ESP.getMinFreeHeap();
 
     // یک خط خلاصه (سطح ۱) — جزئیات کامل فقط در سطح ۲
-    DEBUG_PRINTF("[OK] %s | wifi=%s%d | سیکل=%u | heap=%uk | up=%lus\n",
+    uint32_t freeKb = 0;
+    if (gFs == &SD) freeKb = (uint32_t)((SD.totalBytes() - SD.usedBytes()) / 1024);
+    else if (gFs == &LittleFS) freeKb =
+        (uint32_t)((LittleFS.totalBytes() - LittleFS.usedBytes()) / 1024);
+
+    DEBUG_PRINTF("[OK] %s | wifi=%s%d | سیکل=%u | heap=%uk | حافظه=%s(%uk آزاد) | up=%lus\n",
                  relayPhaseText,
                  WiFi.status() == WL_CONNECTED ? "UP " : "DOWN ",
                  WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                  (unsigned)hbRelay,
                  (unsigned)(freeHeap / 1024),
+                 storageName(), (unsigned)freeKb,
                  (unsigned long)(millis() / 1000));
 
     VERBOSE_PRINTF("[HEALTH] heapMin=%u | hb D:%u S:%u N:%u | drops=%u sdErr=%u | "

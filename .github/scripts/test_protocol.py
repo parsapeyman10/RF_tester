@@ -257,6 +257,17 @@ check('xTaskCreatePinnedToCore(TaskDigitalRead, "DigiRead", 4096, NULL, 6, NULL,
       "[ESP32] تسک خواندن فیدبک روی هسته‌ی ۱ با بالاترین اولویت")
 check("void TaskHealthMonitor(" in esp32, "[ESP32] ناظر سلامت (ران‌تایم دائمی) اضافه شده")
 
+# ------------------------- ذخیره‌سازی دو سطحی (SD و حافظه‌ی داخلی)
+check("#include <LittleFS.h>" in esp32, "[ESP32] حافظه‌ی داخلی به‌عنوان جایگزین اضافه شده")
+check("fs::FS *gFs" in esp32, "[ESP32] همه‌ی کار با فایل از یک لایه رد می‌شود")
+check("bool initStorage()" in esp32, "[ESP32] انتخاب حافظه در بوت انجام می‌شود")
+check("void probeSdCard()" in esp32, "[ESP32] بعد از جا زدن کارت، خودکار تشخیص داده می‌شود")
+check("copyFileToSd" in esp32, "[ESP32] داده‌های حافظه‌ی داخلی به کارت منتقل می‌شوند")
+check(esp32.count("SD.open(") <= 1,
+      "[ESP32] دسترسی مستقیم به SD باقی نمانده (همه از gFs رد می‌شوند)")
+check("mountInternalFs()" in esp32.split("void saveToSD(")[2][:1800],
+      "[ESP32] اگر کارت وسط کار قطع شود، روی حافظه‌ی داخلی ادامه می‌دهد")
+
 # ------------------------- پاک‌سازی کارت حافظه
 check("SdEraseResult eraseSdData()" in esp32, "[ESP32] تابع پاک‌سازی کارت وجود دارد")
 check('setupServer.on("/formatsd"' in esp32, "[ESP32] پاک‌سازی از پورتال در دسترس است")

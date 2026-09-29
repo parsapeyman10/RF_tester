@@ -54,7 +54,16 @@ const unsigned long AP_RETRY_DELAY_MS = 1000;
 // --- پایداری اکسس‌پوینت ---
 const uint8_t  AP_CHANNEL = 6;            // کانال ثابت (کمترین تداخل معمول)
 const uint8_t  AP_MAX_CLIENTS = 8;        // سخت‌گیری بی‌دلیل نکنیم
-const float    AP_TX_POWER = 20.5;        // حداکثر توان خروجی
+// توان خروجی: حداکثرِ ۲۰.۵ وقتی دو برد کنار هم روی میز هستند باعث اشباع
+// گیرنده‌ی طرف مقابل و خراب شدن فریم‌های EAPOL می‌شود؛ نتیجه‌اش دقیقاً
+// «4WAY_HANDSHAKE_TIMEOUT» است. ۱۴ dBm برای چند ده متر کافی است.
+const float    AP_TX_POWER = 14.0;
+
+// فقط برای عیب‌یابی: اکسس‌پوینت را بدون رمز بالا می‌آورد.
+// اگر با این حالت ESP32 وصل شد، مشکل از احراز هویت/رمز است؛
+// اگر باز هم وصل نشد، مشکل رادیویی یا تغذیه است.
+// (در این حالت باید DATA_AP_PASS در اسکچ ESP32 هم خالی شود)
+#define AP_OPEN_TEST false
 const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
 const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
 const uint32_t LOW_HEAP_LIMIT = 6000;                 // آستانه‌ی حافظه‌ی بحرانی
@@ -296,7 +305,13 @@ void initAccessPoint() {
 
   bool apOK = false;
   for (uint8_t attempt = 1; attempt <= AP_INIT_RETRY; attempt++) {
-    if (WiFi.softAP(SSID_NAME, PASSWORD, AP_CHANNEL, false, AP_MAX_CLIENTS)) {
+#if AP_OPEN_TEST
+    bool started = WiFi.softAP(SSID_NAME, nullptr, AP_CHANNEL, false, AP_MAX_CLIENTS);
+    ST_PRINTLN("[AP] حالت عیب‌یابی: اکسس‌پوینت بدون رمز بالا آمد");
+#else
+    bool started = WiFi.softAP(SSID_NAME, PASSWORD, AP_CHANNEL, false, AP_MAX_CLIENTS);
+#endif
+    if (started) {
       apOK = true;
       DBG_PRINTF("AP READY - SSID: %s | IP: %s\n", SSID_NAME, WiFi.softAPIP().toString().c_str());
       break;

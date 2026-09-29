@@ -99,6 +99,12 @@ const int serverPort = 80;
 
 // --- پایداری اتصال ---
 // آدرس‌دهی از DHCP خودِ گیرنده گرفته می‌شود؛ ساده‌ترین و مطمئن‌ترین حالت.
+// توان خروجی فرستنده. وقتی دو برد کنار هم روی میز هستند، توان حداکثر
+// گیرنده‌ی طرف مقابل را اشباع می‌کند و فریم‌های EAPOL خراب می‌شوند؛
+// نتیجه‌اش «4WAY_HANDSHAKE_TIMEOUT» است حتی با رمز درست.
+// اگر فاصله زیاد است (چند ده متر) می‌توانید WIFI_POWER_19_5dBm بگذارید.
+#define STA_TX_POWER WIFI_POWER_13dBm
+
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;   // مهلت هر تلاش اتصال
 const uint32_t WIFI_BACKOFF_MIN_MS = 2000;       // فاصله‌ی تلاش‌ها: از ۲ ثانیه
 const uint32_t WIFI_BACKOFF_MAX_MS = 30000;      // تا سقف ۳۰ ثانیه
@@ -949,6 +955,7 @@ static bool wifiConnectOnce() {
   delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
+  WiFi.setTxPower(STA_TX_POWER);
   WiFi.setAutoReconnect(false);   // خودِ ما مدیریت می‌کنیم؛ تلاش‌های موازی ممنوع
 
   // توجه: پایین آوردن حداقل امنیت (setMinSecurity(WPA_PSK)) باعث می‌شود
@@ -969,11 +976,13 @@ static bool wifiConnectOnce() {
   uint8_t bssid[6];
   bool haveBssid = false;
   int32_t bestRssi = -127;
+  int bestEnc = -1;
 
   int found = WiFi.scanNetworks(false, true, false, 200);
   for (int i = 0; i < found; i++) {
     if (WiFi.SSID(i) == cfgDataSsid && WiFi.RSSI(i) > bestRssi) {
       bestRssi = WiFi.RSSI(i);
+      bestEnc = (int)WiFi.encryptionType(i);
       channel = WiFi.channel(i);
       memcpy(bssid, WiFi.BSSID(i), 6);
       haveBssid = true;
@@ -986,11 +995,31 @@ static bool wifiConnectOnce() {
   if (failStreak >= 3) haveBssid = false;
 
   if (haveBssid) {
-    VERBOSE_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d\n", (int)channel, (int)bestRssi);
-    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid);
+    VERBOSE_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d enc=%d\n",
+                   (int)channel, (int)bestRssi, (int)bestEnc);
+
+    // سیگنال خیلی قوی = بردها بیش از حد به هم نزدیک‌اند
+    if (bestRssi > -25) {
+      DEBUG_PRINTF("[NET] هشدار: سیگنال بیش از حد قوی است (%d dBm). "
+                   "بردها را حداقل یک متر از هم دور کنید.\n", (int)bestRssi);
+    }
+    // 3 = WPA2_PSK ، 2 = WPA_PSK/TKIP ، 0 = باز
+    if (bestEnc != 3 && bestEnc != 0) {
+      DEBUG_PRINTF("[NET] هشدار: اکسس‌پوینت WPA2 خالص نیست (enc=%d) — "
+                   "همین می‌تواند هندشیک را خراب کند.\n", (int)bestEnc);
+    }
+    if (cfgDataPass.length() == 0) {
+      WiFi.begin(cfgDataSsid.c_str(), (const char *)nullptr, channel, bssid);
+    } else {
+      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid);
+    }
   } else {
     VERBOSE_PRINTLN("[NET] AP در اسکن نبود؛ اتصال عادی امتحان می‌شود");
-    WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
+    if (cfgDataPass.length() == 0) {
+      WiFi.begin(cfgDataSsid.c_str());
+    } else {
+      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
+    }
   }
 
   uint32_t t0 = millis();
@@ -1152,7 +1181,9 @@ void scanForDataAp() {
   WiFi.scanDelete();
 
   if (found) {
-    DEBUG_PRINTLN("[SCAN] AP در دسترس است -> مشکل از رمز یا مذاکره‌ی امنیتی است");
+    DEBUG_PRINTLN("[SCAN] AP در دسترس است -> مشکل رمز یا گم شدن فریم‌های هندشیک است.");
+    DEBUG_PRINTLN("[SCAN] بررسی کنید: ۱) رمز دو طرف یکی باشد  ۲) بردها ~۱ متر "
+                  "فاصله داشته باشند  ۳) تغذیه‌ی ESP8266 پایدار باشد");
   } else {
     DEBUG_PRINTF("[SCAN] '%s' در هوا نیست! برد گیرنده روشن است؟ فاصله زیاد است؟\n",
                  cfgDataSsid.c_str());

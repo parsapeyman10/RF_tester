@@ -243,7 +243,8 @@
                 const uniqueDates = [...new Set(data.map(d => d.date))];
                 const chartTitle = uniqueDates.length === 1 ? `روند تغییرات - ${uniqueDates[0]}` : 'روند تغییرات محیطی';
                 
-                Plotly.newPlot('main-chart', envTraces, {...layoutBase, title: chartTitle}, {responsive: true});
+                Plotly.newPlot('main-chart', envTraces,
+                    {...layoutBase, title: chartTitle, height: 340}, {responsive: true});
 
                 // 2. چهار سیگنال به‌صورت سطح منطقی: OK = 1 ، NOK = 0
                 //    هر سیگنال محور مستقل خودش را دارد تا مقدار واقعی ۰ و ۱
@@ -269,7 +270,7 @@
                 const logicLayout = {
                     ...layoutBase,
                     title: 'سطح منطقی چهار سیگنال (۱ = OK ، ۰ = NOK)',
-                    height: 520,
+                    height: 460,
                     showlegend: false,
                     margin: { l: 110, r: 20, t: 60, b: 40 },
                     xaxis: { gridcolor: '#334155', showticklabels: true }

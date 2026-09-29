@@ -148,10 +148,17 @@
                 <div id="live-humidity" class="text-4xl font-bold mt-2 text-cyan-400 font-mono">--</div>
             </div>
             
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-purple-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Timestamp</span>
-                <div id="live-time" class="text-xl font-bold mt-2 font-mono text-slate-200">--:--:--</div>
-                <div id="live-date" class="text-[10px] text-slate-500 font-mono">----/--/--</div>
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-purple-500 flex flex-col justify-center min-h-[140px] px-3">
+                <div class="text-center border-b border-slate-700/60 pb-2 mb-2">
+                    <span class="text-purple-300 text-[10px] font-bold uppercase tracking-widest">ساعت دستگاه (RTC)</span>
+                    <div id="live-time" class="text-lg font-bold mt-1 font-mono text-slate-100">--:--:--</div>
+                    <div id="live-date" class="text-[10px] text-slate-500 font-mono">----/--/--</div>
+                </div>
+                <div class="text-center">
+                    <span class="text-sky-300 text-[10px] font-bold uppercase tracking-widest">ساعت سرور (کامپیوتر)</span>
+                    <div id="server-time" class="text-lg font-bold mt-1 font-mono text-slate-100">--:--:--</div>
+                    <div id="server-date" class="text-[10px] text-slate-500 font-mono">----/--/--</div>
+                </div>
             </div>
 
             <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
@@ -167,6 +174,38 @@
                     {% endfor %}
                 </div>
             </div>
+            </div>
+
+        </div>
+
+        <!-- دسترسی سریع: پورت سریال و ثبت دستی، بدون خروج از این صفحه -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-6">
+
+            <div class="glass-card rounded-2xl p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-bold text-blue-300">🔌 تنظیمات پورت سریال</span>
+                    <span id="quick-serial-state" class="text-[11px] font-mono text-slate-400">—</span>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <select id="quickPort" class="flex-1 min-w-[140px] p-2 rounded-lg bg-slate-900/70 border border-slate-700 text-sm outline-none"></select>
+                    <select id="quickBaud" class="w-32 p-2 rounded-lg bg-slate-900/70 border border-slate-700 text-sm outline-none"></select>
+                    <button id="quickConnect" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-bold">اتصال</button>
+                    <button id="quickDisconnect" class="bg-red-600/20 text-red-400 hover:bg-red-600 hover:text-white px-3 py-2 rounded-lg text-sm">قطع</button>
+                </div>
+            </div>
+
+            <div class="glass-card rounded-2xl p-4">
+                <div class="flex items-center justify-between mb-3">
+                    <span class="text-sm font-bold text-emerald-300">📝 ثبت دستی رکورد</span>
+                    <a href="/paste" class="text-[11px] text-emerald-400 hover:underline">صفحه‌ی کامل ↗</a>
+                </div>
+                <textarea id="quickPaste" rows="2" spellcheck="false" dir="ltr"
+                    class="w-full bg-slate-900/70 border border-slate-700 rounded-lg p-2 text-[12px] font-mono outline-none"
+                    placeholder="NUM=1,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,Temp=24.5,Humidity=44.0,Date=2026-09-29,Time=12:00:00"></textarea>
+                <div class="flex items-center gap-3 mt-2">
+                    <button id="quickAdd" class="bg-emerald-600 hover:bg-emerald-500 px-4 py-2 rounded-lg text-sm font-bold">افزودن به دیتابیس</button>
+                    <span id="quickAddMsg" class="text-[11px] text-slate-400"></span>
+                </div>
             </div>
 
         </div>
@@ -422,6 +461,91 @@
     
     updateSerialUI();
     updateLiveDashboard();
+    // ================= ساعت سرور (کامپیوتر) =================
+    let serverClock = null;      // ثانیه‌شمار محلی بین دو همگام‌سازی
+    async function syncServerClock() {
+        try {
+            const d = await (await fetch('/api/server_time')).json();
+            serverClock = new Date(d.iso);
+            renderServerClock();
+        } catch (e) { /* بی‌صدا */ }
+    }
+    function renderServerClock() {
+        if (!serverClock) return;
+        const p = n => String(n).padStart(2, '0');
+        const t = document.getElementById('server-time');
+        const dt = document.getElementById('server-date');
+        if (t) t.textContent = `${p(serverClock.getHours())}:${p(serverClock.getMinutes())}:${p(serverClock.getSeconds())}`;
+        if (dt) dt.textContent = `${serverClock.getFullYear()}-${p(serverClock.getMonth()+1)}-${p(serverClock.getDate())}`;
+    }
+    setInterval(() => { if (serverClock) { serverClock = new Date(serverClock.getTime() + 1000); renderServerClock(); } }, 1000);
+    setInterval(syncServerClock, 60000);   // هر دقیقه با سرور میزان می‌شود
+    syncServerClock();
+
+    // ================= پنل سریع پورت سریال =================
+    async function refreshQuickSerial() {
+        try {
+            const d = await (await fetch('/api/serial_ports')).json();
+            const ps = document.getElementById('quickPort');
+            const bs = document.getElementById('quickBaud');
+            const st = document.getElementById('quick-serial-state');
+
+            if (ps) {
+                const ports = [...new Set([...(d.available_ports || []),
+                                           ...(d.active_port ? [d.active_port] : [])])];
+                const chosen = ps.value || d.active_port || '';
+                ps.innerHTML = '<option value="">انتخاب پورت…</option>' +
+                    ports.map(p => `<option value="${p}" ${p === chosen ? 'selected' : ''}>${p}</option>`).join('');
+            }
+            if (bs && Array.isArray(d.baud_rates)) {
+                const cur = d.baud_rate || 115200;
+                if (bs.dataset.filled !== '1') {
+                    bs.innerHTML = d.baud_rates.map(b => `<option value="${b}" ${b === cur ? 'selected' : ''}>${b}</option>`).join('');
+                    bs.dataset.filled = '1';
+                }
+            }
+            if (st) {
+                const on = d.connection_status === 'Connected';
+                st.textContent = (on ? '🟢 متصل' : '🔴 قطع') + (d.active_port ? ` · ${d.active_port} @ ${d.baud_rate}` : '');
+                st.className = 'text-[11px] font-mono ' + (on ? 'text-green-400' : 'text-slate-400');
+            }
+        } catch (e) { /* بی‌صدا */ }
+    }
+    document.getElementById('quickConnect').onclick = async () => {
+        const port = document.getElementById('quickPort').value;
+        const baud = parseInt(document.getElementById('quickBaud').value) || 115200;
+        if (!port) { alert('اول پورت را انتخاب کنید'); return; }
+        await fetch('/api/set_serial_config', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({port, baud_rate: baud})
+        });
+        refreshQuickSerial(); updateSerialUI();
+    };
+    document.getElementById('quickDisconnect').onclick = async () => {
+        await fetch('/api/close_serial_port', {method: 'POST'});
+        refreshQuickSerial(); updateSerialUI();
+    };
+    setInterval(refreshQuickSerial, 5000);
+    refreshQuickSerial();
+
+    // ================= ثبت دستی سریع =================
+    document.getElementById('quickAdd').onclick = async () => {
+        const box = document.getElementById('quickPaste');
+        const msg = document.getElementById('quickAddMsg');
+        const text = box.value.trim();
+        if (!text) { msg.textContent = 'اول متن رکورد را بنویسید'; return; }
+        msg.textContent = 'در حال افزودن…';
+        try {
+            const r = await fetch('/api/ingest', {
+                method: 'POST',
+                headers: {'Content-Type': 'text/plain; charset=utf-8', 'X-Device': 'dashboard'},
+                body: text
+            });
+            const d = await r.json();
+            msg.textContent = `ذخیره ${d.saved} · تکراری ${d.duplicates} · نامعتبر ${d.invalid}`;
+            if (d.saved) { box.value = ''; updateLiveDashboard(); }
+        } catch (e) { msg.textContent = 'خطا: ' + e; }
+    };
 </script>
 </body>
 </html>

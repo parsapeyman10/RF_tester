@@ -1084,6 +1084,17 @@ def api_recover_unsaved():
                     'remaining': len(remaining)})
 
 
+@app.route('/api/server_time')
+def api_server_time():
+    """ساعت خودِ کامپیوتری که سرور روی آن اجرا می‌شود (جدا از ساعت دستگاه)"""
+    now = datetime.datetime.now(TEHRAN_TZ)
+    return jsonify({
+        'server_time': now.strftime('%H:%M:%S'),
+        'server_date': now.strftime('%Y-%m-%d'),
+        'iso': now.isoformat(),
+    })
+
+
 @app.route('/api/serial_ports')
 def list_serial_ports():
     ports = [port.device for port in serial.tools.list_ports.comports()]

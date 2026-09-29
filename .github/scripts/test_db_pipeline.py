@@ -341,13 +341,28 @@ try:
 except OSError:
     pass
 
+print("\n[8f] داشبورد: ساعت سرور، پنل پورت و ثبت دستی روی همان صفحه")
+_dc = flask_app.app.test_client()
+_ix = _dc.get("/").get_data(as_text=True)
+check('id="server-time"' in _ix and 'id="live-time"' in _ix,
+      "هر دو ساعت (سرور و دستگاه) روی داشبورد هستند")
+check("ساعت دستگاه (RTC)" in _ix and "ساعت سرور (کامپیوتر)" in _ix,
+      "برچسب هر دو ساعت گویاست")
+check('id="quickPort"' in _ix and 'id="quickBaud"' in _ix and 'id="quickConnect"' in _ix,
+      "پنل تنظیمات پورت روی داشبورد اضافه شده")
+check('id="quickPaste"' in _ix and 'id="quickAdd"' in _ix,
+      "کادر ثبت دستی روی داشبورد اضافه شده")
+_t = _dc.get("/api/server_time").get_json()
+check(all(k in _t for k in ("server_time", "server_date", "iso")),
+      f"API ساعت سرور کار می‌کند ({_t.get('server_time')})")
+
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
 flask_app.app.config["TESTING"] = True
 client = flask_app.app.test_client()
 for route in ("/", "/history", "/plot_display", "/upload_dat",
-              "/api/sensor_data", "/paste", "/save_data"):
+              "/api/sensor_data", "/paste", "/save_data", "/api/server_time"):
     try:
         resp = client.get(route)
         check(resp.status_code == 200, f"{route} -> {resp.status_code}")

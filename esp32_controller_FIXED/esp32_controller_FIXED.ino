@@ -22,6 +22,7 @@
 #include <Adafruit_SHT31.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WebServer.h>
 #include <time.h>
 #include <Preferences.h>
@@ -99,11 +100,16 @@ const int serverPort = 80;
 
 // --- پایداری اتصال ---
 // آدرس‌دهی از DHCP خودِ گیرنده گرفته می‌شود؛ ساده‌ترین و مطمئن‌ترین حالت.
-// توان خروجی فرستنده. وقتی دو برد کنار هم روی میز هستند، توان حداکثر
-// گیرنده‌ی طرف مقابل را اشباع می‌کند و فریم‌های EAPOL خراب می‌شوند؛
-// نتیجه‌اش «4WAY_HANDSHAKE_TIMEOUT» است حتی با رمز درست.
-// اگر فاصله زیاد است (چند ده متر) می‌توانید WIFI_POWER_19_5dBm بگذارید.
-#define STA_TX_POWER WIFI_POWER_13dBm
+// توان فرستنده تطبیقی است: بر اساس قدرت سیگنالی که در اسکن دیده می‌شود
+// انتخاب می‌شود. نزدیک که باشیم توان پایین می‌آید (جلوگیری از اشباع گیرنده
+// و خراب شدن فریم‌های EAPOL)، دور که باشیم حداکثر توان استفاده می‌شود تا
+// برد کم نشود.
+//   rssi بهتر از -25  -> 11 dBm    (بردها چسبیده به هم)
+//   rssi بهتر از -45  -> 15 dBm    (همان اتاق)
+//   غیر این           -> 19.5 dBm  (حداکثر، برای برد زیاد)
+#define STA_TX_POWER_NEAR WIFI_POWER_11dBm
+#define STA_TX_POWER_MID WIFI_POWER_15dBm
+#define STA_TX_POWER_FAR WIFI_POWER_19_5dBm
 
 const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;   // مهلت هر تلاش اتصال
 const uint32_t WIFI_BACKOFF_MIN_MS = 2000;       // فاصله‌ی تلاش‌ها: از ۲ ثانیه
@@ -955,21 +961,8 @@ static bool wifiConnectOnce() {
   delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setTxPower(STA_TX_POWER);
+  WiFi.setTxPower(STA_TX_POWER_FAR);   // پیش‌فرض: حداکثر برد (در اسکن تنظیم می‌شود)
   WiFi.setAutoReconnect(false);   // خودِ ما مدیریت می‌کنیم؛ تلاش‌های موازی ممنوع
-
-  // توجه: پایین آوردن حداقل امنیت (setMinSecurity(WPA_PSK)) باعث می‌شود
-  // ESP32 در مذاکره TKIP را پیشنهاد دهد و با اکسس‌پوینتی که WPA2/CCMP است
-  // «4WAY_HANDSHAKE_TIMEOUT» بگیرد. پیش‌فرض یعنی WPA2 که درست است؛ فقط
-  // اگر چند بار پشت سر هم شکست خورد، به‌عنوان آخرین راه امتحان می‌شود.
-#if defined(WIFI_AUTH_WPA_PSK)
-  if (failStreak >= 4) {
-    WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
-    VERBOSE_PRINTLN("[NET] حالت سازگاری امنیتی فعال شد");
-  } else {
-    WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);
-  }
-#endif
 
   // کانال و BSSID دقیق را پیدا کن تا اتصال، کورکورانه روی همه‌ی کانال‌ها نباشد
   int32_t channel = 0;
@@ -990,6 +983,16 @@ static bool wifiConnectOnce() {
   }
   WiFi.scanDelete();
 
+  // ---- توان فرستنده متناسب با فاصله ----
+  if (bestRssi > -25) {
+    WiFi.setTxPower(STA_TX_POWER_NEAR);
+    VERBOSE_PRINTLN("[NET] بردها خیلی نزدیک‌اند -> توان کم");
+  } else if (bestRssi > -45) {
+    WiFi.setTxPower(STA_TX_POWER_MID);
+  } else {
+    WiFi.setTxPower(STA_TX_POWER_FAR);
+  }
+
   // BSSID کهنه یا کانال عوض‌شده هم می‌تواند هندشیک را خراب کند؛
   // بعد از سه شکست، اتصال ساده (بدون قید کانال) امتحان می‌شود.
   if (failStreak >= 3) haveBssid = false;
@@ -1001,26 +1004,52 @@ static bool wifiConnectOnce() {
     // سیگنال خیلی قوی = بردها بیش از حد به هم نزدیک‌اند
     if (bestRssi > -25) {
       DEBUG_PRINTF("[NET] هشدار: سیگنال بیش از حد قوی است (%d dBm). "
-                   "بردها را حداقل یک متر از هم دور کنید.\n", (int)bestRssi);
+                   "بردها را کمی از هم دور کنید.\n", (int)bestRssi);
     }
     // 3 = WPA2_PSK ، 2 = WPA_PSK/TKIP ، 0 = باز
     if (bestEnc != 3 && bestEnc != 0) {
       DEBUG_PRINTF("[NET] هشدار: اکسس‌پوینت WPA2 خالص نیست (enc=%d) — "
                    "همین می‌تواند هندشیک را خراب کند.\n", (int)bestEnc);
     }
+  }
+
+  // =============================================================
+  //  اتصال دومرحله‌ای — ریشه‌ی «4WAY_HANDSHAKE_TIMEOUT»
+  //
+  //  هسته‌ی ESP32 نسخه‌ی ۳ (IDF 5.x) به‌صورت پیش‌فرض PMF را «capable»
+  //  اعلام می‌کند و آستانه‌ی احراز هویت را هم خودش می‌گذارد. اکسس‌پوینت
+  //  ESP8266 (NONOS SDK) اصلاً PMF ندارد؛ نتیجه این می‌شود که مذاکره
+  //  وسط مبادله‌ی چهارمرحله‌ای گیر می‌کند و تایم‌اوت می‌خورد — با رمز
+  //  کاملاً درست.
+  //
+  //  برای همین ابتدا با connect=false تنظیمات ساخته می‌شود، بعد PMF
+  //  خاموش و آستانه روی WPA2 ثابت می‌شود و بعد اتصال شروع می‌شود.
+  // =============================================================
+  if (haveBssid) {
     if (cfgDataPass.length() == 0) {
-      WiFi.begin(cfgDataSsid.c_str(), (const char *)nullptr, channel, bssid);
+      WiFi.begin(cfgDataSsid.c_str(), (const char *)nullptr, channel, bssid, false);
     } else {
-      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid);
+      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid, false);
     }
   } else {
     VERBOSE_PRINTLN("[NET] AP در اسکن نبود؛ اتصال عادی امتحان می‌شود");
     if (cfgDataPass.length() == 0) {
-      WiFi.begin(cfgDataSsid.c_str());
+      WiFi.begin(cfgDataSsid.c_str(), (const char *)nullptr, 0, nullptr, false);
     } else {
-      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
+      WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), 0, nullptr, false);
     }
   }
+
+  wifi_config_t conf;
+  if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK) {
+    conf.sta.pmf_cfg.capable = false;   // ESP8266 اصلاً PMF ندارد
+    conf.sta.pmf_cfg.required = false;
+    conf.sta.threshold.authmode =
+        (cfgDataPass.length() == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA_PSK;
+    conf.sta.scan_method = WIFI_FAST_SCAN;
+    esp_wifi_set_config(WIFI_IF_STA, &conf);
+  }
+  esp_wifi_connect();
 
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) {

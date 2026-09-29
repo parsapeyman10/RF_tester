@@ -145,9 +145,13 @@ check("const uint8_t RELAY_MAX_ATTEMPTS = 3;" in esp32, "سیکل حداکثر �
 # ------------------------- 5b) پایداری وای‌فای
 check("WiFi.setSleep(false)" in esp32, "[ESP32] Modem-Sleep خاموش است")
 check("WiFi.setAutoReconnect(true)" in esp32, "[ESP32] اتصال مجدد خودکار فعال است")
-check("WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid)" in esp32,
-      "[ESP32] اتصال با کانال و BSSID دقیق انجام می‌شود (نه کورکورانه)")
-check("setMinSecurity" in esp32, "[ESP32] اکسس‌پوینت WPA/WPA2 مختلط هم پذیرفته می‌شود")
+check("channel, bssid, false)" in esp32,
+      "[ESP32] اتصال با کانال و BSSID دقیق و به‌صورت دومرحله‌ای انجام می‌شود")
+check("pmf_cfg.capable = false" in esp32,
+      "[ESP32] PMF خاموش است (ریشه‌ی 4WAY_HANDSHAKE_TIMEOUT با AP های ESP8266)")
+check("esp_wifi_connect()" in esp32, "[ESP32] اتصال بعد از اعمال تنظیمات شروع می‌شود")
+check("STA_TX_POWER_NEAR" in esp32 and "STA_TX_POWER_FAR" in esp32,
+      "[ESP32] توان فرستنده بر اساس فاصله تطبیقی است")
 check("WIFI_BACKOFF_MIN_MS" in esp32 and "WIFI_BACKOFF_MAX_MS" in esp32,
       "[ESP32] فاصله‌ی تلاش‌ها نمایی است (بدون شخم زدن شبکه)")
 check("struct LinkStats" in esp32, "[ESP32] آمار لینک نگه داشته می‌شود")

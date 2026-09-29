@@ -60,7 +60,6 @@
         
         input, select { background: #0f172a !important; border: 1px solid #334155 !important; color: white !important; }
     </style>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
 
@@ -172,21 +171,8 @@
 
         </div>
 
-        <!-- نمودار دیجیتال چهار سیگنال: OK = 1 ، NOK = 0 -->
-        <div class="glass-card rounded-2xl p-4 mt-6">
-            <div class="flex items-center justify-between mb-2">
-                <span class="text-sm font-bold text-emerald-400">سطح منطقی چهار سیگنال (۱ / ۰)</span>
-                <span class="text-[10px] text-slate-500">OK → 1 &nbsp;|&nbsp; NOK → 0</span>
-            </div>
-            <div id="logic-empty" class="text-center text-slate-500 text-sm py-16 hidden">
-                هنوز داده‌ای برای رسم نیست — اولین رکورد که برسد، نمودار ظاهر می‌شود.
-            </div>
-            <div id="logic-chart" class="w-full" style="height:420px"></div>
-        </div>
-
-        <!-- نمودار دما و رطوبت -->
         <div class="glass-card rounded-2xl overflow-hidden shadow-2xl mt-6">
-            <iframe id="plotIframe" src="/plot_display" class="w-full min-h-[900px] border-none bg-slate-900"></iframe>
+            <iframe id="plotIframe" src="/plot_display" class="w-full min-h-[500px] border-none bg-slate-900"></iframe>
         </div>
 
 
@@ -374,8 +360,6 @@
             const dateEl = document.getElementById('live-date');
             if(dateEl) dateEl.innerText = last.date || '----/--/--';
 
-            drawLogicChart();   // نمودار دیجیتال چهار سیگنال
-
             // چهار سطح منطقی: OK -> 1 ، NOK -> 0
             const st = last.nbcm_statuses || {};
             ['BCM1_OPEN','BCM1_CLOSE','BCM2_OPEN','BCM2_CLOSE'].forEach(key => {
@@ -389,64 +373,6 @@
         } catch (e) { console.error("Dashboard Sync Error:", e); }
     }
 
-    // ---------- نمودار دیجیتال چهار سیگنال روی داشبورد ----------
-    async function drawLogicChart() {
-        const box = document.getElementById('logic-chart');
-        const empty = document.getElementById('logic-empty');
-        if (!box) return;
-
-        try {
-            const rows = await (await fetch('/api/sensor_data')).json();
-            if (!Array.isArray(rows) || rows.length === 0) {
-                if (empty) empty.classList.remove('hidden');
-                box.style.display = 'none';
-                return;
-            }
-            if (empty) empty.classList.add('hidden');
-            box.style.display = '';
-
-            const x = rows.map(d => `${d.time}`);
-            const fields = ['BCM1_OPEN', 'BCM1_CLOSE', 'BCM2_OPEN', 'BCM2_CLOSE'];
-            const labels = ['BCM1 باز', 'BCM1 بسته', 'BCM2 باز', 'BCM2 بسته'];
-            const colors = ['#22c55e', '#10b981', '#eab308', '#f97316'];
-            const axes = ['y', 'y2', 'y3', 'y4'];
-            const domains = [[0.78, 1], [0.52, 0.74], [0.26, 0.48], [0, 0.22]];
-
-            const traces = fields.map((f, i) => ({
-                x,
-                y: rows.map(d => (d.nbcm_statuses && d.nbcm_statuses[f] === 'active') ? 1 : 0),
-                name: labels[i], type: 'scatter', mode: 'lines+markers',
-                line: { shape: 'hv', width: 2, color: colors[i] },
-                marker: { size: 4, color: colors[i] },
-                yaxis: axes[i],
-                hovertemplate: labels[i] + ': %{y}<extra></extra>'
-            }));
-
-            const layout = {
-                paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-                font: { color: '#94a3b8', size: 10, family: 'Tahoma' },
-                margin: { l: 90, r: 15, t: 10, b: 35 },
-                showlegend: false,
-                xaxis: { gridcolor: '#1e293b', tickangle: -45 }
-            };
-            fields.forEach((f, i) => {
-                layout[i === 0 ? 'yaxis' : 'yaxis' + (i + 1)] = {
-                    domain: domains[i], range: [-0.15, 1.15],
-                    tickvals: [0, 1], ticktext: ['0', '1'],
-                    gridcolor: '#1e293b', zeroline: false, fixedrange: true,
-                    title: { text: labels[i], font: { size: 10, color: colors[i] } }
-                };
-            });
-
-            Plotly.react('logic-chart', traces, layout, { responsive: true, displayModeBar: false });
-        } catch (e) {
-            console.error('Logic chart error:', e);
-            if (empty) {
-                empty.textContent = 'خطا در رسم نمودار: ' + e;
-                empty.classList.remove('hidden');
-            }
-        }
-    }
 
     document.getElementById('applySerialConfig').onclick = async () => {
         const port = portSelect.value;

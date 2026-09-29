@@ -273,9 +273,9 @@ _idx = _c3.get("/").get_data(as_text=True)
 check("lvl-BCM1_OPEN" in _idx and "lvl-BCM2_CLOSE" in _idx,
       "داشبورد چهار سطح منطقی را دارد")
 check("سطح منطقی" in _idx, "عنوان «سطح منطقی» در داشبورد هست")
-check('id="logic-chart"' in _idx and "drawLogicChart()" in _idx,
-      "نمودار دیجیتال روی خود داشبورد رسم می‌شود")
-check("plot.ly/plotly" in _idx, "کتابخانه‌ی رسم در داشبورد بارگذاری می‌شود")
+check("logic-chart" not in _idx, "پنجره‌ی اضافه‌ی نمودار روی داشبورد اضافه نشده")
+check("st[key] === 'active'" in _idx and "'1' : '0'" in _idx,
+      "پنل کنار دما/رطوبت مقدار ۱ یا ۰ را از وضعیت واقعی می‌سازد")
 
 _hist = _c3.get("/history?date=2026-01-05").get_data(as_text=True)
 check("سطح منطقی" in _hist, "ستون سطح منطقی در آرشیو هست")

@@ -340,11 +340,20 @@ bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void wifiService();
+void handleSerialCommands();
 void waitForDataLink(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void scanForDataAp();
 static const char *wifiReasonText(uint8_t reason);
 void saveToSD(const WifiData &data);
+
+/** نتیجه‌ی پاک‌سازی کارت حافظه */
+struct SdEraseResult {
+  bool ok = false;
+  uint32_t files = 0;
+  uint32_t bytes = 0;
+};
+SdEraseResult eraseSdData();
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
 static uint32_t readUploadPos(const String &datPath);
@@ -641,6 +650,10 @@ input{width:100%;padding:10px;border-radius:8px;border:1px solid #22304a;backgro
 <button class="ghost" onclick="scanWifi()">اسکن شبکه‌های اطراف</button>
 <div id="scan"><small></small></div></div>
 
+<div class="card"><h2>کارت حافظه</h2>
+<small id="sdinfo">پاک کردن همه‌ی رکوردهای ذخیره‌شده روی کارت. برگشت‌ناپذیر است.</small>
+<button class="ghost" onclick="formatSd()">پاک‌سازی کارت حافظه</button></div>
+
 <div class="card"><h2>حالت کاری</h2>
 <button onclick="mode(0)">شروع کار عادی (تست رله‌ها)</button>
 <button class="ghost" onclick="mode(1)">حالت نمایش دیتا (بدون تست)</button></div>
@@ -672,6 +685,12 @@ function scanWifi(){
   document.getElementById('scan').innerHTML='<small>در حال اسکن…</small>';
   fetch('/scan').then(r=>r.text()).then(t=>{
     document.getElementById('scan').innerHTML='<small>'+t+'</small>';});}
+function formatSd(){
+  if(!confirm('همه‌ی رکوردهای روی کارت حافظه پاک می‌شوند. مطمئن هستید؟'))return;
+  document.getElementById('sdinfo').textContent='در حال پاک‌سازی…';
+  fetch('/formatsd?confirm=YES').then(r=>r.text()).then(t=>{
+    document.getElementById('sdinfo').textContent=t;
+    document.getElementById('msg').innerHTML='<span class="ok">'+t+'</span>';});}
 function loadCfg(){fetch('/cfg').then(r=>r.json()).then(c=>{
   document.getElementById('dssid').value=c.dssid; document.getElementById('tssid').value=c.tssid;});}
 cur(); loadCfg(); sendNow();  // ارسال خودکار ساعت گوشی به محض باز شدن صفحه
@@ -735,6 +754,24 @@ void handlePortalScan() {
   setupServer.send(200, "text/html; charset=utf-8", out);
 }
 
+void handlePortalFormatSd() {
+  if (setupServer.arg("confirm") != "YES") {
+    setupServer.send(400, "text/plain; charset=utf-8", "تأیید لازم است");
+    return;
+  }
+
+  SdEraseResult r = eraseSdData();
+  char msg[160];
+  if (r.ok) {
+    snprintf(msg, sizeof(msg),
+             "کارت پاک شد: %u فایل (%u کیلوبایت). شماره‌ی رکورد از ۱ شروع می‌شود.",
+             (unsigned)r.files, (unsigned)(r.bytes / 1024));
+  } else {
+    snprintf(msg, sizeof(msg), "پاک‌سازی ناموفق بود (کارت مشغول یا در دسترس نیست)");
+  }
+  setupServer.send(r.ok ? 200 : 500, "text/plain; charset=utf-8", msg);
+}
+
 void handlePortalMode() {
   int m = setupServer.arg("v").toInt();
   portalWantsDataView = (m == 1);
@@ -760,6 +797,7 @@ void runSetupPortal(bool timeAlreadyValid) {
   setupServer.on("/cfg", handlePortalCfg);
   setupServer.on("/savewifi", handlePortalSaveWifi);
   setupServer.on("/scan", handlePortalScan);
+  setupServer.on("/formatsd", handlePortalFormatSd);
   setupServer.onNotFound(handlePortalRoot);  // Captive-portal-ish
   setupServer.begin();
 
@@ -922,6 +960,38 @@ static bool wifiConnectOnce() {
  * سرویس لینک — هر بار که تسک شبکه بیدار می‌شود صدا زده می‌شود.
  * هم در حالت عادی و هم وسط سیکل رله اجرا می‌شود (به SD دست نمی‌زند).
  */
+/**
+ * فرمان‌های سریال (در ترمینال Arduino تایپ کنید و Enter بزنید):
+ *     FORMAT SD    -> پاک‌سازی کامل کارت حافظه
+ *     STATUS       -> نمایش وضعیت لحظه‌ای
+ */
+void handleSerialCommands() {
+  static String buf;
+
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+
+    if (c == '\n') {
+      buf.trim();
+      if (buf.equalsIgnoreCase("FORMAT SD")) {
+        Serial.println("[CMD] پاک‌سازی کارت حافظه ...");
+        eraseSdData();
+      } else if (buf.equalsIgnoreCase("STATUS")) {
+        Serial.printf("[CMD] مرحله=%s | wifi=%s | رکورد بعدی=%d | heap=%uk\n",
+                      relayPhaseText,
+                      WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+                      currentGlobalID + 1, (unsigned)(ESP.getFreeHeap() / 1024));
+      } else if (buf.length()) {
+        Serial.println("[CMD] فرمان‌ها: FORMAT SD | STATUS");
+      }
+      buf = "";
+    } else if (buf.length() < 40) {
+      buf += c;
+    }
+  }
+}
+
 void wifiService() {
   if (WiFi.status() == WL_CONNECTED) {
     if (wifiLink.upSinceMs == 0) {
@@ -1510,6 +1580,69 @@ static int lastRecordIdOnSD() {
  *   ۳) شکست‌های پیاپی شمرده می‌شوند؛ ناظر سلامت بعد از SD_FAIL_LIMIT بار
  *      برد را ری‌استارت می‌کند
  */
+// =====================================================================
+//                    پاک‌سازی (فرمت) کارت حافظه
+//
+//  توجه: کتابخانه‌ی SD در هسته‌ی ESP32 «فرمت واقعی FAT» ندارد. کاری که
+//  اینجا انجام می‌شود پاک کردن کامل محتواست: همه‌ی فایل‌های پوشه‌ی /data،
+//  فایل آفست‌ها و شمارنده‌ی شماره‌ی رکورد. نتیجه از نظر کاربردی همان
+//  «کارت خالی» است. اگر واقعاً فرمت سطح‌پایین لازم دارید، کارت را روی
+//  کامپیوتر با FAT32 فرمت کنید.
+//
+//  ایمنی: فقط با تأیید صریح اجرا می‌شود و در حین اجرا قفل SD گرفته
+//  می‌شود تا با نوشتن رکوردها تداخل نکند.
+// =====================================================================
+SdEraseResult eraseSdData() {
+  SdEraseResult res;
+
+  if (!xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(5000))) {
+    Serial.println("[SD] پاک‌سازی انجام نشد: کارت مشغول است");
+    return res;
+  }
+
+  Serial.println("[SD] شروع پاک‌سازی کارت حافظه ...");
+
+  // ۱) همه‌ی فایل‌های پوشه‌ی داده
+  File root = SD.open("/data");
+  if (root) {
+    File e = root.openNextFile();
+    while (e) {
+      String path = String(e.name());
+      if (!path.startsWith("/")) path = "/data/" + path;
+      uint32_t sz = e.size();
+      e.close();
+
+      if (SD.remove(path)) {
+        res.files++;
+        res.bytes += sz;
+      } else {
+        Serial.printf("[SD] حذف نشد: %s\n", path.c_str());
+      }
+      e = root.openNextFile();
+    }
+    root.close();
+  }
+
+  // ۲) شمارنده‌ی شماره‌ی رکورد
+  if (SD.exists("/last_id.txt") && SD.remove("/last_id.txt")) res.files++;
+
+  // ۳) ساخت دوباره‌ی ساختار پوشه‌ها
+  if (!SD.exists("/data")) SD.mkdir("/data");
+
+  // ۴) شماره‌گذاری از صفر
+  currentGlobalID = 0;
+  saveNextPersistentID(0);
+  sdWriteFailures = 0;
+
+  res.ok = true;
+  xSemaphoreGive(xSDMutex);
+
+  Serial.printf("[SD] پاک‌سازی تمام شد: %u فایل (%u کیلوبایت) حذف شد، "
+                "شماره‌ی رکورد از ۱ شروع می‌شود\n",
+                (unsigned)res.files, (unsigned)(res.bytes / 1024));
+  return res;
+}
+
 void saveToSD(const WifiData &data) {
   String path = dayFilePath(data.Year, data.Month, data.Day);
 
@@ -1606,6 +1739,7 @@ void TaskInternalWiFiConnection(void *pv) {
 
   for (;;) {
     hbNet++;
+    handleSerialCommands();   // FORMAT SD / STATUS
     int mode = (xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)
                  ? MODE_HOTSPOT_VIEW
                  : MODE_CLIENT_UPLOAD;
@@ -1805,6 +1939,18 @@ void TaskInternalWiFiConnection(void *pv) {
                   remote.println("END");
                   xSemaphoreGive(xSDMutex);
                 }
+              } else if (cmd.equalsIgnoreCase("format")) {
+                remote.println("ERR:CONFIRM  (برای پاک‌سازی بنویسید: format CONFIRM)");
+                remote.println("END");
+              } else if (cmd.equalsIgnoreCase("format CONFIRM")) {
+                SdEraseResult r = eraseSdData();
+                if (r.ok) {
+                  remote.printf("SD_ERASED files=%u kb=%u\n",
+                                (unsigned)r.files, (unsigned)(r.bytes / 1024));
+                } else {
+                  remote.println("ERR:SD_BUSY");
+                }
+                remote.println("END");
               } else if (cmd.equalsIgnoreCase("info")) {
                 rtc.read();
                 remote.printf("DEVICE=RF_TESTER,FW=2.2,TIME=%s,HEAP=%u\n",

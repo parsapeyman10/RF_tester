@@ -209,7 +209,8 @@ ORDER = ["NUM=", "BCM1_OPEN=", "BCM1_CLOSE=", "BCM2_OPEN=", "BCM2_CLOSE=",
          "Temp=", "Humidity=", "Date=", "Time="]
 
 # لایه ۱: snprintf فریمور ESP32
-_esp32_fmt = esp32.split("void formatRecordLine(")[1][:900]
+# [2] یعنی بعد از «تعریف» تابع، نه پروتوتایپ
+_esp32_fmt = esp32.split("void formatRecordLine(")[2][:900]
 check(field_order(_esp32_fmt, ORDER) == ORDER,
       f"[ESP32] ترتیب فیلدهای خروجی درست است ({field_order(_esp32_fmt, ORDER)})")
 

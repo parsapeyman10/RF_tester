@@ -42,12 +42,49 @@ def _resolve_templates():
 
 
 # =====================================================================
-#  تعداد کانال‌های BCM — تنها جای تعریف
-#  سخت‌افزار دو دستگاه دارد (BCM1 و BCM2). فریمور به‌دلیل سازگاری با
-#  پروتکل ۱۳ فیلدی همچنان NBCM3/NBCM4 را با مقدار NOK می‌فرستد، ولی
-#  هیچ‌وقت وارد دیتابیس یا رابط کاربری نمی‌شوند.
+#  نتیجه‌ی تست — تنها جای تعریف
+#
+#  سخت‌افزار دو دستگاه دارد (BCM1 و BCM2) و هر سیکل برای هر دستگاه دو
+#  نتیجه‌ی جدا تولید می‌کند: «باز شد» و «بسته شد».
+#
+#      فیلد پروتکل   معنی واقعی
+#      -----------   ----------------
+#      NBCM1         BCM1 - باز شدن
+#      NBCM2         BCM1 - بسته شدن
+#      NBCM3         BCM2 - باز شدن
+#      NBCM4         BCM2 - بسته شدن
+#
+#  فرمت روی سیم دست‌نخورده (۱۳ فیلد) می‌ماند؛ فقط معنی فیلدها صریح شد.
 # =====================================================================
-NBCM_CHANNELS = ("NBCM1", "NBCM2")
+NBCM_CHANNELS = ("NBCM1", "NBCM2", "NBCM3", "NBCM4")
+
+# (فیلد پروتکل، نام دستگاه، نوع حرکت، برچسب فارسی)
+RESULT_MAP = (
+    ("NBCM1", "BCM1", "open",  "BCM1 باز شدن"),
+    ("NBCM2", "BCM1", "close", "BCM1 بسته شدن"),
+    ("NBCM3", "BCM2", "open",  "BCM2 باز شدن"),
+    ("NBCM4", "BCM2", "close", "BCM2 بسته شدن"),
+)
+
+DEVICES = ("BCM1", "BCM2")
+
+
+def build_bcm_results(nbcm_selected):
+    """
+    از رشته‌ی ذخیره‌شده، نتیجه‌ی تفکیکی هر دستگاه را می‌سازد:
+
+        {"BCM1": {"open": True, "close": False, "ok": False}, "BCM2": {...}}
+
+    ok یعنی هم باز شدن و هم بسته شدن تأیید شده‌اند.
+    """
+    selected = set((nbcm_selected or "").split(","))
+    out = {dev: {"open": False, "close": False, "ok": False} for dev in DEVICES}
+    for field, dev, motion, _label in RESULT_MAP:
+        if field in selected:
+            out[dev][motion] = True
+    for dev in DEVICES:
+        out[dev]["ok"] = out[dev]["open"] and out[dev]["close"]
+    return out
 
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
@@ -349,8 +386,8 @@ def parse_industrial_line(line):
         return None
     g = m.groupdict()
     try:
-        # فقط دو کانال واقعی ثبت می‌شوند؛ n3/n4 در پروتکل هستند ولی رزروند
-        nbcm = [f"NBCM{i}" for i in (1, 2)
+        # هر چهار فیلد معنی دارند: باز/بسته برای هر یک از دو دستگاه
+        nbcm = [f"NBCM{i}" for i in (1, 2, 3, 4)
                 if g[f"n{i}"].strip().upper() in TRUE_TOKENS]
         date_str = "%04d-%02d-%02d" % (int(g["y"]), int(g["mo"]), int(g["d"]))
         time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
@@ -478,11 +515,12 @@ def upload_dat_page():
                             hum_str = str(hum_val_float) # <--- فیکس اصلی اینجاست
                         
                         # لاژیک NBCM
-                        # data[5] و data[6] در ساختار باینری رزروند و
-                        # عمداً خوانده نمی‌شوند (سیستم دو کاناله است)
+                        # چهار نتیجه‌ی تفکیکی: باز/بسته برای هر دستگاه
                         nbcm_list = []
-                        if data[3]: nbcm_list.append('NBCM1')
-                        if data[4]: nbcm_list.append('NBCM2')
+                        if data[3]: nbcm_list.append('NBCM1')   # BCM1 باز
+                        if data[4]: nbcm_list.append('NBCM2')   # BCM1 بسته
+                        if data[5]: nbcm_list.append('NBCM3')   # BCM2 باز
+                        if data[6]: nbcm_list.append('NBCM4')   # BCM2 بسته
                         nbcm_str = ",".join(nbcm_list)
 
                         # زمان سنسور
@@ -611,7 +649,9 @@ def history():
         # حالت پیش‌فرض: نمایش تمام داده‌ها از مستر
         readings = MasterReading.query.order_by(MasterReading.timestamp.desc()).all()
 
-    return render_template('history.html', readings=readings, label=label, dates=available_dates, current_date=target_date)
+    return render_template('history.html', readings=readings, label=label,
+                           dates=available_dates, current_date=target_date,
+                           bcm_results=build_bcm_results)
 
 @app.route('/submit_form', methods=['POST'])
 def submit_form():
@@ -649,7 +689,8 @@ def get_sensor_data():
                 'time': r.time,       # زمان دستگاه
                 'date': r.date,       # تاریخ دستگاه
                 'timestamp': r.timestamp, # زمان آپلود (صرفا جهت اطلاع)
-                'nbcm_statuses': nbcm_map
+                'nbcm_statuses': nbcm_map,
+                'bcm_results': build_bcm_results(r.nbcm_selected)
             })
             
         return jsonify(output)
@@ -701,6 +742,7 @@ def get_master_data():
             'humidity': r.humidity,
             'timestamp': iso_timestamp,  # <--- این متغیر کلیدی است
             'nbcm_statuses': nbcm_map,
+            'bcm_results': build_bcm_results(r.nbcm_selected),
             'date': r.date
         })
 
@@ -795,7 +837,10 @@ def export_excel():
     target_date = request.args.get('date')
     si = io.StringIO()
     cw = csv.writer(si)
-    cw.writerow(['ID', 'NUM', 'NBCM', 'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
+    cw.writerow(['ID', 'NUM',
+                 'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
+                 'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
+                 'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
     if target_date:
@@ -803,7 +848,16 @@ def export_excel():
     recs = query.order_by(MasterReading.timestamp.desc()).all()
     
     for r in recs:
-        cw.writerow([r.id, r.num_value, r.nbcm_selected, r.temp, r.humidity, r.time, r.date, r.timestamp])
+        res = build_bcm_results(r.nbcm_selected)
+        cw.writerow([
+            r.id, r.num_value,
+            'OK' if res['BCM1']['open'] else 'NOK',
+            'OK' if res['BCM1']['close'] else 'NOK',
+            'OK' if res['BCM1']['ok'] else 'NOK',
+            'OK' if res['BCM2']['open'] else 'NOK',
+            'OK' if res['BCM2']['close'] else 'NOK',
+            'OK' if res['BCM2']['ok'] else 'NOK',
+            r.temp, r.humidity, r.time, r.date, r.timestamp])
     
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report.csv"})
 
@@ -876,7 +930,8 @@ def get_sensor_data_api():
                 'humidity': r.humidity,
                 'timestamp': real_sensor_time, # ارسال زمان سنسور به جای زمان ثبت
                 'created_at': r.timestamp,     # زمان ثبت (اگر جایی نیاز شد)
-                'nbcm_statuses': parse_nbcm(r.nbcm_selected)
+                'nbcm_statuses': parse_nbcm(r.nbcm_selected),
+                'bcm_results': build_bcm_results(r.nbcm_selected)
             })
             
         return jsonify(data)

@@ -1052,8 +1052,9 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
  * کل سیکل حداکثر ۳ بار تکرار می‌شود. اگر بعد از یک سیکل هر دو دستگاه هم باز
  * شدن و هم بسته شدن را تأیید کرده باشند، تکرار بعدی انجام نمی‌شود.
  */
-static void runTestCycle(bool result[DEVICE_COUNT]) {
-  bool got[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
+static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
+  for (int p = 0; p < PHASE_COUNT; p++)
+    for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
 
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
     DEBUG_PRINTF("\n[TEST] ===== سیکل %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
@@ -1087,7 +1088,6 @@ static void runTestCycle(bool result[DEVICE_COUNT]) {
     }
   }
 
-  for (int d = 0; d < DEVICE_COUNT; d++) result[d] = deviceDone(got, d);
 }
 
 void TaskRelayControl(void *pv) {
@@ -1108,10 +1108,9 @@ void TaskRelayControl(void *pv) {
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
-    bool result[DEVICE_COUNT] = { false, false };
-
-    // یک سیکل: رله۱ + مانیتورینگ هر دو BCM ، سپس رله۲ + مانیتورینگ هر دو BCM
-    runTestCycle(result);
+    // نتیجه‌ی تفکیکی: برای هر دستگاه، هم «باز شد» و هم «بسته شد»
+    bool got[PHASE_COUNT][DEVICE_COUNT];
+    runTestCycle(got);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -1122,19 +1121,25 @@ void TaskRelayControl(void *pv) {
     if (xSemaphoreTake(xGlobalStateMutex, pdMS_TO_TICKS(1000))) {
       currentGlobalID++;
       globalSystemState.NUM = currentGlobalID;
-      globalSystemState.NBCM1 = result[0];
-      globalSystemState.NBCM2 = result[1];
-      globalSystemState.NBCM3 = false;   // رزرو
-      globalSystemState.NBCM4 = false;   // رزرو
+      // نگاشت چهار فیلد پروتکل به چهار نتیجه‌ی تفکیکی این سیکل:
+      //   NBCM1 = BCM1 باز شد     NBCM2 = BCM1 بسته شد
+      //   NBCM3 = BCM2 باز شد     NBCM4 = BCM2 بسته شد
+      globalSystemState.NBCM1 = got[PHASE_OPEN][0];
+      globalSystemState.NBCM2 = got[PHASE_CLOSE][0];
+      globalSystemState.NBCM3 = got[PHASE_OPEN][1];
+      globalSystemState.NBCM4 = got[PHASE_CLOSE][1];
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
       xSemaphoreGive(xGlobalStateMutex);
 
-      DEBUG_PRINTF("[CYCLE] #%d  %s=%s  %s=%s  T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
+      DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
+                   "T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
                    DEVICE_NAMES[0], snapshot.NBCM1 ? "OK" : "NOK",
-                   DEVICE_NAMES[1], snapshot.NBCM2 ? "OK" : "NOK",
+                                    snapshot.NBCM2 ? "OK" : "NOK",
+                   DEVICE_NAMES[1], snapshot.NBCM3 ? "OK" : "NOK",
+                                    snapshot.NBCM4 ? "OK" : "NOK",
                    snapshot.Temp, snapshot.Hum,
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);

@@ -239,15 +239,16 @@
                 
                 Plotly.newPlot('main-chart', envTraces, {...layoutBase, title: chartTitle}, {responsive: true});
 
-                // 2. نمودار وضعیت لاژیک (فقط NBCM1 و NBCM2)
-                const nbcms = ['NBCM1', 'NBCM2'];
-                const colors = ['#22c55e', '#eab308']; 
+                // 2. نمودار نتیجه‌ی تست: باز/بسته برای هر دستگاه
+                const nbcms = ['NBCM1', 'NBCM2', 'NBCM3', 'NBCM4'];
+                const nbcmLabels = ['BCM1 باز', 'BCM1 بسته', 'BCM2 باز', 'BCM2 بسته'];
+                const colors = ['#22c55e', '#16a34a', '#eab308', '#ca8a04'];
                 const nTraces = nbcms.map((name, i) => {
-                    const base = (1 - i) * 2; 
+                    const base = (nbcms.length - 1 - i) * 2;
                     return {
                         x: xLabels,
                         y: data.map(d => d.nbcm_statuses[name] === 'active' ? (base + 1) : base),
-                        name: name, type: 'scatter', mode: 'lines',
+                        name: nbcmLabels[i], type: 'scatter', mode: 'lines',
                         line: { shape: 'hv', width: 2, color: colors[i] }, connectgaps: true
                     };
                 });
@@ -260,7 +261,7 @@
                 });
 
                 Plotly.newPlot('nbcm-chart', nTraces, {
-                    ...layoutBase, title: 'وضعیت دیجیتال (NBCM 1-2)',
+                    ...layoutBase, title: 'نتیجه‌ی تست (باز / بسته برای هر BCM)',
                     yaxis: { tickvals: tickVals, ticktext: tickTexts, gridcolor: '#334155', range: [-0.5, 3.5], fixedrange: true },
                     showlegend: false
                 }, {responsive: true});

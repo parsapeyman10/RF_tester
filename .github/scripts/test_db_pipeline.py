@@ -80,8 +80,13 @@ LINE2 = ("NUM=43,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,"
 print("\n[1] پارس و ذخیره‌ی یک خط استاندارد")
 payload = flask_app.parse_industrial_line(LINE)
 check(payload is not None, "خط استاندارد پارس شد")
-check(payload and payload["nbcm"] == ["NBCM1"],
-      f"فقط کانال‌های واقعی ثبت می‌شوند، NBCM3/4 نادیده گرفته شد ({payload['nbcm'] if payload else None})")
+check(payload and payload["nbcm"] == ["NBCM1", "NBCM3"],
+      f"چهار نتیجه‌ی تفکیکی پارس شد ({payload['nbcm'] if payload else None})")
+_res = flask_app.build_bcm_results(",".join(payload["nbcm"])) if payload else {}
+check(_res.get("BCM1") == {"open": True, "close": False, "ok": False},
+      f"BCM1: باز شد ولی بسته نشد -> ok=False ({_res.get('BCM1')})")
+check(_res.get("BCM2") == {"open": True, "close": False, "ok": False},
+      f"BCM2: باز شد ولی بسته نشد ({_res.get('BCM2')})")
 with flask_app.app.app_context():
     flask_app.save_sensor_data(payload)
 check(master_count() == 1, "یک رکورد در master ثبت شد")
@@ -136,20 +141,22 @@ idx = [r[1] for r in conn.execute("PRAGMA index_list(daily_records)").fetchall()
 conn.close()
 check("uq_daily_record" in idx, f"ایندکس یکتا ساخته شد (ایندکس‌ها: {idx})")
 
-print("\n[7b] سیستم دو کاناله: NBCM3 و NBCM4 هیچ‌جا ذخیره نمی‌شوند")
-with flask_app.app.app_context():
-    rows = flask_app.db.session.query(flask_app.MasterReading.nbcm_selected).all()
-joined = " ".join(r[0] or "" for r in rows)
-check("NBCM3" not in joined and "NBCM4" not in joined,
-      f"ستون nbcm_selected فقط کانال‌های واقعی دارد ({joined!r})")
-check(tuple(flask_app.NBCM_CHANNELS) == ("NBCM1", "NBCM2"),
-      "تعریف واحد کانال‌ها دو تایی است")
-check(set(flask_app.parse_nbcm("NBCM1,NBCM2").keys()) == {"NBCM1", "NBCM2"},
-      "parse_nbcm فقط دو کلید برمی‌گرداند")
+print("\n[7b] دو دستگاه، هرکدام دو نتیجه (باز / بسته)")
+check(len(flask_app.DEVICES) == 2, "دو دستگاه تعریف شده است")
+full = flask_app.build_bcm_results("NBCM1,NBCM2,NBCM3,NBCM4")
+check(full["BCM1"] == {"open": True, "close": True, "ok": True}, "BCM1 کامل OK")
+check(full["BCM2"] == {"open": True, "close": True, "ok": True}, "BCM2 کامل OK")
+half = flask_app.build_bcm_results("NBCM1,NBCM4")
+check(half["BCM1"]["open"] and not half["BCM1"]["close"] and not half["BCM1"]["ok"],
+      "BCM1 فقط باز شد -> ناقص")
+check(half["BCM2"]["close"] and not half["BCM2"]["open"] and not half["BCM2"]["ok"],
+      "BCM2 فقط بسته شد -> ناقص")
+none = flask_app.build_bcm_results("")
+check(none["BCM1"] == {"open": False, "close": False, "ok": False}, "بدون فیدبک همه NOK")
 
 print("\n[7c] مرجع زمان، RTC دستگاه است (نه ساعت سرور)")
 _blob = struct.pack("<iff????iBBBBB", 777, 22.00, 43.00,
-                    True, False, False, False, 2026, 3, 9, 7, 45, 12)
+                    True, True, True, False, 2026, 3, 9, 7, 45, 12)
 import io as _io
 _resp = _c_dat = flask_app.app.test_client().post(
     "/upload_dat",
@@ -164,6 +171,9 @@ if rec:
           f"تاریخ و ساعت از RTC خوانده شد ({rec.date} {rec.time})")
     check(rec.timestamp.strftime("%Y-%m-%d %H:%M:%S") == "2026-03-09 07:45:12",
           f"timestamp هم زمان RTC است نه زمان آپلود سرور ({rec.timestamp})")
+    _r = flask_app.build_bcm_results(rec.nbcm_selected)
+    check(_r["BCM1"]["ok"] and _r["BCM2"]["open"] and not _r["BCM2"]["close"],
+          f"چهار نتیجه از فایل باینری درست خوانده شد ({rec.nbcm_selected})")
 
 print("\n[8] مسیر واحد دیتا: /api/ingest (همان چیزی که گوشی و دسکتاپ می‌فرستند)")
 flask_app.app.config["TESTING"] = True

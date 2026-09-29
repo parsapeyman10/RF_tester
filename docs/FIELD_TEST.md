@@ -198,7 +198,7 @@ curl -X POST http://127.0.0.1:5000/api/ingest -H "Content-Type: application/json
 
 | راه | چطور |
 |---|---|
-| **ترمینال Arduino** | در کادر بالای Serial Monitor بنویسید `FORMAT SD` و Enter |
+| **ترمینال Arduino** | در کادر بالای Serial Monitor بنویسید `FORMAT` و Enter |
 | **پورتال SetClock** | کارت «کارت حافظه» → دکمه‌ی «پاک‌سازی کارت حافظه» |
 | **حالت دیتا (TCP)** | دستور `format CONFIRM` |
 

@@ -377,8 +377,8 @@ volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
 volatile uint32_t wifiDropCount = 0;   // چند بار لینک قطع شده
 volatile uint8_t lastDropReason = 0;   // آخرین دلیل قطعی
 const char *relayPhaseText = "بوت";    // الان در چه مرحله‌ای هستیم
-volatile uint32_t sdWriteFailures = 0; // شکست‌های پیاپی نوشتن روی SD
-const uint32_t SD_FAIL_LIMIT = 5;      // بعد از این تعداد، ری‌استارت
+volatile uint32_t writeFailures = 0; // شکست‌های پیاپی نوشتن روی SD
+const uint32_t WRITE_FAIL_LIMIT = 5;      // بعد از این تعداد، ری‌استارت
 uint32_t lastTxMillis = 0;             // آخرین باری که چیزی روی سوکت فرستادیم
 
 // Prototypes
@@ -398,22 +398,22 @@ static const char *wifiReasonText(uint8_t reason);
 static bool mountInternalFs();
 bool initStorage();
 void probeSdCard();
-void saveToSD(const WifiData &data);
+void saveRecord(const WifiData &data);
 
 /** نتیجه‌ی پاک‌سازی کارت حافظه */
-struct SdEraseResult {
+struct EraseResult {
   bool ok = false;
   uint32_t files = 0;
   uint32_t bytes = 0;
 };
-SdEraseResult eraseSdData();
+EraseResult eraseStorage();
 static String dayFilePath(int y, int m, int d);
 static String posPathOf(const String &datPath);
 static uint32_t readUploadPos(const String &datPath);
 static void writeUploadPos(const String &datPath, uint32_t pos);
 static String baseNameOf(const char *rawName);
 static String pickDayFile(bool oldest);
-static int lastRecordIdOnSD();
+static int lastRecordIdStored();
 void formatRecordLine(const WifiData &d, char *out, size_t outSize);
 void sendRecord(WiFiClient &cl, const WifiData &d);
 int getNextPersistentID();
@@ -458,10 +458,10 @@ void setup() {
       // مدل ذخیره‌سازی بهینه: به‌جای «یک فایل برای هر رکورد»، هر روز یک فایل
       // /data/YYYYMMDD.dat که رکوردهای ۲۵ بایتی پشت سر هم به آن append می‌شوند.
       // آخرین شماره‌ی رکورد = NUM آخرین رکورد جدیدترین فایل.
-      currentGlobalID = lastRecordIdOnSD();
+      currentGlobalID = lastRecordIdStored();
       int lastSaved = getNextPersistentID();
       if (lastSaved > currentGlobalID) currentGlobalID = lastSaved;
-      DEBUG_PRINTF("[SD] Resuming from ID %d\n", currentGlobalID);
+      DEBUG_PRINTF("[STORE] Resuming from ID %d\n", currentGlobalID);
       saveNextPersistentID(currentGlobalID);
     }
     xSemaphoreGive(xSDMutex);
@@ -812,7 +812,7 @@ void handlePortalFormatSd() {
     return;
   }
 
-  SdEraseResult r = eraseSdData();
+  EraseResult r = eraseStorage();
   char msg[160];
   if (r.ok) {
     snprintf(msg, sizeof(msg),
@@ -1134,7 +1134,7 @@ static bool wifiConnectOnce() {
  */
 /**
  * فرمان‌های سریال (در ترمینال Arduino تایپ کنید و Enter بزنید):
- *     FORMAT SD    -> پاک‌سازی کامل کارت حافظه
+ *     FORMAT       -> پاک‌سازی کامل حافظه‌ی فعال (SD یا داخلی)
  *     STATUS       -> نمایش وضعیت لحظه‌ای
  */
 void handleSerialCommands() {
@@ -1146,9 +1146,9 @@ void handleSerialCommands() {
 
     if (c == '\n') {
       buf.trim();
-      if (buf.equalsIgnoreCase("FORMAT SD")) {
-        Serial.println("[CMD] پاک‌سازی کارت حافظه ...");
-        eraseSdData();
+      if (buf.equalsIgnoreCase("FORMAT SD") || buf.equalsIgnoreCase("FORMAT")) {
+        Serial.printf("[CMD] پاک‌سازی %s ...\n", storageName());
+        eraseStorage();
       } else if (buf.equalsIgnoreCase("STATUS")) {
         Serial.printf("[CMD] مرحله=%s | wifi=%s | حافظه=%s | رکورد بعدی=%d | heap=%uk\n",
                       relayPhaseText,
@@ -1156,7 +1156,7 @@ void handleSerialCommands() {
                       storageName(),
                       currentGlobalID + 1, (unsigned)(ESP.getFreeHeap() / 1024));
       } else if (buf.length()) {
-        Serial.println("[CMD] فرمان‌ها: FORMAT SD | STATUS");
+        Serial.println("[CMD] فرمان‌ها: FORMAT | STATUS");
       }
       buf = "";
     } else if (buf.length() < 40) {
@@ -1499,10 +1499,10 @@ void TaskRelayControl(void *pv) {
         // صف پر است -> همین‌جا مستقیم روی SD بنویس تا رکورد گم نشود
         DEBUG_PRINTLN("[CYCLE] صف پر بود؛ ذخیره‌ی مستقیم روی SD");
         if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
-          saveToSD(snapshot);
+          saveRecord(snapshot);
           xSemaphoreGive(xSDMutex);
         } else {
-          sdWriteFailures++;
+          writeFailures++;
         }
       }
       saveNextPersistentID(currentGlobalID);
@@ -1843,7 +1843,7 @@ static String pickDayFile(bool oldest) {
 }
 
 /** NUM آخرین رکورد ذخیره‌شده (برای ادامه‌ی شماره‌گذاری بعد از ریست) */
-static int lastRecordIdOnSD() {
+static int lastRecordIdStored() {
   String newest = pickDayFile(false);
   if (!newest.length()) return 0;
   File f = gFs->open(newest, FILE_READ);
@@ -1865,7 +1865,7 @@ static int lastRecordIdOnSD() {
  * سه لایه محافظت:
  *   ۱) اگر باز کردن فایل شکست خورد، یک بار SD دوباره مقداردهی و تلاش می‌شود
  *   ۲) بعد از نوشتن، اندازه‌ی نوشته‌شده بررسی می‌شود
- *   ۳) شکست‌های پیاپی شمرده می‌شوند؛ ناظر سلامت بعد از SD_FAIL_LIMIT بار
+ *   ۳) شکست‌های پیاپی شمرده می‌شوند؛ ناظر سلامت بعد از WRITE_FAIL_LIMIT بار
  *      برد را ری‌استارت می‌کند
  */
 // =====================================================================
@@ -1880,15 +1880,15 @@ static int lastRecordIdOnSD() {
 //  ایمنی: فقط با تأیید صریح اجرا می‌شود و در حین اجرا قفل SD گرفته
 //  می‌شود تا با نوشتن رکوردها تداخل نکند.
 // =====================================================================
-SdEraseResult eraseSdData() {
-  SdEraseResult res;
+EraseResult eraseStorage() {
+  EraseResult res;
 
   if (!xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(5000))) {
-    Serial.println("[SD] پاک‌سازی انجام نشد: کارت مشغول است");
+    Serial.println("[STORE] پاک‌سازی انجام نشد: حافظه مشغول است");
     return res;
   }
 
-  Serial.println("[SD] شروع پاک‌سازی کارت حافظه ...");
+  Serial.printf("[STORE] شروع پاک‌سازی %s ...\n", storageName());
 
   // ۱) همه‌ی فایل‌های پوشه‌ی داده
   File root = gFs->open("/data");
@@ -1904,7 +1904,7 @@ SdEraseResult eraseSdData() {
         res.files++;
         res.bytes += sz;
       } else {
-        Serial.printf("[SD] حذف نشد: %s\n", path.c_str());
+        Serial.printf("[STORE] حذف نشد: %s\n", path.c_str());
       }
       e = root.openNextFile();
     }
@@ -1920,22 +1920,22 @@ SdEraseResult eraseSdData() {
   // ۴) شماره‌گذاری از صفر
   currentGlobalID = 0;
   saveNextPersistentID(0);
-  sdWriteFailures = 0;
+  writeFailures = 0;
 
   res.ok = true;
   xSemaphoreGive(xSDMutex);
 
-  Serial.printf("[SD] پاک‌سازی تمام شد: %u فایل (%u کیلوبایت) حذف شد، "
+  Serial.printf("[STORE] پاک‌سازی تمام شد: %u فایل (%u کیلوبایت) حذف شد، "
                 "شماره‌ی رکورد از ۱ شروع می‌شود\n",
                 (unsigned)res.files, (unsigned)(res.bytes / 1024));
   return res;
 }
 
-void saveToSD(const WifiData &data) {
+void saveRecord(const WifiData &data) {
   if (gFs == nullptr) {
     // هیچ حافظه‌ای سوار نیست؛ آخرین تلاش برای سوار کردن
     if (!initStorage()) {
-      sdWriteFailures++;
+      writeFailures++;
       DEBUG_PRINTLN("[STORE] رکورد ذخیره نشد: حافظه‌ای در دسترس نیست");
       return;
     }
@@ -1953,11 +1953,11 @@ void saveToSD(const WifiData &data) {
       f.close();
 
       if (written == REC_SIZE) {
-        sdWriteFailures = 0;
-        VERBOSE_PRINTF("[SD] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
+        writeFailures = 0;
+        VERBOSE_PRINTF("[STORE] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
         return;
       }
-      DEBUG_PRINTF("[SD] نوشتن ناقص بود (%u از %u بایت)\n",
+      DEBUG_PRINTF("[STORE] نوشتن ناقص بود (%u از %u بایت)\n",
                    (unsigned)written, (unsigned)REC_SIZE);
     }
 
@@ -1979,9 +1979,9 @@ void saveToSD(const WifiData &data) {
     }
   }
 
-  sdWriteFailures++;
-  DEBUG_PRINTF("[SD] بحرانی: رکورد #%d ذخیره نشد (شکست پیاپی: %u)\n",
-               data.NUM, (unsigned)sdWriteFailures);
+  writeFailures++;
+  DEBUG_PRINTF("[STORE] بحرانی: رکورد #%d ذخیره نشد (شکست پیاپی: %u)\n",
+               data.NUM, (unsigned)writeFailures);
 }
 
 /**
@@ -2065,12 +2065,12 @@ void TaskInternalWiFiConnection(void *pv) {
         //      در صف می‌ماندند.)
         while (xQueueReceive(xDataQueue, &q, pdMS_TO_TICKS(10)) == pdPASS) {
           if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
-            saveToSD(q);
+            saveRecord(q);
             xSemaphoreGive(xSDMutex);
           } else {
             // نتوانستیم قفل بگیریم؛ رکورد را برمی‌گردانیم تا گم نشود
             xQueueSendToFront(xDataQueue, (void *)&q, pdMS_TO_TICKS(100));
-            DEBUG_PRINTLN("[SD] قفل آزاد نشد؛ رکورد در صف ماند");
+            DEBUG_PRINTLN("[STORE] قفل آزاد نشد؛ رکورد در صف ماند");
             break;
           }
         }
@@ -2250,7 +2250,7 @@ void TaskInternalWiFiConnection(void *pv) {
                 remote.println("ERR:CONFIRM  (برای پاک‌سازی بنویسید: format CONFIRM)");
                 remote.println("END");
               } else if (cmd.equalsIgnoreCase("format CONFIRM")) {
-                SdEraseResult r = eraseSdData();
+                EraseResult r = eraseStorage();
                 if (r.ok) {
                   remote.printf("SD_ERASED files=%u kb=%u\n",
                                 (unsigned)r.files, (unsigned)(r.bytes / 1024));
@@ -2342,7 +2342,7 @@ void TaskHealthMonitor(void *pv) {
                    "connects=%u failures=%u\n",
                    (unsigned)minHeap,
                    (unsigned)hbDigital, (unsigned)hbSht, (unsigned)hbNet,
-                   (unsigned)wifiDropCount, (unsigned)sdWriteFailures,
+                   (unsigned)wifiDropCount, (unsigned)writeFailures,
                    (unsigned)wifiLink.connects, (unsigned)wifiLink.failures);
 
     if (freeHeap < 20000) DEBUG_PRINTLN("[HEALTH] هشدار: حافظه کم است!");
@@ -2383,7 +2383,7 @@ void TaskHealthMonitor(void *pv) {
     }
 
     // ---------------- خطای مکرر کارت حافظه ----------------
-    if (sdWriteFailures >= SD_FAIL_LIMIT) {
+    if (writeFailures >= WRITE_FAIL_LIMIT) {
       Serial.println("[WDT] نوشتن روی SD مکرراً شکست خورد -> ری‌استارت");
       Serial.flush();
       delay(200);

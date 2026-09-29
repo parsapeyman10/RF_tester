@@ -1016,44 +1016,6 @@ def clear_history():
 def plot_display():
     return render_template('plot_display.html')
 
-# توجه: این تابع قبلاً روی همان آدرس '/api/sensor_data' ثبت شده بود؛ یعنی دو
-# مسیر کاملاً یکسان با دو تابع متفاوت. فلسک خطا نمی‌دهد ولی اینکه کدام یکی
-# سرویس بدهد قابل اتکا نیست و این نسخه فیلد 'date' را ندارد (که plot_display
-# به آن نیاز دارد). به یک آدرس جدا منتقل شد تا رفتار قطعی باشد.
-@app.route('/api/sensor_data_extended')
-def get_sensor_data_api():
-    try:
-        # دریافت 50 داده آخر
-        # نکته مهم: سورت باید بر اساس تاریخ و ساعت سنسور باشد، نه زمان آپلود
-        # چون ممکن است فایل‌ها پس و پیش آپلود شوند
-        readings = MasterReading.query.order_by(*device_clock_order()).limit(50).all()
-        
-        # معکوس کردن لیست برای نمایش درست در نمودار (چپ به راست)
-        readings = readings[::-1]
-        
-        data = []
-        for r in readings:
-            # --- فوت کوزه‌گری ---
-            # ساختن زمان واقعی برای محور X از روی ستون‌های date و time
-            # این همان چیزی است که پلاتر نیاز دارد
-            real_sensor_time = f"{r.date} {r.time}"
-            
-            data.append({
-                'id': r.id,
-                'num_value': r.num_value,
-                'temp': r.temp,
-                'humidity': r.humidity,
-                'timestamp': real_sensor_time, # ارسال زمان سنسور به جای زمان ثبت
-                'created_at': r.timestamp,     # زمان ثبت (اگر جایی نیاز شد)
-                'nbcm_statuses': parse_nbcm(r.nbcm_selected),
-                'bcm_results': build_bcm_results(r.nbcm_selected)
-            })
-            
-        return jsonify(data)
-    except Exception as e:
-        print(f"API Error: {e}")
-        return jsonify([])
-
 # تابع کمکی برای پارس کردن NBCM ها (اگر ندارید اضافه کنید)
 def parse_nbcm(nbcm_str):
     status = {key: 'inactive' for key in RESULT_FIELDS}

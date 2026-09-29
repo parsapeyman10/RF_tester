@@ -253,7 +253,7 @@ check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
 flask_app.app.config["TESTING"] = True
 client = flask_app.app.test_client()
 for route in ("/", "/history", "/plot_display", "/upload_dat",
-              "/api/sensor_data", "/api/sensor_data_extended"):
+              "/api/sensor_data"):
     try:
         resp = client.get(route)
         check(resp.status_code == 200, f"{route} -> {resp.status_code}")

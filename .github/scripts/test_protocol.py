@@ -265,16 +265,16 @@ check("void probeSdCard()" in esp32, "[ESP32] بعد از جا زدن کارت،
 check("copyFileToSd" in esp32, "[ESP32] داده‌های حافظه‌ی داخلی به کارت منتقل می‌شوند")
 check(esp32.count("SD.open(") <= 1,
       "[ESP32] دسترسی مستقیم به SD باقی نمانده (همه از gFs رد می‌شوند)")
-check("mountInternalFs()" in esp32.split("void saveToSD(")[2][:1800],
+check("mountInternalFs()" in esp32.split("void saveRecord(")[2][:1800],
       "[ESP32] اگر کارت وسط کار قطع شود، روی حافظه‌ی داخلی ادامه می‌دهد")
 
 # ------------------------- پاک‌سازی کارت حافظه
-check("SdEraseResult eraseSdData()" in esp32, "[ESP32] تابع پاک‌سازی کارت وجود دارد")
+check("EraseResult eraseStorage()" in esp32, "[ESP32] تابع پاک‌سازی کارت وجود دارد")
 check('setupServer.on("/formatsd"' in esp32, "[ESP32] پاک‌سازی از پورتال در دسترس است")
 check('cmd.equalsIgnoreCase("format CONFIRM")' in esp32,
       "[ESP32] دستور پاک‌سازی در حالت دیتا نیاز به تأیید دارد")
-check('buf.equalsIgnoreCase("FORMAT SD")' in esp32, "[ESP32] فرمان سریال FORMAT SD وجود دارد")
-check("xSemaphoreTake(xSDMutex" in esp32.split("SdEraseResult eraseSdData() {")[1][:600],
+check('buf.equalsIgnoreCase("FORMAT SD") || buf.equalsIgnoreCase("FORMAT")' in esp32, "[ESP32] فرمان سریال FORMAT / FORMAT SD وجود دارد")
+check("xSemaphoreTake(xSDMutex" in esp32.split("EraseResult eraseStorage() {")[1][:600],
       "[ESP32] پاک‌سازی با قفل SD انجام می‌شود (بدون تداخل با نوشتن)")
 check("ESP.getFreeHeap()" in esp32, "[ESP32] پایش حافظه فعال است")
 

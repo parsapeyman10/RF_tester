@@ -119,12 +119,6 @@
 
             <div class="h-4 w-[1px] bg-slate-700 mx-2"></div>
 
-            <a href="/" style="color:#94a3b8;text-decoration:none;font-size:12px;font-weight:700">داشبورد</a>
-            <a href="/history" style="color:#94a3b8;text-decoration:none;font-size:12px;font-weight:700">آرشیو</a>
-            <a href="/save_data" style="color:#34d399;text-decoration:none;font-size:12px;font-weight:700">💾 سیو دیتا</a>
-
-            <div class="h-4 w-[1px] bg-slate-700 mx-2"></div>
-
             <label class="checkbox-wrapper temp-toggle-wrapper" title="نمایش/مخفی کردن نمودار دما">
                 <input type="checkbox" id="toggle-temp" checked>
                 <span>دما</span>
@@ -244,7 +238,7 @@
                 const chartTitle = uniqueDates.length === 1 ? `روند تغییرات - ${uniqueDates[0]}` : 'روند تغییرات محیطی';
                 
                 Plotly.newPlot('main-chart', envTraces,
-                    {...layoutBase, title: chartTitle, height: 340}, {responsive: true});
+                    {...layoutBase, title: chartTitle, height: 430}, {responsive: true});
 
                 // 2. چهار سیگنال به‌صورت سطح منطقی: OK = 1 ، NOK = 0
                 //    هر سیگنال محور مستقل خودش را دارد تا مقدار واقعی ۰ و ۱
@@ -270,7 +264,7 @@
                 const logicLayout = {
                     ...layoutBase,
                     title: 'سطح منطقی چهار سیگنال (۱ = OK ، ۰ = NOK)',
-                    height: 460,
+                    height: 430,
                     showlegend: false,
                     margin: { l: 110, r: 20, t: 60, b: 40 },
                     xaxis: { gridcolor: '#334155', showticklabels: true }

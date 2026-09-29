@@ -341,17 +341,22 @@ try:
 except OSError:
     pass
 
-print("\n[8f] داشبورد: ساعت سرور، پنل پورت و ثبت دستی روی همان صفحه")
+print("\n[8f] داشبورد: دو ساعت روی صفحه، بقیه در منوی همبرگری")
 _dc = flask_app.app.test_client()
 _ix = _dc.get("/").get_data(as_text=True)
 check('id="server-time"' in _ix and 'id="live-time"' in _ix,
       "هر دو ساعت (سرور و دستگاه) روی داشبورد هستند")
 check("ساعت دستگاه (RTC)" in _ix and "ساعت سرور (کامپیوتر)" in _ix,
       "برچسب هر دو ساعت گویاست")
-check('id="quickPort"' in _ix and 'id="quickBaud"' in _ix and 'id="quickConnect"' in _ix,
-      "پنل تنظیمات پورت روی داشبورد اضافه شده")
-check('id="quickPaste"' in _ix and 'id="quickAdd"' in _ix,
-      "کادر ثبت دستی روی داشبورد اضافه شده")
+# چیدمان قدیمی: هر بخش یک «نما» در منوی همبرگری، نه کارت اضافه روی بدنه
+check("quickPort" not in _ix and "quickPaste" not in _ix,
+      "پنل اضافه‌ای به بدنه‌ی داشبورد تحمیل نشده")
+check('id="nav-serial"' in _ix and 'id="nav-manual"' in _ix,
+      "تنظیمات پورت و ثبت دستی در منوی همبرگری هستند")
+check('id="view-serial"' in _ix and 'id="view-manual"' in _ix,
+      "هر دو نما در صفحه وجود دارند")
+for _lnk in ("/history", "/upload_dat", "/paste", "/save_data"):
+    check(f'href="{_lnk}"' in _ix, f"لینک {_lnk} در منو هست")
 _t = _dc.get("/api/server_time").get_json()
 check(all(k in _t for k in ("server_time", "server_date", "iso")),
       f"API ساعت سرور کار می‌کند ({_t.get('server_time')})")

@@ -143,6 +143,12 @@ const char *SETUP_AP_PASS = "12345678";
 // بلافاصله بسته می‌شود و منتظر پایان این زمان نمی‌ماند.
 const uint32_t SETUP_PORTAL_TIMEOUT_MS = 120000;  // وقتی ساعت نامعتبر است
 const uint32_t SETUP_PORTAL_GRACE_MS = 120000;    // وقتی RTC از قبل معتبر است
+
+// تا وقتی گوشی به پورتال وصل است، شمارش معکوس متوقف می‌ماند و دستگاه
+// منتظر می‌ماند تا خودتان دکمه‌ی شروع را بزنید.
+// این عدد فقط یک تور ایمنی است: اگر گوشی وصل بماند ولی هیچ دکمه‌ای زده
+// نشود، بعد از این مدت خودکار ادامه می‌دهد. صفر یعنی «بی‌نهایت صبر کن».
+const uint32_t SETUP_PORTAL_MAX_WITH_CLIENT_MS = 900000;   // ۱۵ دقیقه
 const uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 
 // =====================================================================
@@ -658,6 +664,7 @@ input{width:100%;padding:10px;border-radius:8px;border:1px solid #22304a;backgro
 <button class="ghost" onclick="formatSd()">پاک‌سازی کارت حافظه</button></div>
 
 <div class="card"><h2>حالت کاری</h2>
+<small>تا وقتی این صفحه باز است دستگاه منتظر می‌ماند؛ برای شروع یکی را بزنید.</small>
 <button onclick="mode(0)">شروع کار عادی (تست رله‌ها)</button>
 <button class="ghost" onclick="mode(1)">حالت نمایش دیتا (بدون تست)</button></div>
 
@@ -818,22 +825,63 @@ void runSetupPortal(bool timeAlreadyValid) {
 
   uint32_t start = millis();
   uint32_t lastTick = 0;
-  while (millis() - start < portalLimit) {
+  uint32_t firstClientMs = 0;   // اولین باری که گوشی وصل شد
+  bool clientSeen = false;
+
+  for (;;) {
     setupServer.handleClient();
 
-    // هر ۵ ثانیه یک خط چاپ می‌شود تا این انتظار «گیر کردن» به نظر نرسد
-    uint32_t elapsed = millis() - start;
-    if (elapsed / 5000 != lastTick) {
-      lastTick = elapsed / 5000;
-      DEBUG_PRINTF("[PORTAL] منتظر گوشی... %u ثانیه دیگر ادامه می‌دهیم "
-                   "(SSID: %s)\n",
-                   (unsigned)((portalLimit - elapsed) / 1000), SETUP_AP_SSID);
-    }
-    // وقتی هم ساعت آمد و هم مود انتخاب شد، دیگر منتظر نمی‌مانیم
+    // ---- خروج فقط با فشردن دکمه‌ی حالت کاری روی گوشی ----
     if (portalTimeSet && portalModeChosen) {
-      delay(400);  // فرصت ارسال پاسخ آخر به مرورگر
+      delay(400);  // فرصت رسیدن پاسخ آخر به مرورگر
+      DEBUG_PRINTLN("[PORTAL] شروع از روی گوشی تأیید شد");
       break;
     }
+
+    bool clientConnected = (WiFi.softAPgetStationNum() > 0);
+
+    if (clientConnected) {
+      // گوشی وصل است -> تایمر متوقف می‌شود و منتظر دکمه‌ی شروع می‌مانیم
+      if (!clientSeen) {
+        clientSeen = true;
+        firstClientMs = millis();
+        lastTick = 0;
+        DEBUG_PRINTLN("[PORTAL] گوشی وصل شد؛ شمارش معکوس متوقف شد. "
+                      "برای ادامه، دکمه‌ی «شروع کار عادی» را بزنید.");
+      }
+      start = millis();  // تایمر عملاً فریز می‌شود
+
+      uint32_t waiting = millis() - firstClientMs;
+      if (waiting / 15000 != lastTick) {
+        lastTick = waiting / 15000;
+        DEBUG_PRINTF("[PORTAL] منتظر فشردن دکمه‌ی شروع روی گوشی... (%u ثانیه)\n",
+                     (unsigned)(waiting / 1000));
+      }
+
+      // تور ایمنی: اگر گوشی وصل ماند ولی هیچ دکمه‌ای زده نشد
+      if (SETUP_PORTAL_MAX_WITH_CLIENT_MS > 0 &&
+          waiting > SETUP_PORTAL_MAX_WITH_CLIENT_MS) {
+        DEBUG_PRINTLN("[PORTAL] گوشی وصل بود ولی دکمه‌ای زده نشد -> ادامه‌ی خودکار");
+        break;
+      }
+
+    } else {
+      // کسی وصل نیست -> همان شمارش معکوس عادی
+      if (clientSeen) {
+        clientSeen = false;
+        lastTick = 0;
+        DEBUG_PRINTLN("[PORTAL] گوشی قطع شد؛ شمارش معکوس از نو شروع شد");
+      }
+
+      uint32_t elapsed = millis() - start;
+      if (elapsed / 5000 != lastTick) {
+        lastTick = elapsed / 5000;
+        DEBUG_PRINTF("[PORTAL] منتظر گوشی... %u ثانیه دیگر ادامه می‌دهیم (SSID: %s)\n",
+                     (unsigned)((portalLimit - elapsed) / 1000), SETUP_AP_SSID);
+      }
+      if (elapsed >= portalLimit) break;
+    }
+
     delay(2);
   }
 

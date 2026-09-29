@@ -277,6 +277,13 @@ check("سطح منطقی" in _idx, "عنوان «سطح منطقی» در داش
 _hist = _c3.get("/history?date=2026-01-05").get_data(as_text=True)
 check("سطح منطقی" in _hist, "ستون سطح منطقی در آرشیو هست")
 
+_plot = _c3.get("/plot_display").get_data(as_text=True)
+check("'BCM1_OPEN', 'BCM1_CLOSE', 'BCM2_OPEN', 'BCM2_CLOSE'" in _plot,
+      "نمودار هر چهار سیگنال را دارد")
+check("? 1 : 0" in _plot and "tickvals: [0, 1]" in _plot,
+      "نمودار مقدار واقعی ۰ و ۱ را رسم می‌کند")
+check("nbcms" not in _plot, "ارجاع خراب به متغیر حذف‌شده باقی نمانده")
+
 _bk = _c3.get("/save_data")
 check(_bk.status_code == 200, f"/save_data -> {_bk.status_code}")
 check(_bk.headers.get("Content-Disposition", "").startswith("attachment"),

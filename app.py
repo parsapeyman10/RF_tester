@@ -23,6 +23,7 @@ import os
 import sqlite3
 import math
 import struct
+import json
 import re
 
 # =====================================================================
@@ -442,6 +443,38 @@ active_serial_port = None
 active_baud_rate = 115200 
 DEFAULT_PORT = "COM9"
 manual_disconnect = False
+
+# =====================================================================
+#  تنظیمات پورت سریال ماندگار می‌شوند
+#  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
+#  می‌رفت و باید دوباره دستی انتخاب می‌شد.
+# =====================================================================
+SERIAL_CONFIG_FILE = os.path.join(BASE_DIR, 'serial_config.json')
+
+
+def save_serial_config():
+    try:
+        with open(SERIAL_CONFIG_FILE, 'w', encoding='utf-8') as fh:
+            json.dump({'port': active_serial_port,
+                       'baud_rate': active_baud_rate}, fh)
+        print(f"[SERIAL] تنظیمات ذخیره شد: {active_serial_port} @ {active_baud_rate}")
+    except Exception as exc:
+        print(f"[SERIAL] ذخیره‌ی تنظیمات ناموفق: {exc}")
+
+
+def load_serial_config():
+    global active_serial_port, active_baud_rate
+    if not os.path.exists(SERIAL_CONFIG_FILE):
+        return
+    try:
+        with open(SERIAL_CONFIG_FILE, encoding='utf-8') as fh:
+            cfg = json.load(fh)
+        if cfg.get('port'):
+            active_serial_port = cfg['port']
+        active_baud_rate = int(cfg.get('baud_rate', active_baud_rate))
+        print(f"[SERIAL] تنظیمات قبلی بازیابی شد: {active_serial_port} @ {active_baud_rate}")
+    except Exception as exc:
+        print(f"[SERIAL] خواندن تنظیمات ناموفق: {exc}")
 
 # الگوی دقیق خطی که ESP8266 روی سریال می‌فرستد (۱۳ فیلد).
 # استفاده از regex به‌جای split باعث می‌شود خطوط ناقص/به‌هم‌ریخته‌ی سریال
@@ -1054,7 +1087,13 @@ def api_recover_unsaved():
 @app.route('/api/serial_ports')
 def list_serial_ports():
     ports = [port.device for port in serial.tools.list_ports.comports()]
-    return jsonify({'available_ports': ports, 'active_port': active_serial_port, 'connection_status': 'Connected' if (ser and ser.is_open) else 'Disconnected'})
+    return jsonify({
+        'available_ports': ports,
+        'active_port': active_serial_port,
+        'baud_rate': active_baud_rate,
+        'baud_rates': [9600, 19200, 38400, 57600, 115200, 230400],
+        'connection_status': 'Connected' if (ser and ser.is_open) else 'Disconnected'
+    })
 
 @app.route('/api/set_serial_config', methods=['POST'])
 def set_serial_config():
@@ -1066,25 +1105,20 @@ def set_serial_config():
     active_serial_port = data.get('port')
     active_baud_rate = data.get('baud_rate', 115200)
     manual_disconnect = False
-    # اگر از اجرای قبلی رکورد نجات‌یافته‌ای مانده، همین اول برش گردان
-    if os.path.exists(UNSAVED_LOG):
-        with app.app_context():
-            try:
-                with app.test_request_context():
-                    api_recover_unsaved()
-            except Exception as exc:
-                print(f"[DB] بازیابی خودکار ناموفق: {exc}")
+    save_serial_config()          # تنظیمات برای دفعه‌ی بعد ذخیره می‌شود
 
     stop_event.clear()
     serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
     serial_thread.start()
-    return jsonify({'status': 'success', 'port': active_serial_port})
+    return jsonify({'status': 'success', 'port': active_serial_port,
+                    'baud_rate': active_baud_rate})
 
 @app.route('/api/close_serial_port', methods=['POST'])
 def close_serial_port():
     global ser, active_serial_port, manual_disconnect
     try:
         manual_disconnect = True
+        save_serial_config()
         if ser and ser.is_open: ser.close()
         active_serial_port = None
         return jsonify({'status': 'success'})
@@ -1170,8 +1204,18 @@ def parse_nbcm(nbcm_str):
 
 if __name__ == '__main__':
     with app.app_context():
-        db.create_all() 
-    
+        db.create_all()
+
+    # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
+    if os.path.exists(UNSAVED_LOG):
+        with app.app_context(), app.test_request_context():
+            try:
+                api_recover_unsaved()
+            except Exception as exc:
+                print(f"[DB] بازیابی خودکار ناموفق: {exc}")
+
+    load_serial_config()          # آخرین پورت و باود انتخاب‌شده
+
     stop_event.clear()
     serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
     serial_thread.start()

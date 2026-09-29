@@ -196,9 +196,7 @@
                 <div>
                     <label class="block text-sm text-slate-400 mb-2">سرعت ارتباط (Baud Rate):</label>
                     <select id="baudRateInput" class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-blue-500">
-                        <option value="9600">9600 bps</option>
                         <option value="115200" selected>115200 bps</option>
-                        <option value="57600">57600 bps</option>
                     </select>
                 </div>
                 <div class="flex gap-3 pt-4">
@@ -311,14 +309,33 @@
             const data = await res.json();
             
             if(portSelect) {
-                const currentSelection = portSelect.value;
-                portSelect.innerHTML = '<option value="">انتخاب پورت...</option>' + 
-                    data.available_ports.map(p => `<option value="${p}" ${p === data.active_port ? 'selected' : ''}>${p}</option>`).join('');
-                if (!data.active_port && currentSelection) { }
+                const keep = portSelect.value;
+                // پورت ذخیره‌شده حتی اگر الان وصل نیست در لیست بماند
+                const ports = [...new Set([...(data.available_ports || []),
+                                           ...(data.active_port ? [data.active_port] : [])])];
+                const chosen = data.active_port || keep;
+                portSelect.innerHTML = '<option value="">انتخاب پورت...</option>' +
+                    ports.map(p => `<option value="${p}" ${p === chosen ? 'selected' : ''}>${p}</option>`).join('');
+            }
+
+            // لیست باودها از سرور می‌آید و مقدار ذخیره‌شده انتخاب می‌ماند
+            const baudSel = document.getElementById('baudRateInput');
+            if (baudSel && Array.isArray(data.baud_rates)) {
+                const cur = data.baud_rate || parseInt(baudSel.value) || 115200;
+                if (baudSel.dataset.filled !== '1' || parseInt(baudSel.value) !== cur) {
+                    baudSel.innerHTML = data.baud_rates
+                        .map(b => `<option value="${b}" ${b === cur ? 'selected' : ''}>${b} bps</option>`).join('');
+                    baudSel.dataset.filled = '1';
+                }
             }
             
             if(data.active_port) {
-                if(statusDiv) statusDiv.innerHTML = `📡 وضعیت: ${data.connection_status} | پورت: ${data.active_port} | Baud: ${data.baud_rate}`;
+                if(statusDiv) {
+                    const okConn = data.connection_status === 'Connected';
+                    statusDiv.innerHTML = `${okConn ? '📡' : '⏳'} وضعیت: ${okConn ? 'متصل' : 'در انتظار اتصال'}`
+                        + ` | پورت: <b>${data.active_port}</b> | Baud: <b>${data.baud_rate}</b>`
+                        + (okConn ? '' : ' <span class="text-amber-400">(تنظیمات ذخیره شده، منتظر در دسترس شدن پورت)</span>');
+                }
                 if(data.connection_status === 'Connected') {
                     miniBulb.className = 'w-3 h-3 rounded-full bg-green-500 pulse-green';
                     miniText.innerText = `Connected: ${data.active_port}`;

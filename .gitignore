@@ -10,6 +10,7 @@ instance/
 /20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].db
 unsaved_records.log
 backup_*.db
+serial_config.json
 
 # Arduino build output
 build/

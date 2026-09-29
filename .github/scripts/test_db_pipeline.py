@@ -317,6 +317,30 @@ _again = _cc.post("/import_csv",
 check(_again["saved"] == 0 and _again["duplicates"] == _before,
       f"ورود دوباره تکراری نمی‌سازد ({_again})")
 
+print("\n[8e] تنظیمات پورت سریال: داینامیک و ماندگار")
+_sc = flask_app.app.test_client()
+_p0 = _sc.get("/api/serial_ports").get_json()
+check("baud_rate" in _p0 and "baud_rates" in _p0,
+      f"API باود فعلی و فهرست باودها را برمی‌گرداند ({list(_p0)})")
+_set = _sc.post("/api/set_serial_config", json={"port": "COM7", "baud_rate": 57600}).get_json()
+check(_set.get("port") == "COM7" and _set.get("baud_rate") == 57600,
+      f"تنظیم پورت و باود جواب داد ({_set})")
+_p1 = _sc.get("/api/serial_ports").get_json()
+check(_p1["active_port"] == "COM7" and _p1["baud_rate"] == 57600,
+      "مقدار تنظیم‌شده در API دیده می‌شود")
+check(os.path.exists(flask_app.SERIAL_CONFIG_FILE), "تنظیمات روی دیسک ذخیره شد")
+
+# شبیه‌سازی ری‌استارت سرور
+flask_app.active_serial_port = None
+flask_app.active_baud_rate = 115200
+flask_app.load_serial_config()
+check(flask_app.active_serial_port == "COM7" and flask_app.active_baud_rate == 57600,
+      "بعد از ری‌استارت، پورت و باود بازیابی می‌شوند")
+try:
+    os.remove(flask_app.SERIAL_CONFIG_FILE)
+except OSError:
+    pass
+
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")

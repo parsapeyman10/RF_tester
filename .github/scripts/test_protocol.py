@@ -148,8 +148,9 @@ check("WiFi.setSleep(false)" in esp32, "[ESP32] Modem-Sleep خاموش است")
 check("WiFi.setAutoReconnect(true)" in esp32, "[ESP32] اتصال مجدد خودکار فعال است")
 check("channel, bssid, false)" in esp32,
       "[ESP32] اتصال با کانال و BSSID دقیق و به‌صورت دومرحله‌ای انجام می‌شود")
-check("pmf_cfg.capable = false" in esp32,
-      "[ESP32] PMF خاموش است (ریشه‌ی 4WAY_HANDSHAKE_TIMEOUT با AP های ESP8266)")
+check("conf.sta.pmf_cfg.capable = pmfCapable" in esp32 and
+      "conf.sta.pmf_cfg.required = false" in esp32,
+      "[ESP32] PMF کنترل‌شده است (پیش‌فرض خاموش = رفع 4WAY_HANDSHAKE_TIMEOUT)")
 check("esp_wifi_connect()" in esp32, "[ESP32] اتصال بعد از اعمال تنظیمات شروع می‌شود")
 check("bool pmfCapable = (failStreak == 4 || failStreak == 5)" in esp32,
       "[ESP32] نردبان تلاش: اگر PMF خاموش جواب نداد، روشن هم امتحان می‌شود")

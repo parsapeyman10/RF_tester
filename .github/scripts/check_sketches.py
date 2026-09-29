@@ -115,8 +115,9 @@ def check_sketch(path):
 
     # ---- 2) نام سراسری با تداخل ----
     top_level = remove_class_bodies(code)
+    # فقط تعریف‌های ستون صفر = واقعاً سراسری (متغیر محلیِ هم‌نام مشکلی ندارد)
     globals_found = re.findall(
-        r"^\s*(?:static\s+|const\s+|volatile\s+)*[A-Za-z_]\w*(?:\s*[*&])?\s+(\w+)\s*(?:=|;|\[)",
+        r"^(?:static\s+|const\s+|volatile\s+)*[A-Za-z_]\w*(?:\s*[*&])?\s+(\w+)\s*(?:=|;|\[)",
         top_level, re.M)
     clashes = sorted(set(g for g in globals_found if g in RESERVED_GLOBALS))
     if clashes:

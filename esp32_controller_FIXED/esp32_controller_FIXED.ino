@@ -80,7 +80,13 @@ const bool REQUIRE_BOTH_FEEDBACKS = true;
 // --- زمان‌بندی تست هر رله ---
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
 const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
-const uint32_t PHASE_GAP_MS = 5000;         // فاصله‌ی بین تریگ رله باز و رله بسته
+// فاصله‌ی «تریگ تا تریگ»: از لحظه‌ی فعال شدن رله‌ی اول تا لحظه‌ی فعال شدن
+// رله‌ی دوم دقیقاً همین مقدار طول می‌کشد (شامل مدت مانیتورینگ).
+const uint32_t PHASE_TRIGGER_INTERVAL_MS = 5000;
+
+// حداقل فاصله‌ی خاموشی بین دو رله؛ اگر مدت مانیتورینگ از بازه‌ی بالا بیشتر
+// شود، دست‌کم این مقدار فاصله رعایت می‌شود تا دو رله پشت سر هم نزنند.
+const uint32_t PHASE_MIN_GAP_MS = 300;
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای معتبر بودن پالس
@@ -1275,10 +1281,12 @@ static void endFeedbackWindow() {
  * یک فاز کامل:  تحریک رله ► مانیتورینگ هم‌زمانِ هر دو BCM ► قطع رله
  * نتیجه در got[phase][device] جمع می‌شود (تجمعی است و پاک نمی‌شود).
  */
-static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT]) {
+static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT],
+                     uint32_t *triggeredAtMs = nullptr) {
   uint8_t pin = RELAY_PINS[phase];
 
   digitalWrite(pin, HIGH);                          // 1) تحریک رله
+  if (triggeredAtMs) *triggeredAtMs = millis();     // لحظه‌ی دقیق تریگ
   vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //    پایدار شدن کنتاکت
   beginFeedbackWindow();                            // 2) مانیتورینگ فعال
   vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3) زمان مجاز
@@ -1334,9 +1342,20 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
 
     // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
     for (int phase = 0; phase < PHASE_COUNT; phase++) {
-      runPhase(phase, got);
+      uint32_t triggeredAt = 0;
+      runPhase(phase, got, &triggeredAt);
 
-      vTaskDelay(pdMS_TO_TICKS(PHASE_GAP_MS));  // فاصله‌ی فاز باز تا فاز بستن
+      // فاصله فقط بین دو فاز معنی دارد، نه بعد از فاز آخر
+      if (phase < PHASE_COUNT - 1) {
+        uint32_t elapsed = millis() - triggeredAt;
+        uint32_t waitMs = (elapsed < PHASE_TRIGGER_INTERVAL_MS)
+                            ? (PHASE_TRIGGER_INTERVAL_MS - elapsed)
+                            : 0;
+        if (waitMs < PHASE_MIN_GAP_MS) waitMs = PHASE_MIN_GAP_MS;
+
+        VERBOSE_PRINTF("[PHASE] %u ms تا تریگ رله‌ی بعدی\n", (unsigned)waitMs);
+        vTaskDelay(pdMS_TO_TICKS(waitMs));
+      }
     }
 
     // --- جمع‌بندی این سیکل ---

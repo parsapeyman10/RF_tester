@@ -108,13 +108,12 @@ const int serverPort = 80;
 
 // --- پایداری اتصال ---
 // آدرس‌دهی از DHCP خودِ گیرنده گرفته می‌شود؛ ساده‌ترین و مطمئن‌ترین حالت.
-// توان فرستنده تطبیقی است: بر اساس قدرت سیگنالی که در اسکن دیده می‌شود
-// انتخاب می‌شود. نزدیک که باشیم توان پایین می‌آید (جلوگیری از اشباع گیرنده
-// و خراب شدن فریم‌های EAPOL)، دور که باشیم حداکثر توان استفاده می‌شود تا
-// برد کم نشود.
-//   rssi بهتر از -25  -> 11 dBm    (بردها چسبیده به هم)
-//   rssi بهتر از -45  -> 15 dBm    (همان اتاق)
-//   غیر این           -> 19.5 dBm  (حداکثر، برای برد زیاد)
+// توان فرستنده.
+//
+// FORCE_MAX_TX_POWER = true  -> همیشه حداکثر (۱۹.۵ dBm) برای بیشترین برد.
+// FORCE_MAX_TX_POWER = false -> تطبیقی بر اساس سیگنال اسکن؛ فقط وقتی لازم
+//   است که دو برد چسبیده به هم باشند و اشباع گیرنده هندشیک را خراب کند.
+const bool FORCE_MAX_TX_POWER = true;
 #define STA_TX_POWER_NEAR WIFI_POWER_11dBm
 #define STA_TX_POWER_MID WIFI_POWER_15dBm
 #define STA_TX_POWER_FAR WIFI_POWER_19_5dBm
@@ -943,9 +942,19 @@ void runSetupPortal(bool timeAlreadyValid) {
   }
 
   setupServer.stop();
+  // گذار تمیز AP -> STA
+  //
+  // اگر بلافاصله بعد از خاموش کردن اکسس‌پوینت، حالت STA را روشن کنیم،
+  // درایور هنوز در حال توقف است و این خطا را می‌دهد:
+  //     wifi_init_default: netstack cb reg failed with 12308
+  //     (12308 = 0x3014 = ESP_ERR_WIFI_STOP_STATE)
+  // بی‌خطر است ولی نشانه‌ی گذار عجولانه است؛ با مکث و ترتیب درست حذف می‌شود.
   WiFi.softAPdisconnect(true);
+  delay(200);
   WiFi.mode(WIFI_OFF);
-  delay(300);
+  delay(500);          // فرصت کامل شدن توقف درایور
+  WiFi.mode(WIFI_STA); // حالت بعدی از همین‌جا مشخص می‌شود
+  delay(200);
 }
 
 /** اتصال (یا اتصال مجدد) به اکسس‌پوینت گیرنده‌ی دیتا */
@@ -1020,8 +1029,10 @@ static bool wifiConnectOnce() {
   }
   WiFi.scanDelete();
 
-  // ---- توان فرستنده متناسب با فاصله ----
-  if (bestRssi > -25) {
+  // ---- توان فرستنده ----
+  if (FORCE_MAX_TX_POWER) {
+    WiFi.setTxPower(STA_TX_POWER_FAR);          // حداکثر برد
+  } else if (bestRssi > -25) {
     WiFi.setTxPower(STA_TX_POWER_NEAR);
     VERBOSE_PRINTLN("[NET] بردها خیلی نزدیک‌اند -> توان کم");
   } else if (bestRssi > -45) {
@@ -1110,8 +1121,9 @@ static bool wifiConnectOnce() {
     const char *quality = (rssi > -55) ? "عالی"
                           : (rssi > -67) ? "خوب"
                           : (rssi > -75) ? "قابل قبول" : "ضعیف";
-    DEBUG_PRINTF("[NET] اتصال برقرار شد (تلاش %u) | rssi=%d dBm (%s) | PMF=%s\n",
-                 (unsigned)failStreak, rssi, quality, pmfCapable ? "on" : "off");
+    DEBUG_PRINTF("[NET] اتصال برقرار شد (تلاش %u) | rssi=%d dBm (%s) | tx=%.1f dBm | PMF=%s\n",
+                 (unsigned)failStreak, rssi, quality,
+                 WiFi.getTxPower() / 4.0, pmfCapable ? "on" : "off");
     if (rssi <= -75) {
       DEBUG_PRINTLN("[NET] سیگنال ضعیف است: فاصله/مانع را کم کنید یا "
                     "تغذیه‌ی گیرنده را بررسی کنید");

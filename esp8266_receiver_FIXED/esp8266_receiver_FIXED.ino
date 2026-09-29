@@ -334,6 +334,7 @@ void initAccessPoint() {
     bool started = WiFi.softAP(SSID_NAME, PASSWORD, AP_CHANNEL, false, AP_MAX_CLIENTS);
 #endif
     if (started) {
+      WiFi.setOutputPower(AP_TX_POWER);   // بعضی نسخه‌های SDK بعد از softAP ریست می‌کنند
       apOK = true;
       DBG_PRINTF("AP READY - SSID: %s | IP: %s\n", SSID_NAME, WiFi.softAPIP().toString().c_str());
       break;

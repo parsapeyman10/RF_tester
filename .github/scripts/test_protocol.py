@@ -157,8 +157,11 @@ check("bool pmfCapable = (failStreak == 4 || failStreak == 5)" in esp32,
 check("rssi <= -75" in esp32, "[ESP32] کیفیت سیگنال بعد از اتصال گزارش می‌شود")
 check("راهنمای عیب‌یابی اتصال" in esp32,
       "[ESP32] بعد از ۱۰ شکست راهنمای کامل چاپ می‌شود")
-check("STA_TX_POWER_NEAR" in esp32 and "STA_TX_POWER_FAR" in esp32,
-      "[ESP32] توان فرستنده بر اساس فاصله تطبیقی است")
+check("const bool FORCE_MAX_TX_POWER = true" in esp32,
+      "[ESP32] توان فرستنده روی حداکثر است (بیشترین برد)")
+check("AP_TX_POWER = 20.5" in esp8266, "[ESP8266] توان اکسس‌پوینت روی حداکثر است")
+check("ESP_ERR_WIFI_STOP_STATE" in esp32,
+      "[ESP32] گذار AP->STA کنترل‌شده است (رفع خطای netstack cb reg)")
 check("WIFI_BACKOFF_MIN_MS" in esp32 and "WIFI_BACKOFF_MAX_MS" in esp32,
       "[ESP32] فاصله‌ی تلاش‌ها نمایی است (بدون شخم زدن شبکه)")
 check("struct LinkStats" in esp32, "[ESP32] آمار لینک نگه داشته می‌شود")

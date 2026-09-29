@@ -159,6 +159,11 @@ const char *SETUP_AP_PASS = "12345678";
 // مهلت باز ماندن پورتال SetClock (۲ دقیقه در هر دو حالت).
 // اگر کسی وصل شود و ساعت را ست کند و حالت کاری را انتخاب کند، پورتال
 // بلافاصله بسته می‌شود و منتظر پایان این زمان نمی‌ماند.
+// پورتال در هر بوت باز می‌شود تا همیشه بتوانید با دکمه‌ی «تست رله‌ها»
+// خودتان شروع را تأیید کنید. اگر false شود، فقط وقتی باز می‌شود که
+// ساعت گرفته نشده باشد.
+const bool ALWAYS_OPEN_PORTAL = true;
+
 const uint32_t SETUP_PORTAL_TIMEOUT_MS = 120000;  // وقتی ساعت نامعتبر است
 const uint32_t SETUP_PORTAL_GRACE_MS = 120000;    // وقتی RTC از قبل معتبر است
 
@@ -450,9 +455,9 @@ void setup() {
 
   // مرحله ۲/۳: پورتال محلی — صفحه‌ی وب ساعتِ گوشی را خودکار می‌فرستد،
   // و اگر کسی وصل نشد، با ساعت فعلی RTC ادامه می‌دهیم.
-  if (!timeOk) {
-    DEBUG_PRINTLN("[BOOT] مرحله ۲/۳ : پورتال تنظیم ساعت");
-    runSetupPortal(rtcTimeLooksValid());
+  if (!timeOk || ALWAYS_OPEN_PORTAL) {
+    DEBUG_PRINTLN("[BOOT] مرحله ۲/۳ : پورتال SetClock — منتظر دکمه‌ی «تست رله‌ها»");
+    runSetupPortal(timeOk || rtcTimeLooksValid());
     timeOk = rtcTimeLooksValid();
   } else {
     // حتی وقتی ساعت از NTP گرفته شد، کاربر ممکن است بخواهد مود را عوض کند؛
@@ -681,9 +686,9 @@ input{width:100%;padding:10px;border-radius:8px;border:1px solid #22304a;backgro
 <small id="sdinfo">پاک کردن همه‌ی رکوردهای ذخیره‌شده روی کارت. برگشت‌ناپذیر است.</small>
 <button class="ghost" onclick="formatSd()">پاک‌سازی کارت حافظه</button></div>
 
-<div class="card"><h2>حالت کاری</h2>
-<small>تا وقتی این صفحه باز است دستگاه منتظر می‌ماند؛ برای شروع یکی را بزنید.</small>
-<button onclick="mode(0)">شروع کار عادی (تست رله‌ها)</button>
+<div class="card"><h2>شروع کار</h2>
+<small id="waitmsg">دستگاه منتظر شماست؛ تا این دکمه را نزنید تستی شروع نمی‌شود.</small>
+<button onclick="mode(0)" style="font-size:17px;padding:16px">▶ تست رله‌ها را شروع کن</button>
 <button class="ghost" onclick="mode(1)">حالت نمایش دیتا (بدون تست)</button></div>
 
 <script>
@@ -805,7 +810,8 @@ void handlePortalMode() {
   portalWantsDataView = (m == 1);
   portalModeChosen = true;
   setupServer.send(200, "text/plain; charset=utf-8",
-                   m == 1 ? "حالت نمایش دیتا انتخاب شد" : "حالت کار عادی انتخاب شد");
+                   m == 1 ? "حالت نمایش دیتا انتخاب شد"
+                          : "تست رله‌ها شروع شد — می‌توانید این صفحه را ببندید");
 }
 
 /**
@@ -852,7 +858,7 @@ void runSetupPortal(bool timeAlreadyValid) {
     // ---- خروج فقط با فشردن دکمه‌ی حالت کاری روی گوشی ----
     if (portalTimeSet && portalModeChosen) {
       delay(400);  // فرصت رسیدن پاسخ آخر به مرورگر
-      DEBUG_PRINTLN("[PORTAL] شروع از روی گوشی تأیید شد");
+      DEBUG_PRINTLN("[PORTAL] دکمه‌ی شروع روی گوشی زده شد -> ادامه");
       break;
     }
 
@@ -864,15 +870,15 @@ void runSetupPortal(bool timeAlreadyValid) {
         clientSeen = true;
         firstClientMs = millis();
         lastTick = 0;
-        DEBUG_PRINTLN("[PORTAL] گوشی وصل شد؛ شمارش معکوس متوقف شد. "
-                      "برای ادامه، دکمه‌ی «شروع کار عادی» را بزنید.");
+        DEBUG_PRINTLN("[PORTAL] کلاینت وصل شد؛ شمارش معکوس متوقف شد. "
+                      "دستگاه منتظر دکمه‌ی «تست رله‌ها» در http://192.168.1.1 است.");
       }
       start = millis();  // تایمر عملاً فریز می‌شود
 
       uint32_t waiting = millis() - firstClientMs;
       if (waiting / 15000 != lastTick) {
         lastTick = waiting / 15000;
-        DEBUG_PRINTF("[PORTAL] منتظر فشردن دکمه‌ی شروع روی گوشی... (%u ثانیه)\n",
+        DEBUG_PRINTF("[PORTAL] منتظر دکمه‌ی «تست رله‌ها»... (%u ثانیه)\n",
                      (unsigned)(waiting / 1000));
       }
 
@@ -905,10 +911,10 @@ void runSetupPortal(bool timeAlreadyValid) {
 
   if (portalWantsDataView) {
     xEventGroupSetBits(xSystemEvents, BIT_REQUEST_AP_DATA_VIEW);
-    DEBUG_PRINTLN("[PORTAL] Mode: DATA VIEW");
+    DEBUG_PRINTLN("[PORTAL] حالت: نمایش دیتا");
   } else {
     xEventGroupClearBits(xSystemEvents, BIT_REQUEST_AP_DATA_VIEW);
-    DEBUG_PRINTLN("[PORTAL] Mode: NORMAL RUN");
+    DEBUG_PRINTLN("[PORTAL] حالت: تست رله‌ها");
   }
 
   setupServer.stop();

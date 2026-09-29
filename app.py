@@ -861,11 +861,15 @@ def api_ingest():
     saved = 0
     duplicates = 0
     invalid = 0
+    ignored = 0
     device = request.headers.get('X-Device', request.remote_addr or 'unknown')
 
     for line in raw_lines:
         line = (line or '').strip()
-        if not line or line in ('END', 'NO_DATA'):
+        # خط خالی، نشانگرهای پروتکل، بلاک‌های ``` و هر خطی که اصلاً رکورد
+        # نیست (مثل لاگ‌های [HEALTH]) بی‌سروصدا رد می‌شوند
+        if not line or line in ('END', 'NO_DATA') or 'NUM=' not in line:
+            ignored += 1
             continue
         parsed = parse_industrial_line(line)
         if not parsed:
@@ -879,9 +883,17 @@ def api_ingest():
         else:
             invalid += 1
 
-    print(f"[INGEST] from {device}: saved={saved} dup={duplicates} bad={invalid}")
+    print(f"[INGEST] from {device}: saved={saved} dup={duplicates} "
+          f"bad={invalid} ignored={ignored}")
     return jsonify({'status': 'success', 'saved': saved,
-                    'duplicates': duplicates, 'invalid': invalid})
+                    'duplicates': duplicates, 'invalid': invalid,
+                    'ignored': ignored})
+
+
+@app.route('/paste')
+def paste_page():
+    """صفحه‌ی افزودن دستی رکورد با چسباندن متن خام سریال"""
+    return render_template('paste.html')
 
 
 @app.route('/api/recover_unsaved', methods=['POST', 'GET'])

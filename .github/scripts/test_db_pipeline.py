@@ -238,7 +238,8 @@ r1 = _c.post("/api/ingest", json={"lines": _lines})
 check(r1.status_code == 200, f"/api/ingest -> {r1.status_code}")
 j1 = r1.get_json()
 check(j1["saved"] == 2, f"۲ رکورد ذخیره شد (خروجی: {j1})")
-check(j1["invalid"] == 1, "خط نامعتبر شمرده شد")
+check(j1["invalid"] == 0 and j1["ignored"] >= 2,
+      f"خط بی‌ربط «نادیده» شمرده شد نه «نامعتبر» ({j1})")
 check(daily_count("2026-01-07") == 2, "رکوردها در دیتابیس روزانه نشستند")
 
 # همان دیتا دوباره (گوشی و کامپیوتر هر دو بفرستند) -> نباید تکراری ثبت شود
@@ -247,13 +248,32 @@ j2 = r2.get_json()
 check(j2["saved"] == 0 and j2["duplicates"] == 2, f"ارسال دوباره تکراری شمرده شد ({j2})")
 check(daily_count("2026-01-07") == 2, "رکورد تکراری اضافه نشد")
 
+print("\n[8b] صفحه‌ی افزودن دستی: متن خام کپی‌شده از مانیتور سریال")
+_paste = """```
+12:32:55.088 -> NUM=8001,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=NOK,Temp=24.77,Humidity=46.02,Date=2026-07-07,Time=09:20:50
+```
+[HEALTH] ssid=ESP8266_AP ch=6 clients=1
+[OK] انتظار تا سیکل بعد | wifi=UP -58
+
+NUM=8002,NBCM1=OK,NBCM2=OK,NBCM3=OK,NBCM4=NOK,Temp=24.75,Humidity=44.74,Date=2026-07-07,Time=09:26:50
+NUM=8003,BCM1_OPEN=OK,Temp=20.0
+"""
+_pc = flask_app.app.test_client()
+check(_pc.get("/paste").status_code == 200, "صفحه‌ی /paste باز می‌شود")
+_r = _pc.post("/api/ingest", data=_paste.encode(), content_type="text/plain").get_json()
+check(_r["saved"] == 2, f"دو رکورد معتبر ثبت شد ({_r})")
+check(_r["invalid"] == 1, "خط ناقص «نامعتبر» شمرده شد")
+check(_r["ignored"] >= 4, f"خطوط لاگ و ``` نادیده گرفته شدند ({_r['ignored']})")
+_r2 = _pc.post("/api/ingest", data=_paste.encode(), content_type="text/plain").get_json()
+check(_r2["saved"] == 0 and _r2["duplicates"] == 2, f"چسباندن دوباره تکراری نمی‌سازد ({_r2})")
+
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
 flask_app.app.config["TESTING"] = True
 client = flask_app.app.test_client()
 for route in ("/", "/history", "/plot_display", "/upload_dat",
-              "/api/sensor_data"):
+              "/api/sensor_data", "/paste"):
     try:
         resp = client.get(route)
         check(resp.status_code == 200, f"{route} -> {resp.status_code}")

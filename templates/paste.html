@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>افزودن دستی رکورد | RF_tester</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background:#0b1220; color:#e8eefc; font-family:Tahoma, sans-serif; }
+    .glass-card { background:rgba(19,28,46,.85); border:1px solid #22304a; }
+    textarea { font-family: "Consolas", "Courier New", monospace; direction:ltr; text-align:left; }
+    .badge { padding:2px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  </style>
+</head>
+<body class="min-h-screen p-4 md:p-8">
+
+  <div class="max-w-5xl mx-auto space-y-6">
+
+    <!-- سربرگ -->
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h1 class="text-2xl font-black">افزودن دستی رکورد</h1>
+        <p class="text-slate-400 text-sm mt-1">
+          متن خام خروجی سریال را بچسبانید — یک خط یا صدها خط، فرقی نمی‌کند.
+        </p>
+      </div>
+      <div class="flex gap-2 text-sm">
+        <a href="/" class="glass-card px-4 py-2 rounded-xl hover:border-emerald-500">داشبورد</a>
+        <a href="/history" class="glass-card px-4 py-2 rounded-xl hover:border-emerald-500">آرشیو</a>
+        <a href="/upload_dat" class="glass-card px-4 py-2 rounded-xl hover:border-emerald-500">آپلود فایل .dat</a>
+      </div>
+    </div>
+
+    <!-- راهنمای فرمت -->
+    <div class="glass-card rounded-2xl p-5">
+      <h2 class="font-bold mb-3 text-emerald-400">چه چیزی قابل قبول است؟</h2>
+      <pre class="bg-slate-900/70 rounded-xl p-4 text-[12px] leading-6 overflow-x-auto" dir="ltr">NUM=77,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,Temp=24.55,Humidity=44.40,Date=2026-09-29,Time=12:39:59</pre>
+      <ul class="text-sm text-slate-400 mt-3 space-y-1 list-disc pr-5">
+        <li>پیشوند زمان مانیتور سریال (<span dir="ltr">12:33:24.824 -&gt;</span>) اشکالی ندارد، خودکار نادیده گرفته می‌شود.</li>
+        <li>خطوط وضعیت مثل <span dir="ltr">[HEALTH]</span> و <span dir="ltr">[AP]</span> و بلاک‌های <span dir="ltr">```</span> رد می‌شوند.</li>
+        <li>نام قدیمی <span dir="ltr">NBCM1..4</span> هم پذیرفته می‌شود.</li>
+        <li>رکورد تکراری (همان شماره، تاریخ و ساعت) دوباره ثبت نمی‌شود.</li>
+        <li>مرجع زمان، همان تاریخ و ساعتی است که دستگاه ذخیره کرده.</li>
+      </ul>
+    </div>
+
+    <!-- کادر ورودی -->
+    <div class="glass-card rounded-2xl p-5">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-bold">متن را اینجا بچسبانید</h2>
+        <span id="lineCount" class="text-xs text-slate-500">۰ خط</span>
+      </div>
+
+      <textarea id="box" rows="14" spellcheck="false"
+        class="w-full bg-slate-900/70 border border-slate-700 rounded-xl p-4 text-[13px]
+               focus:border-emerald-500 focus:outline-none"
+        placeholder="NUM=1,BCM1_OPEN=OK,..."></textarea>
+
+      <div class="flex flex-wrap gap-3 mt-4">
+        <button id="btnSend"
+          class="px-6 py-3 rounded-xl font-bold bg-emerald-600 hover:bg-emerald-500 transition">
+          افزودن به دیتابیس
+        </button>
+        <button id="btnSample"
+          class="px-4 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 transition text-sm">
+          نمونه
+        </button>
+        <button id="btnClear"
+          class="px-4 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 transition text-sm">
+          پاک کردن
+        </button>
+      </div>
+    </div>
+
+    <!-- نتیجه -->
+    <div id="result" class="glass-card rounded-2xl p-5 hidden">
+      <h2 class="font-bold mb-4">نتیجه</h2>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+        <div class="bg-slate-900/70 rounded-xl p-4">
+          <div id="rSaved" class="text-3xl font-black text-emerald-400">0</div>
+          <div class="text-xs text-slate-400 mt-1">ذخیره شد</div>
+        </div>
+        <div class="bg-slate-900/70 rounded-xl p-4">
+          <div id="rDup" class="text-3xl font-black text-amber-400">0</div>
+          <div class="text-xs text-slate-400 mt-1">تکراری</div>
+        </div>
+        <div class="bg-slate-900/70 rounded-xl p-4">
+          <div id="rBad" class="text-3xl font-black text-red-400">0</div>
+          <div class="text-xs text-slate-400 mt-1">نامعتبر</div>
+        </div>
+        <div class="bg-slate-900/70 rounded-xl p-4">
+          <div id="rIgn" class="text-3xl font-black text-slate-500">0</div>
+          <div class="text-xs text-slate-400 mt-1">نادیده گرفته شد</div>
+        </div>
+      </div>
+      <p id="rMsg" class="text-sm text-slate-400 mt-4"></p>
+    </div>
+
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function countLines() {
+  const n = $('box').value.split('\n').filter(l => l.trim()).length;
+  $('lineCount').textContent = n.toLocaleString('fa-IR') + ' خط';
+}
+$('box').addEventListener('input', countLines);
+
+$('btnClear').onclick = () => { $('box').value = ''; countLines(); $('result').classList.add('hidden'); };
+
+$('btnSample').onclick = () => {
+  $('box').value =
+`12:33:29.862 -> NUM=74,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,Temp=24.58,Humidity=44.13,Date=2026-09-29,Time=12:33:39
+NUM=75,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,Temp=24.56,Humidity=44.05,Date=2026-09-29,Time=12:35:59`;
+  countLines();
+};
+
+$('btnSend').onclick = async () => {
+  const text = $('box').value.trim();
+  if (!text) { alert('اول متن را بچسبانید'); return; }
+
+  $('btnSend').disabled = true;
+  $('btnSend').textContent = 'در حال افزودن…';
+
+  try {
+    const resp = await fetch('/api/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain; charset=utf-8', 'X-Device': 'paste-page' },
+      body: text
+    });
+    const d = await resp.json();
+
+    $('rSaved').textContent = d.saved ?? 0;
+    $('rDup').textContent   = d.duplicates ?? 0;
+    $('rBad').textContent   = d.invalid ?? 0;
+    $('rIgn').textContent   = d.ignored ?? 0;
+
+    let msg = '';
+    if (d.saved)      msg += `${d.saved} رکورد جدید وارد دیتابیس شد. `;
+    if (d.duplicates) msg += `${d.duplicates} رکورد از قبل موجود بود و دوباره ثبت نشد. `;
+    if (d.invalid)    msg += `${d.invalid} خط شبیه رکورد بود ولی فرمتش کامل نبود. `;
+    if (!d.saved && !d.duplicates) msg += 'هیچ رکورد معتبری پیدا نشد — فرمت خط را با نمونه مقایسه کنید.';
+    $('rMsg').textContent = msg;
+    $('result').classList.remove('hidden');
+
+  } catch (e) {
+    $('rMsg').textContent = 'خطا در ارتباط با سرور: ' + e;
+    $('result').classList.remove('hidden');
+  } finally {
+    $('btnSend').disabled = false;
+    $('btnSend').textContent = 'افزودن به دیتابیس';
+  }
+};
+
+countLines();
+</script>
+</body>
+</html>

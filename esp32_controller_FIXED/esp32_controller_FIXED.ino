@@ -80,7 +80,7 @@ const bool REQUIRE_BOTH_FEEDBACKS = true;
 // --- زمان‌بندی تست هر رله ---
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
 const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
-const uint32_t PHASE_GAP_MS = 800;          // فاصله‌ی بین فاز باز و بسته
+const uint32_t PHASE_GAP_MS = 5000;         // فاصله‌ی بین تریگ رله باز و رله بسته
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای معتبر بودن پالس

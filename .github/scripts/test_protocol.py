@@ -155,8 +155,11 @@ check("WiFi.onEvent(onWiFiEvent)" in esp32, "[ESP32] رویدادهای وای�
 check("uploadClient.connected()" in esp32, "[ESP32] اتصال TCP بین رکوردها باز می‌ماند")
 check("void wifiService(" in esp32,
       "[ESP32] کل منطق لینک در یک سرویس واحد جمع شده")
-check(esp32.count("WiFi.begin(") <= 3,
-      "[ESP32] فراخوانی WiFi.begin در چند جای پراکنده تکرار نشده")
+# همه‌ی اتصال‌های داده باید داخل همان یک تابع باشند؛ بیرونش فقط اتصال NTP مجاز است
+_body = esp32.split("static bool wifiConnectOnce() {")[1].split("\nvoid ")[0]
+_outside = esp32.count("WiFi.begin(") - _body.count("WiFi.begin(")
+check(_outside <= 1,
+      f"[ESP32] اتصال داده فقط در یک تابع انجام می‌شود (بیرون: {_outside})")
 check("HAMMER" not in esp32, "[ESP32] کد چکش‌کاری (بازمانده‌ی متد قدیمی) حذف شده")
 check("staticIP" not in esp32, "[ESP32] مسیر IP ثابت حذف شده و فقط DHCP می‌ماند")
 check("portMAX_DELAY);" not in esp32.split("BIT_WIFI_PERMIT,")[1][:120],

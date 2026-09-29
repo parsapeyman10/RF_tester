@@ -37,6 +37,12 @@
 //                            USER CONFIG
 // =====================================================================
 #define DEBUG_MODE 1  // برای Production صفر شود
+
+// سطح جزئیات لاگ:
+//   0 = فقط رویدادهای مهم (توصیه‌شده برای کار عادی)
+//   1 = معمولی: خلاصه‌ی سلامت و تغییر وضعیت‌ها  (پیش‌فرض)
+//   2 = کامل: همه‌چیز، برای عیب‌یابی
+#define LOG_LEVEL 1
 #define FW_VERSION "2.3"
 
 // --- ساختار واقعی سخت‌افزار -------------------------------------------------
@@ -147,6 +153,15 @@ const uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 #define DEBUG_PRINT(x)
 #define DEBUG_PRINTLN(x)
 #define DEBUG_PRINTF(...)
+#endif
+
+// لاگ پرجزئیات فقط در سطح ۲ چاپ می‌شود
+#if DEBUG_MODE && (LOG_LEVEL >= 2)
+#define VERBOSE_PRINTLN(x) Serial.println(x)
+#define VERBOSE_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+#define VERBOSE_PRINTLN(x)
+#define VERBOSE_PRINTF(...)
 #endif
 
 // =====================================================================
@@ -310,6 +325,7 @@ volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
 
 // آمار پایداری شبکه
 volatile uint32_t wifiDropCount = 0;   // چند بار لینک قطع شده
+volatile uint8_t lastDropReason = 0;   // آخرین دلیل قطعی
 const char *relayPhaseText = "بوت";    // الان در چه مرحله‌ای هستیم
 volatile uint32_t sdWriteFailures = 0; // شکست‌های پیاپی نوشتن روی SD
 const uint32_t SD_FAIL_LIMIT = 5;      // بعد از این تعداد، ری‌استارت
@@ -769,7 +785,7 @@ void runSetupPortal(bool timeAlreadyValid) {
     uint32_t elapsed = millis() - start;
     if (elapsed / 5000 != lastTick) {
       lastTick = elapsed / 5000;
-      DEBUG_PRINTF("[PORTAL] منتظر گوشی... %u ثانیه دیگر خودکار ادامه می‌دهیم "
+      DEBUG_PRINTF("[PORTAL] منتظر گوشی... %u ثانیه دیگر ادامه می‌دهیم "
                    "(SSID: %s)\n",
                    (unsigned)((portalLimit - elapsed) / 1000), SETUP_AP_SSID);
     }
@@ -828,19 +844,36 @@ LinkStats wifiLink;
 
 /** یک تلاش اتصال؛ بلاک‌کننده ولی کراندار. فقط از تسک شبکه صدا زده می‌شود. */
 static bool wifiConnectOnce() {
-  DEBUG_PRINTF("[NET] اتصال به '%s' (passLen=%u) ...\n",
-               cfgDataSsid.c_str(), (unsigned)cfgDataPass.length());
+  static uint8_t failStreak = 0;
+  VERBOSE_PRINTF("[NET] اتصال به '%s' (passLen=%u) ...\n",
+                 cfgDataSsid.c_str(), (unsigned)cfgDataPass.length());
+
+  // هر ۶ شکست، درایور کاملاً خاموش و روشن می‌شود تا از حالت گیرکرده
+  // (که خودش را به شکل هندشیک ناموفق نشان می‌دهد) بیرون بیاید.
+  if (failStreak > 0 && failStreak % 6 == 0) {
+    VERBOSE_PRINTLN("[NET] راه‌اندازی مجدد کامل درایور وای‌فای");
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    delay(500);
+  }
 
   WiFi.disconnect(true);
-  delay(100);
+  delay(200);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
-  WiFi.setAutoReconnect(true);
+  WiFi.setAutoReconnect(false);   // خودِ ما مدیریت می‌کنیم؛ تلاش‌های موازی ممنوع
 
-  // بعضی اکسس‌پوینت‌های ESP8266 به‌صورت WPA/WPA2 مختلط تبلیغ می‌شوند و ESP32
-  // با حداقلِ پیش‌فرض (WPA2) بی‌صدا از اتصال خودداری می‌کند.
+  // توجه: پایین آوردن حداقل امنیت (setMinSecurity(WPA_PSK)) باعث می‌شود
+  // ESP32 در مذاکره TKIP را پیشنهاد دهد و با اکسس‌پوینتی که WPA2/CCMP است
+  // «4WAY_HANDSHAKE_TIMEOUT» بگیرد. پیش‌فرض یعنی WPA2 که درست است؛ فقط
+  // اگر چند بار پشت سر هم شکست خورد، به‌عنوان آخرین راه امتحان می‌شود.
 #if defined(WIFI_AUTH_WPA_PSK)
-  WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+  if (failStreak >= 4) {
+    WiFi.setMinSecurity(WIFI_AUTH_WPA_PSK);
+    VERBOSE_PRINTLN("[NET] حالت سازگاری امنیتی فعال شد");
+  } else {
+    WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);
+  }
 #endif
 
   // کانال و BSSID دقیق را پیدا کن تا اتصال، کورکورانه روی همه‌ی کانال‌ها نباشد
@@ -860,11 +893,15 @@ static bool wifiConnectOnce() {
   }
   WiFi.scanDelete();
 
+  // BSSID کهنه یا کانال عوض‌شده هم می‌تواند هندشیک را خراب کند؛
+  // بعد از سه شکست، اتصال ساده (بدون قید کانال) امتحان می‌شود.
+  if (failStreak >= 3) haveBssid = false;
+
   if (haveBssid) {
-    DEBUG_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d\n", (int)channel, (int)bestRssi);
+    VERBOSE_PRINTF("[NET] AP پیدا شد: ch=%d rssi=%d\n", (int)channel, (int)bestRssi);
     WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str(), channel, bssid);
   } else {
-    DEBUG_PRINTLN("[NET] AP در اسکن نبود؛ اتصال عادی امتحان می‌شود");
+    VERBOSE_PRINTLN("[NET] AP در اسکن نبود؛ اتصال عادی امتحان می‌شود");
     WiFi.begin(cfgDataSsid.c_str(), cfgDataPass.c_str());
   }
 
@@ -872,7 +909,13 @@ static bool wifiConnectOnce() {
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < WIFI_CONNECT_TIMEOUT_MS) {
     delay(250);
   }
-  return WiFi.status() == WL_CONNECTED;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    failStreak = 0;
+    return true;
+  }
+  failStreak++;
+  return false;
 }
 
 /**
@@ -923,8 +966,13 @@ void wifiService() {
   }
 
   wifiLink.failures++;
-  DEBUG_PRINTF("[NET] وصل نشد (status=%d) — تلاش بعدی تا %u ثانیه دیگر\n",
-               (int)WiFi.status(), (unsigned)(wifiLink.backoffMs / 1000));
+  // فقط تلاش‌های اول، پنجم، دهم... گزارش می‌شوند
+  if (wifiLink.failures <= 2 || wifiLink.failures % 5 == 0) {
+    DEBUG_PRINTF("[NET] وصل نشد (تلاش %u، دلیل %u %s) — تلاش بعدی %u ثانیه دیگر\n",
+                 (unsigned)wifiLink.failures, lastDropReason,
+                 wifiReasonText(lastDropReason),
+                 (unsigned)(wifiLink.backoffMs / 1000));
+  }
 
   // هر پنج شکست، یک اسکن تشخیصی کامل
   if (wifiLink.failures % 5 == 0) scanForDataAp();
@@ -966,22 +1014,25 @@ static const char *wifiReasonText(uint8_t reason) {
 
 /** اسکن تشخیصی: آیا اکسس‌پوینت هدف اصلاً در هوا هست؟ */
 void scanForDataAp() {
-  DEBUG_PRINTLN("[SCAN] در حال جستجوی شبکه‌ها ...");
   int n = WiFi.scanNetworks();
   bool found = false;
 
   for (int i = 0; i < n; i++) {
     bool isTarget = (WiFi.SSID(i) == cfgDataSsid);
-    if (isTarget) found = true;
-    DEBUG_PRINTF("[SCAN] %s%-20s ch=%2d rssi=%4d enc=%d\n",
-                 isTarget ? "-> " : "   ",
-                 WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i),
-                 (int)WiFi.encryptionType(i));
+    if (isTarget) {
+      found = true;
+      DEBUG_PRINTF("[SCAN] %s دیده شد: ch=%d rssi=%d enc=%d\n",
+                   cfgDataSsid.c_str(), WiFi.channel(i), WiFi.RSSI(i),
+                   (int)WiFi.encryptionType(i));
+    }
+    // فهرست کامل شبکه‌ها فقط در حالت عیب‌یابی کامل
+    VERBOSE_PRINTF("[SCAN]   %-20s ch=%2d rssi=%4d\n",
+                   WiFi.SSID(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
   }
   WiFi.scanDelete();
 
   if (found) {
-    DEBUG_PRINTLN("[SCAN] AP دیده می‌شود -> پس مشکل رمز یا تنظیمات است");
+    DEBUG_PRINTLN("[SCAN] AP در دسترس است -> مشکل از رمز یا مذاکره‌ی امنیتی است");
   } else {
     DEBUG_PRINTF("[SCAN] '%s' در هوا نیست! برد گیرنده روشن است؟ فاصله زیاد است؟\n",
                  cfgDataSsid.c_str());
@@ -999,9 +1050,19 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED: {
       wifiDropCount++;
-      uint8_t reason = info.wifi_sta_disconnected.reason;
-      DEBUG_PRINTF("[NET] قطع شد (بار %u) reason=%u %s\n",
-                   (unsigned)wifiDropCount, reason, wifiReasonText(reason));
+      lastDropReason = info.wifi_sta_disconnected.reason;
+
+      // به‌جای چاپ هر قطعی (که پنجره را پر می‌کرد) حداکثر هر ۳۰ ثانیه
+      // یک خلاصه چاپ می‌شود.
+      static uint32_t lastReport = 0;
+      static uint32_t reportedAt = 0;
+      if (millis() - lastReport > 30000) {
+        uint32_t since = wifiDropCount - reportedAt;
+        reportedAt = wifiDropCount;
+        lastReport = millis();
+        DEBUG_PRINTF("[NET] %u قطعی در ۳۰ ثانیه‌ی اخیر | دلیل: %u %s\n",
+                     (unsigned)since, lastDropReason, wifiReasonText(lastDropReason));
+      }
       break;
     }
     default:
@@ -1463,7 +1524,7 @@ void saveToSD(const WifiData &data) {
 
       if (written == REC_SIZE) {
         sdWriteFailures = 0;
-        DEBUG_PRINTF("[SD] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
+        VERBOSE_PRINTF("[SD] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
         return;
       }
       DEBUG_PRINTF("[SD] نوشتن ناقص بود (%u از %u بایت)\n",
@@ -1615,7 +1676,7 @@ void TaskInternalWiFiConnection(void *pv) {
                   linkReady = uploadClient.connect(serverIP, serverPort);
                   if (linkReady) {
                     uploadClient.setNoDelay(true);
-                    DEBUG_PRINTLN("[UPLOAD] اتصال TCP برقرار شد");
+                    VERBOSE_PRINTLN("[UPLOAD] اتصال TCP برقرار شد");
                   }
                 }
 
@@ -1640,7 +1701,7 @@ void TaskInternalWiFiConnection(void *pv) {
                   if (ack) {
                     pos += REC_SIZE;
                     writeUploadPos(dayFile, pos);
-                    DEBUG_PRINTF("[UPLOAD] #%d sent, offset -> %u/%u\n",
+                    VERBOSE_PRINTF("[UPLOAD] #%d sent, offset -> %u/%u\n",
                                  stored.NUM, (unsigned)pos, (unsigned)fileSize);
                   } else {
                     DEBUG_PRINTLN("[UPLOAD] No ACK, will retry same record.");
@@ -1809,21 +1870,21 @@ void TaskHealthMonitor(void *pv) {
     size_t freeHeap = ESP.getFreeHeap();
     size_t minHeap = ESP.getMinFreeHeap();
 
-    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | "
-                 "wifi=%s rssi=%d drops=%u | up=%lus\n",
-                 (unsigned)freeHeap, (unsigned)minHeap,
-                 (unsigned)hbRelay, (unsigned)hbDigital,
-                 (unsigned)hbSht, (unsigned)hbNet,
-                 WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+    // یک خط خلاصه (سطح ۱) — جزئیات کامل فقط در سطح ۲
+    DEBUG_PRINTF("[OK] %s | wifi=%s%d | سیکل=%u | heap=%uk | up=%lus\n",
+                 relayPhaseText,
+                 WiFi.status() == WL_CONNECTED ? "UP " : "DOWN ",
                  WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
-                 (unsigned)wifiDropCount,
+                 (unsigned)hbRelay,
+                 (unsigned)(freeHeap / 1024),
                  (unsigned long)(millis() / 1000));
-    DEBUG_PRINTF("[STATE] مرحله: %s | سیکل هر %lu ثانیه | SD خطا: %u\n",
-                 relayPhaseText, (unsigned long)(CYCLE_PERIOD_MS / 1000),
-                 (unsigned)sdWriteFailures);
-    DEBUG_PRINTF("[LINK] connects=%u failures=%u linkUp=%lus\n",
-                 (unsigned)wifiLink.connects, (unsigned)wifiLink.failures,
-                 (unsigned long)(wifiLink.upSinceMs ? (millis() - wifiLink.upSinceMs) / 1000 : 0));
+
+    VERBOSE_PRINTF("[HEALTH] heapMin=%u | hb D:%u S:%u N:%u | drops=%u sdErr=%u | "
+                   "connects=%u failures=%u\n",
+                   (unsigned)minHeap,
+                   (unsigned)hbDigital, (unsigned)hbSht, (unsigned)hbNet,
+                   (unsigned)wifiDropCount, (unsigned)sdWriteFailures,
+                   (unsigned)wifiLink.connects, (unsigned)wifiLink.failures);
 
     if (freeHeap < 20000) DEBUG_PRINTLN("[HEALTH] هشدار: حافظه کم است!");
 

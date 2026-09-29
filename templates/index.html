@@ -178,6 +178,9 @@
                 <span class="text-sm font-bold text-emerald-400">سطح منطقی چهار سیگنال (۱ / ۰)</span>
                 <span class="text-[10px] text-slate-500">OK → 1 &nbsp;|&nbsp; NOK → 0</span>
             </div>
+            <div id="logic-empty" class="text-center text-slate-500 text-sm py-16 hidden">
+                هنوز داده‌ای برای رسم نیست — اولین رکورد که برسد، نمودار ظاهر می‌شود.
+            </div>
             <div id="logic-chart" class="w-full" style="height:420px"></div>
         </div>
 
@@ -388,9 +391,19 @@
 
     // ---------- نمودار دیجیتال چهار سیگنال روی داشبورد ----------
     async function drawLogicChart() {
+        const box = document.getElementById('logic-chart');
+        const empty = document.getElementById('logic-empty');
+        if (!box) return;
+
         try {
             const rows = await (await fetch('/api/sensor_data')).json();
-            if (!Array.isArray(rows) || rows.length === 0) return;
+            if (!Array.isArray(rows) || rows.length === 0) {
+                if (empty) empty.classList.remove('hidden');
+                box.style.display = 'none';
+                return;
+            }
+            if (empty) empty.classList.add('hidden');
+            box.style.display = '';
 
             const x = rows.map(d => `${d.time}`);
             const fields = ['BCM1_OPEN', 'BCM1_CLOSE', 'BCM2_OPEN', 'BCM2_CLOSE'];
@@ -426,7 +439,13 @@
             });
 
             Plotly.react('logic-chart', traces, layout, { responsive: true, displayModeBar: false });
-        } catch (e) { console.error('Logic chart error:', e); }
+        } catch (e) {
+            console.error('Logic chart error:', e);
+            if (empty) {
+                empty.textContent = 'خطا در رسم نمودار: ' + e;
+                empty.classList.remove('hidden');
+            }
+        }
     }
 
     document.getElementById('applySerialConfig').onclick = async () => {

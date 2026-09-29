@@ -13,3 +13,7 @@ backup_*.db
 
 # Arduino build output
 build/
+
+# ابزارهای موقت
+node_modules/
+package-lock.json

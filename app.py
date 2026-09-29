@@ -890,6 +890,20 @@ def api_ingest():
                     'ignored': ignored})
 
 
+@app.after_request
+def no_cache_html(resp):
+    """
+    صفحه‌های HTML هیچ‌وقت کش نشوند.
+    بدون این، مرورگر نسخه‌ی قدیمی داشبورد را نگه می‌داشت و تغییرات
+    (مثل نمودار جدید) تا Ctrl+F5 دیده نمی‌شد.
+    """
+    if resp.content_type and resp.content_type.startswith('text/html'):
+        resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        resp.headers['Pragma'] = 'no-cache'
+        resp.headers['Expires'] = '0'
+    return resp
+
+
 @app.route('/save_data')
 def save_data():
     """

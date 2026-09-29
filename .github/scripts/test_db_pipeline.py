@@ -186,7 +186,7 @@ with flask_app.app.app_context():
     _back = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=4300).first()
 check(_back is not None, "رکورد بازیابی‌شده در دیتابیس است")
 
-print("\n[7e] ترتیب همیشه بر اساس ساعت ذخیره‌شده توسط دستگاه است")
+print("\n[7e] ترتیب همیشه بر اساس تاریخ و ساعت ذخیره‌شده توسط دستگاه است")
 _mixed = [
     ("NUM=500,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
      "Temp=20.00,Humidity=40.00,Date=2026-05-02,Time=09:00:00"),
@@ -209,7 +209,7 @@ order = [r.num_value for r in rows]
 #   502 = 17:45 ، 501 = 23:30 ، 500 = 09:00  ->  [501, 502, 500]
 expected = [501, 502, 500] if flask_app.SORT_BY_TIME_FIRST else [502, 500, 501]
 check(order == expected,
-      f"ترتیب بر اساس ساعت دستگاه (SORT_BY_TIME_FIRST={flask_app.SORT_BY_TIME_FIRST}): {order}")
+      f"ترتیب بر اساس لحظه‌ی کامل دستگاه (تاریخ+ساعت): {order}")
 
 _c2 = flask_app.app.test_client()
 _api = _c2.get("/api/sensor_data").get_json()

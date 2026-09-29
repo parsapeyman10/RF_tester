@@ -9,7 +9,7 @@
   - Ensured Dashboard always shows the absolute latest packet.
 """
 
-from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, send_file
 from flask_sqlalchemy import SQLAlchemy
 import datetime 
 import io
@@ -888,6 +888,38 @@ def api_ingest():
     return jsonify({'status': 'success', 'saved': saved,
                     'duplicates': duplicates, 'invalid': invalid,
                     'ignored': ignored})
+
+
+@app.route('/save_data')
+def save_data():
+    """
+    «سیو دیتا» — گرفتن نسخه‌ی پشتیبان از دیتابیس اصلی.
+
+    از API پشتیبان‌گیری خود SQLite استفاده می‌شود تا حتی وقتی سرور مشغول
+    نوشتن است، فایل خروجی سالم و یکدست باشد.
+    """
+    try:
+        db.session.commit()
+        src_path = db.engine.url.database
+        if not src_path or not os.path.exists(src_path):
+            return jsonify({'status': 'error', 'message': 'فایل دیتابیس پیدا نشد'}), 404
+
+        stamp = datetime.datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')
+        out_path = os.path.join(BASE_DIR, f'backup_{stamp}.db')
+
+        src = sqlite3.connect(src_path)
+        dst = sqlite3.connect(out_path)
+        with dst:
+            src.backup(dst)      # نسخه‌ی یکدست حتی هنگام نوشتن
+        dst.close()
+        src.close()
+
+        print(f"[BACKUP] نسخه‌ی پشتیبان ساخته شد: {os.path.basename(out_path)}")
+        return send_file(out_path, as_attachment=True,
+                         download_name=f'RF_tester_{stamp}.db')
+    except Exception as exc:
+        print(f"[BACKUP] خطا: {exc}")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
 
 
 @app.route('/paste')

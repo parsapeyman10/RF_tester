@@ -97,6 +97,9 @@
 
         <a href="/paste" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50">
             <span>📝</span><span class="font-medium">افزودن دستی (متن)</span>
+        </a>
+        <a href="/save_data" class="nav-item p-4 flex items-center gap-3 hover:bg-slate-700/50 text-slate-300 no-underline">
+            <span>💾</span><span class="font-medium">سیو دیتا (پشتیبان)</span>
         </a>
     </nav>
 
@@ -152,24 +155,18 @@
             </div>
 
             <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">Logic State</span>
-                <div class="space-y-2 px-2">
-                    {% for dev in ['BCM1', 'BCM2'] %}
-                    <div class="flex justify-between items-center border-b border-slate-700/50 pb-1 last:border-0 last:pb-0">
-                        <span class="text-xs font-bold text-slate-400 font-mono">{{ dev }}</span>
-                        <div class="flex items-center gap-3">
-                            <div class="flex items-center gap-1">
-                                <span class="text-[9px] text-slate-500">باز</span>
-                                <div id="dot-{{ dev }}-open" class="w-3 h-3 rounded-full bg-slate-700 transition-all duration-300"></div>
-                            </div>
-                            <div class="flex items-center gap-1">
-                                <span class="text-[9px] text-slate-500">بسته</span>
-                                <div id="dot-{{ dev }}-close" class="w-3 h-3 rounded-full bg-slate-700 transition-all duration-300"></div>
-                            </div>
-                        </div>
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">سطح منطقی (۱ / ۰)</span>
+                <div class="grid grid-cols-2 gap-2 px-1">
+                    {% for key, fa in [('BCM1_OPEN','BCM1 باز'), ('BCM1_CLOSE','BCM1 بسته'),
+                                       ('BCM2_OPEN','BCM2 باز'), ('BCM2_CLOSE','BCM2 بسته')] %}
+                    <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center">
+                        <span class="text-[9px] text-slate-400 font-mono mb-1">{{ fa }}</span>
+                        <span id="lvl-{{ key }}"
+                              class="text-2xl font-black leading-none text-slate-600 transition-all duration-300">–</span>
                     </div>
                     {% endfor %}
                 </div>
+            </div>
             </div>
 
         </div>
@@ -363,17 +360,15 @@
             const dateEl = document.getElementById('live-date');
             if(dateEl) dateEl.innerText = last.date || '----/--/--';
 
-            // نتیجه‌ی تفکیکی هر دستگاه: باز شدن و بسته شدن
-            const results = last.bcm_results || {};
-            ['BCM1', 'BCM2'].forEach(dev => {
-                ['open', 'close'].forEach(motion => {
-                    const dot = document.getElementById(`dot-${dev}-${motion}`);
-                    if (!dot) return;
-                    const active = results[dev] && results[dev][motion];
-                    dot.className = active
-                        ? 'w-3 h-3 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e] transition-all duration-300'
-                        : 'w-3 h-3 rounded-full bg-red-500/70 transition-all duration-300';
-                });
+            // چهار سطح منطقی: OK -> 1 ، NOK -> 0
+            const st = last.nbcm_statuses || {};
+            ['BCM1_OPEN','BCM1_CLOSE','BCM2_OPEN','BCM2_CLOSE'].forEach(key => {
+                const el = document.getElementById('lvl-' + key);
+                if (!el) return;
+                const one = st[key] === 'active';
+                el.textContent = one ? '1' : '0';
+                el.className = 'text-2xl font-black leading-none transition-all duration-300 '
+                    + (one ? 'text-emerald-400 drop-shadow-[0_0_8px_#22c55e]' : 'text-red-400');
             });
         } catch (e) { console.error("Dashboard Sync Error:", e); }
     }

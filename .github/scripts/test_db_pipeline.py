@@ -267,13 +267,30 @@ check(_r["ignored"] >= 4, f"خطوط لاگ و ``` نادیده گرفته شد�
 _r2 = _pc.post("/api/ingest", data=_paste.encode(), content_type="text/plain").get_json()
 check(_r2["saved"] == 0 and _r2["duplicates"] == 2, f"چسباندن دوباره تکراری نمی‌سازد ({_r2})")
 
+print("\n[8c] نمایش سطح منطقی ۱/۰ و سیو دیتا")
+_c3 = flask_app.app.test_client()
+_idx = _c3.get("/").get_data(as_text=True)
+check("lvl-BCM1_OPEN" in _idx and "lvl-BCM2_CLOSE" in _idx,
+      "داشبورد چهار سطح منطقی را دارد")
+check("سطح منطقی" in _idx, "عنوان «سطح منطقی» در داشبورد هست")
+
+_hist = _c3.get("/history?date=2026-01-05").get_data(as_text=True)
+check("سطح منطقی" in _hist, "ستون سطح منطقی در آرشیو هست")
+
+_bk = _c3.get("/save_data")
+check(_bk.status_code == 200, f"/save_data -> {_bk.status_code}")
+check(_bk.headers.get("Content-Disposition", "").startswith("attachment"),
+      "فایل پشتیبان به‌صورت دانلود برمی‌گردد")
+check(_bk.data[:16].startswith(b"SQLite format 3"),
+      "محتوای فایل، یک دیتابیس معتبر SQLite است")
+
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")
 flask_app.app.config["TESTING"] = True
 client = flask_app.app.test_client()
 for route in ("/", "/history", "/plot_display", "/upload_dat",
-              "/api/sensor_data", "/paste"):
+              "/api/sensor_data", "/paste", "/save_data"):
     try:
         resp = client.get(route)
         check(resp.status_code == 200, f"{route} -> {resp.status_code}")

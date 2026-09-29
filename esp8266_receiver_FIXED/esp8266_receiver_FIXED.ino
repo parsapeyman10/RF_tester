@@ -57,9 +57,10 @@ const uint8_t  AP_MAX_CLIENTS = 8;        // سخت‌گیری بی‌دلیل �
 // توان خروجی: حداکثرِ ۲۰.۵ وقتی دو برد کنار هم روی میز هستند باعث اشباع
 // گیرنده‌ی طرف مقابل و خراب شدن فریم‌های EAPOL می‌شود؛ نتیجه‌اش دقیقاً
 // «4WAY_HANDSHAKE_TIMEOUT» است. ۱۴ dBm برای چند ده متر کافی است.
-// ۱۷ dBm تعادل خوبی است: برد کافی، بدون اشباع کردن گیرنده وقتی بردها
-// نزدیک‌اند. اگر فاصله زیاد است ۲۰.۵ بگذارید، اگر چسبیده‌اند ۱۲.
-const float    AP_TX_POWER = 17.0;
+// توان خروجی اکسس‌پوینت. اگر در لاگ ESP32 مقدار rssi بدتر از -70 دیدید،
+// یعنی فاصله زیاد است و باید روی حداکثر (۲۰.۵) بماند. فقط وقتی بردها
+// چسبیده به هم‌اند و هندشیک خراب می‌شود، ۱۲ تا ۱۴ بگذارید.
+const float    AP_TX_POWER = 20.5;
 
 // فقط برای عیب‌یابی: اکسس‌پوینت را بدون رمز بالا می‌آورد.
 // اگر با این حالت ESP32 وصل شد، مشکل از احراز هویت/رمز است؛
@@ -69,6 +70,11 @@ const float    AP_TX_POWER = 17.0;
 const unsigned long CLIENT_IDLE_TIMEOUT_MS = 60000;   // قبلاً ۱۰ ثانیه بود
 const unsigned long AP_HEALTH_PERIOD_MS = 30000;      // گزارش سلامت هر ۳۰ ثانیه
 const uint32_t LOW_HEAP_LIMIT = 6000;                 // آستانه‌ی حافظه‌ی بحرانی
+
+// اگر کلاینتی در جدول اکسس‌پوینت ثبت شده ولی این مدت هیچ داده‌ای نفرستاده،
+// آن ثبت «مرده» است. تلنبار شدن این‌ها باعث می‌شود AP پیام ASSOC_TOOMANY
+// بدهد و کلاینت واقعی دیگر نتواند وصل شود؛ پس AP بازسازی می‌شود.
+const unsigned long STALE_SESSION_MS = 120000;        // ۲ دقیقه
 
 // ظرفیت بافر ورودی
 const int RX_BUFFER_SIZE = 512;
@@ -103,6 +109,7 @@ struct ReceiverStats {
   uint32_t apRestarts = 0;     // چند بار AP بازسازی شده
 };
 ReceiverStats stats;
+unsigned long lastDataMs = 0;      // آخرین باری که دیتای معتبر رسید
 
 // هندلرهای رویداد اکسس‌پوینت (باید سراسری بمانند)
 WiFiEventHandler onStationConnectedHandler;
@@ -126,6 +133,7 @@ bool strToBool(const char* str);
 /** وقتی ESP32 (یا هر کلاینتی) به اکسس‌پوینت می‌پیوندد */
 void handleStationConnected(const WiFiEventSoftAPModeStationConnected &evt) {
   stats.sessions++;
+  lastDataMs = millis();   // به کلاینت تازه فرصت می‌دهیم
   ST_PRINTF("[AP] کلاینت وصل شد: %s (مجموع نشست‌ها: %u)\n",
             macToString(evt.mac).c_str(), stats.sessions);
 }
@@ -199,12 +207,14 @@ void loop() {
             if (strcmp(rxBuffer, "PING") == 0) {
               currentClient.println("PONG");
               stats.pings++;
+              lastDataMs = millis();
             }
             // تحلیل دیتا و بررسی مطابقت با فرمت درخواستی
             else if (parseData(rxBuffer)) {
               // ارسال تاییدیه OK به فرستنده (ESP32)
               currentClient.println("OK");
               stats.linesOk++;
+              lastDataMs = millis();
               DBG_PRINTLN("[RESPONSE]: Sent 'OK' to Client (Handshake Complete)");
               // تنها خروجی غیرمشروط به کامپیوتر: همیشه چاپ می‌شود
               // چون Flask دقیقاً منتظر همین یک خط با فرمت NUM=... است
@@ -263,7 +273,17 @@ void loop() {
       initAccessPoint();
     }
 
-    // ۲) گاهی SoftAP بدون اینکه پایین بیاید دیگر کسی را نمی‌پذیرد
+    // ۲) نشست‌های مرده: کلاینت در جدول هست ولی داده‌ای نمی‌آید
+    if (stations > 0 && lastDataMs > 0 &&
+        (millis() - lastDataMs) > STALE_SESSION_MS) {
+      ST_PRINTF("[HEALTH] %u نشست مرده (%lu ثانیه بدون داده) -> بازسازی AP\n",
+                stations, (millis() - lastDataMs) / 1000);
+      stats.apRestarts++;
+      lastDataMs = millis();
+      initAccessPoint();
+    }
+
+    // ۳) گاهی SoftAP بدون اینکه پایین بیاید دیگر کسی را نمی‌پذیرد
     static uint8_t noClientRounds = 0;
     if (stations == 0) {
       noClientRounds++;
@@ -277,7 +297,7 @@ void loop() {
       noClientRounds = 0;
     }
 
-    // ۳) محافظ حافظه: با هیپ خیلی کم، پشته‌ی شبکه ناپایدار می‌شود
+    // ۴) محافظ حافظه: با هیپ خیلی کم، پشته‌ی شبکه ناپایدار می‌شود
     if (heap < LOW_HEAP_LIMIT) {
       ST_PRINTF("[HEALTH] حافظه بحرانی (%u) -> ریست کنترل‌شده\n", heap);
       delay(200);

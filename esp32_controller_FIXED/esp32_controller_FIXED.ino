@@ -23,6 +23,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_log.h>
 #include <WebServer.h>
 #include <time.h>
 #include <Preferences.h>
@@ -444,6 +445,11 @@ void setup() {
   xSDMutex = xSemaphoreCreateMutex();
   xGlobalStateMutex = xSemaphoreCreateMutex();
   xSystemEvents = xEventGroupCreate();
+
+  // لاگ‌های داخلی درایور وای‌فای (مثل «wifi:Set status to INIT») فقط نویزند
+  // و در جریان تلاش‌های مجدد طبیعی هستند؛ فقط هشدارها و بالاتر نشان داده شوند.
+  esp_log_level_set("wifi", ESP_LOG_WARN);
+  esp_log_level_set("wifi_init", ESP_LOG_WARN);
 
   WiFi.onEvent(onWiFiEvent);  // با اطلاعات دلیل قطعی
   loadConfig();
@@ -1217,8 +1223,29 @@ void wifiService() {
                  (unsigned)(wifiLink.backoffMs / 1000));
   }
 
-  // هر پنج شکست، یک اسکن تشخیصی کامل
-  if (wifiLink.failures % 5 == 0) scanForDataAp();
+  // راهنمای هدفمند بر اساس دلیل واقعی قطعی
+  if (wifiLink.failures % 5 == 0) {
+    scanForDataAp();
+
+    switch (lastDropReason) {
+      case 15:  // 4WAY_HANDSHAKE_TIMEOUT
+      case 204:
+        DEBUG_PRINTLN("[NET] هندشیک کامل نمی‌شود: معمولاً سیگنال ضعیف "
+                      "(rssi بدتر از -70) یا افت ولتاژ گیرنده است");
+        break;
+      case 5:   // ASSOC_TOOMANY
+        DEBUG_PRINTLN("[NET] اکسس‌پوینت می‌گوید ظرفیتش پر است: نشست‌های مرده "
+                      "روی گیرنده جمع شده‌اند؛ گیرنده خودش تا ۲ دقیقه دیگر "
+                      "اکسس‌پوینت را بازسازی می‌کند");
+        break;
+      case 201:  // NO_AP_FOUND
+        DEBUG_PRINTLN("[NET] اکسس‌پوینت دیده نمی‌شود: گیرنده خاموش است یا "
+                      "فاصله/مانع زیاد است");
+        break;
+      default:
+        break;
+    }
+  }
 
   wifiLink.nextTryMs = millis() + wifiLink.backoffMs;
   wifiLink.backoffMs = (wifiLink.backoffMs * 2 > WIFI_BACKOFF_MAX_MS)

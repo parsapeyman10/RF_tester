@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 ESP32_INO = os.path.join(ROOT, "esp32_controller_FIXED", "esp32_controller_FIXED.ino")
 ESP8266_INO = os.path.join(ROOT, "esp8266_receiver_FIXED", "esp8266_receiver_FIXED.ino")
 
-KEYS = ["NUM", "NBCM1", "NBCM2", "NBCM3", "NBCM4",
+KEYS = ["NUM", "BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE",
         "Temp", "Humidity", "Date", "Time"]
 
 failures = []
@@ -65,7 +65,7 @@ if m:
 sys.path.insert(0, ROOT)
 import app as flask_app  # noqa: E402  (import بعد از تنظیم مسیر)
 
-sample = ("NUM=42,NBCM1=OK,NBCM2=NOK,NBCM3=OK,NBCM4=NOK,"
+sample = ("NUM=42,BCM1_OPEN=OK,BCM1_CLOSE=NOK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,"
           "Temp=23.45,Humidity=51.20,Date=2026-01-05,Time=13:04:09")
 
 payload = flask_app.parse_industrial_line(sample)
@@ -73,9 +73,16 @@ check(payload is not None, "parse_industrial_line خط استاندارد را �
 if payload:
     check(payload["num_value"] == "42", f"NUM اشتباه پارس شد: {payload['num_value']}")
     # چهار فیلد پروتکل = باز/بسته برای هر یک از دو دستگاه
-    check(payload["nbcm"] == ["NBCM1", "NBCM3"], f"NBCM اشتباه: {payload['nbcm']}")
+    check(payload["nbcm"] == ["BCM1_OPEN", "BCM2_OPEN"], f"فیلدها اشتباه: {payload['nbcm']}")
     check(flask_app.DEVICES == ("BCM1", "BCM2"), "دو دستگاه تعریف شده است")
     check(len(flask_app.RESULT_MAP) == 4, "چهار نتیجه‌ی تفکیکی نگاشت شده است")
+    check(flask_app.RESULT_FIELDS ==
+          ("BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE"),
+          "نام فیلدها صریح است")
+    _old = ("NUM=42,NBCM1=OK,NBCM2=NOK,NBCM3=OK,NBCM4=NOK,"
+            "Temp=23.45,Humidity=51.20,Date=2026-01-05,Time=13:04:09")
+    check(flask_app.parse_industrial_line(_old) is not None,
+          "خط فریمور قدیمی (NBCMx) هم هنوز پذیرفته می‌شود")
     check(payload["temp"] == "23.45", f"Temp اشتباه: {payload['temp']}")
     check(payload["humidity"] == "51.20", f"Humidity اشتباه: {payload['humidity']}")
     check(payload["date"] == "2026-01-05", f"Date اشتباه: {payload['date']}")

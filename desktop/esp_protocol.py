@@ -32,8 +32,8 @@ END_MARK = "END"
 # فرمت واحد پروژه: همان خطی که app.py هم می‌خواند
 LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
-    r"NBCM1=(?P<n1>[A-Za-z0-9]+),NBCM2=(?P<n2>[A-Za-z0-9]+),"
-    r"NBCM3=(?P<n3>[A-Za-z0-9]+),NBCM4=(?P<n4>[A-Za-z0-9]+),"
+    r"(?:BCM1_OPEN|BCM1 باز)=(?P<n1>[A-Za-z0-9]+),(?:BCM1_CLOSE|BCM1 بسته)=(?P<n2>[A-Za-z0-9]+),"
+    r"(?:BCM2_OPEN|NBCM3)=(?P<n3>[A-Za-z0-9]+),(?:BCM2_CLOSE|NBCM4)=(?P<n4>[A-Za-z0-9]+),"
     r"Temp=(?P<t>-?\d+(?:\.\d+)?),Humidity=(?P<h>-?\d+(?:\.\d+)?),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
@@ -67,8 +67,8 @@ class Reading:
         return (
             f"#{self.id}   {self.timestamp}\n"
             f"    T = {self.temp:.2f} C    |    H = {self.humidity:.2f} %\n"
-            f"    NBCM1 = {'OK' if self.nbcm1 else 'NOK'}    |    "
-            f"NBCM2 = {'OK' if self.nbcm2 else 'NOK'}"
+            f"    BCM1 باز = {'OK' if self.nbcm1 else 'NOK'}    |    "
+            f"BCM1 بسته = {'OK' if self.nbcm2 else 'NOK'}"
         )
 
 
@@ -110,10 +110,10 @@ def parse_records(raw: str) -> List[Reading]:
             id=_to_int(g["num"], -1),
             temp=_to_float(g["t"]),
             humidity=_to_float(g["h"]),
-            nbcm1=g["n1"].upper() in TRUE_TOKENS,
-            nbcm2=g["n2"].upper() in TRUE_TOKENS,
-            nbcm3=g["n3"].upper() in TRUE_TOKENS,
-            nbcm4=g["n4"].upper() in TRUE_TOKENS,
+            nbcm1=g["n1"].upper() in TRUE_TOKENS,   # BCM1 باز شد
+            nbcm2=g["n2"].upper() in TRUE_TOKENS,   # BCM1 بسته شد
+            nbcm3=g["n3"].upper() in TRUE_TOKENS,   # BCM2 باز شد
+            nbcm4=g["n4"].upper() in TRUE_TOKENS,   # BCM2 بسته شد
             timestamp="%04d-%02d-%02d %02d:%02d:%02d" % (
                 int(g["y"]), int(g["mo"]), int(g["d"]),
                 int(g["hh"]), int(g["mi"]), int(g["ss"])),
@@ -150,7 +150,7 @@ def to_server_lines(records: List[Reading]) -> List[str]:
             lines.append(r.raw_line)
         else:
             lines.append(
-                "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,"
+                "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
                 "Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s" % (
                     r.id,
                     "OK" if r.nbcm1 else "NOK", "OK" if r.nbcm2 else "NOK",

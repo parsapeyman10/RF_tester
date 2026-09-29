@@ -124,8 +124,10 @@ function render(){
         <span>${Number(r.humidity).toFixed(2)}%<small>رطوبت</small></span>
       </div>
       <div class="tags">
-        <span class="tag ${r.nbcm1?'ok':'nok'}">NBCM1 ${r.nbcm1?'OK':'NOK'}</span>
-        <span class="tag ${r.nbcm2?'ok':'nok'}">NBCM2 ${r.nbcm2?'OK':'NOK'}</span>
+        <span class="tag ${r.nbcm1?'ok':'nok'}">BCM1 باز ${r.nbcm1?'OK':'NOK'}</span>
+        <span class="tag ${r.nbcm2?'ok':'nok'}">BCM1 بسته ${r.nbcm2?'OK':'NOK'}</span>
+        <span class="tag ${r.nbcm3?'ok':'nok'}">BCM2 باز ${r.nbcm3?'OK':'NOK'}</span>
+        <span class="tag ${r.nbcm4?'ok':'nok'}">BCM2 بسته ${r.nbcm4?'OK':'NOK'}</span>
       </div>
     </div>`).join('');
 }
@@ -167,8 +169,8 @@ $('bpush').onclick = () => run(lastCmd, true);
 $('bclr').onclick = () => { records = []; render(); $('raw').textContent='—'; setStatus('پاک شد.'); };
 $('bcsv').onclick = () => {
   if(!records.length) return setStatus('چیزی برای خروجی گرفتن نیست.', 'err');
-  const rows = [['ID','Timestamp','Temp','Humidity','NBCM1','NBCM2']]
-    .concat(records.map(r => [r.id, r.timestamp, r.temp, r.humidity, r.nbcm1?'OK':'NOK', r.nbcm2?'OK':'NOK']));
+  const rows = [['ID','Timestamp','Temp','Humidity','BCM1_OPEN','BCM1_CLOSE','BCM2_OPEN','BCM2_CLOSE']]
+    .concat(records.map(r => [r.id, r.timestamp, r.temp, r.humidity, r.nbcm1?'OK':'NOK', r.nbcm2?'OK':'NOK', r.nbcm3?'OK':'NOK', r.nbcm4?'OK':'NOK']));
   const blob = new Blob(['\ufeff' + rows.map(r=>r.join(',')).join('\n')], {type:'text/csv;charset=utf-8'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = 'rf_tester_export.csv'; a.click();

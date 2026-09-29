@@ -97,7 +97,19 @@ const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;   // مهلت هر تلاش ات�
 const uint32_t WIFI_BACKOFF_MIN_MS = 2000;       // فاصله‌ی تلاش‌ها: از ۲ ثانیه
 const uint32_t WIFI_BACKOFF_MAX_MS = 30000;      // تا سقف ۳۰ ثانیه
 const uint32_t TCP_KEEPALIVE_MS = 25000;         // PING برای زنده نگه داشتن سوکت
-const uint32_t LINK_DOWN_RESET_MS = 300000;      // ۵ دقیقه قطعی -> ریست کنترل‌شده
+// --- زمان‌بندی واچ‌داگ (بازبینی‌شده) ---
+// هر تسک یک «ضربان» دارد. اگر ضربانی در بازه‌ی زیر تکان نخورد یعنی قفل کرده
+// و برد کنترل‌شده ری‌استارت می‌شود. مقادیر با سرعت طبیعی هر تسک تنظیم شده‌اند:
+//   • شبکه   : هر ≤۲ ثانیه یک ضربان  -> ۹۰ ثانیه سکوت = قفل
+//   • رله    : هر سیکل یک ضربان      -> ۳ برابر دوره‌ی سیکل
+//   • دیجیتال: در هر پنجره‌ی پایش     -> ۳ برابر دوره‌ی سیکل
+//   • سنسور  : هر سیکل یک ضربان      -> ۳ برابر دوره‌ی سیکل
+const uint32_t WDT_CHECK_PERIOD_MS = 15000;
+const uint32_t WDT_TIMEOUT_NET_MS = 90000;
+const uint32_t WDT_TIMEOUT_RELAY_MS = CYCLE_PERIOD_MS * 3;
+const uint32_t WDT_TIMEOUT_DIGITAL_MS = CYCLE_PERIOD_MS * 3;
+const uint32_t WDT_TIMEOUT_SHT_MS = CYCLE_PERIOD_MS * 3;
+const uint32_t LINK_DOWN_RESET_MS = 600000;      // ۱۰ دقیقه قطعی بعد از اتصال موفق
 const char *DEVICE_HOSTNAME = "RF-TESTER";
 
 // شبکه‌هایی که برای گرفتن ساعت از NTP امتحان می‌شوند (مودم یا هات‌اسپات گوشی).
@@ -240,7 +252,8 @@ struct WifiData {
   int NUM;
   float Temp;
   float Hum;
-  bool NBCM1, NBCM2, NBCM3, NBCM4;
+  // چهار نتیجه‌ی تفکیکی هر سیکل (ترتیب بایت‌ها دست‌نخورده است)
+  bool BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
   int Year;
   uint8_t Month, Day, Hour, Minute, Second;
 };
@@ -298,6 +311,8 @@ volatile uint32_t hbRelay = 0, hbDigital = 0, hbSht = 0, hbNet = 0;
 // آمار پایداری شبکه
 volatile uint32_t wifiDropCount = 0;   // چند بار لینک قطع شده
 const char *relayPhaseText = "بوت";    // الان در چه مرحله‌ای هستیم
+volatile uint32_t sdWriteFailures = 0; // شکست‌های پیاپی نوشتن روی SD
+const uint32_t SD_FAIL_LIMIT = 5;      // بعد از این تعداد، ری‌استارت
 uint32_t lastTxMillis = 0;             // آخرین باری که چیزی روی سوکت فرستادیم
 
 // Prototypes
@@ -1140,12 +1155,11 @@ void TaskRelayControl(void *pv) {
       currentGlobalID++;
       globalSystemState.NUM = currentGlobalID;
       // نگاشت چهار فیلد پروتکل به چهار نتیجه‌ی تفکیکی این سیکل:
-      //   NBCM1 = BCM1 باز شد     NBCM2 = BCM1 بسته شد
-      //   NBCM3 = BCM2 باز شد     NBCM4 = BCM2 بسته شد
-      globalSystemState.NBCM1 = got[PHASE_OPEN][0];
-      globalSystemState.NBCM2 = got[PHASE_CLOSE][0];
-      globalSystemState.NBCM3 = got[PHASE_OPEN][1];
-      globalSystemState.NBCM4 = got[PHASE_CLOSE][1];
+      //   BCM1_OPEN / BCM1_CLOSE  و  BCM2_OPEN / BCM2_CLOSE
+      globalSystemState.BCM1_OPEN = got[PHASE_OPEN][0];
+      globalSystemState.BCM1_CLOSE = got[PHASE_CLOSE][0];
+      globalSystemState.BCM2_OPEN = got[PHASE_OPEN][1];
+      globalSystemState.BCM2_CLOSE = got[PHASE_CLOSE][1];
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
@@ -1154,15 +1168,24 @@ void TaskRelayControl(void *pv) {
       DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
                    "T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
-                   DEVICE_NAMES[0], snapshot.NBCM1 ? "OK" : "NOK",
-                                    snapshot.NBCM2 ? "OK" : "NOK",
-                   DEVICE_NAMES[1], snapshot.NBCM3 ? "OK" : "NOK",
-                                    snapshot.NBCM4 ? "OK" : "NOK",
+                   DEVICE_NAMES[0], snapshot.BCM1_OPEN ? "OK" : "NOK",
+                                    snapshot.BCM1_CLOSE ? "OK" : "NOK",
+                   DEVICE_NAMES[1], snapshot.BCM2_OPEN ? "OK" : "NOK",
+                                    snapshot.BCM2_CLOSE ? "OK" : "NOK",
                    snapshot.Temp, snapshot.Hum,
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
 
-      xQueueSend(xDataQueue, (void *)&snapshot, pdMS_TO_TICKS(100));
+      if (xQueueSend(xDataQueue, (void *)&snapshot, pdMS_TO_TICKS(100)) != pdPASS) {
+        // صف پر است -> همین‌جا مستقیم روی SD بنویس تا رکورد گم نشود
+        DEBUG_PRINTLN("[CYCLE] صف پر بود؛ ذخیره‌ی مستقیم روی SD");
+        if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
+          saveToSD(snapshot);
+          xSemaphoreGive(xSDMutex);
+        } else {
+          sdWriteFailures++;
+        }
+      }
       saveNextPersistentID(currentGlobalID);
     } else {
       DEBUG_PRINTLN("[CYCLE] Error: state mutex busy, record skipped.");
@@ -1417,17 +1440,48 @@ static int lastRecordIdOnSD() {
   return id;
 }
 
+/**
+ * ذخیره‌ی رکورد روی SD — «دیتا هیچ‌وقت نباید گم شود»
+ *
+ * سه لایه محافظت:
+ *   ۱) اگر باز کردن فایل شکست خورد، یک بار SD دوباره مقداردهی و تلاش می‌شود
+ *   ۲) بعد از نوشتن، اندازه‌ی نوشته‌شده بررسی می‌شود
+ *   ۳) شکست‌های پیاپی شمرده می‌شوند؛ ناظر سلامت بعد از SD_FAIL_LIMIT بار
+ *      برد را ری‌استارت می‌کند
+ */
 void saveToSD(const WifiData &data) {
   String path = dayFilePath(data.Year, data.Month, data.Day);
-  File f = SD.open(path, FILE_APPEND);
-  if (!f) f = SD.open(path, FILE_WRITE);  // اولین بار
-  if (f) {
-    f.write((const uint8_t *)&data, REC_SIZE);
-    f.close();
-    DEBUG_PRINTF("[SD] Appended #%d -> %s\n", data.NUM, path.c_str());
-  } else {
-    DEBUG_PRINTLN("[SD] Critical: could not write daily file!");
+
+  for (int attempt = 0; attempt < 2; attempt++) {
+    File f = SD.open(path, FILE_APPEND);
+    if (!f) f = SD.open(path, FILE_WRITE);  // اولین رکورد امروز
+
+    if (f) {
+      size_t written = f.write((const uint8_t *)&data, REC_SIZE);
+      f.flush();
+      f.close();
+
+      if (written == REC_SIZE) {
+        sdWriteFailures = 0;
+        DEBUG_PRINTF("[SD] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
+        return;
+      }
+      DEBUG_PRINTF("[SD] نوشتن ناقص بود (%u از %u بایت)\n",
+                   (unsigned)written, (unsigned)REC_SIZE);
+    }
+
+    if (attempt == 0) {
+      DEBUG_PRINTLN("[SD] تلاش دوم: مقداردهی مجدد کارت حافظه");
+      SD.end();
+      delay(50);
+      if (!SD.begin(SD_CS_PIN)) DEBUG_PRINTLN("[SD] مقداردهی مجدد ناموفق بود");
+      if (!SD.exists("/data")) SD.mkdir("/data");
+    }
   }
+
+  sdWriteFailures++;
+  DEBUG_PRINTF("[SD] بحرانی: رکورد #%d ذخیره نشد (شکست پیاپی: %u)\n",
+               data.NUM, (unsigned)sdWriteFailures);
 }
 
 /**
@@ -1440,12 +1494,13 @@ void saveToSD(const WifiData &data) {
  */
 void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
   snprintf(out, outSize,
-           "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+           "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
+           "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
            d.NUM,
-           d.NBCM1 ? "OK" : "NOK",
-           d.NBCM2 ? "OK" : "NOK",
-           d.NBCM3 ? "OK" : "NOK",
-           d.NBCM4 ? "OK" : "NOK",
+           d.BCM1_OPEN ? "OK" : "NOK",
+           d.BCM1_CLOSE ? "OK" : "NOK",
+           d.BCM2_OPEN ? "OK" : "NOK",
+           d.BCM2_CLOSE ? "OK" : "NOK",
            d.Temp, d.Hum,
            d.Year, d.Month, d.Day,
            d.Hour, d.Minute, d.Second);
@@ -1503,22 +1558,27 @@ void TaskInternalWiFiConnection(void *pv) {
           debugServerStarted = false;
         }
 
-        // قبلاً اینجا portMAX_DELAY بود و تسک شبکه تا پایان سیکل رله
-        // کامل می‌خوابید. حالا هر ۲ ثانیه بیدار می‌شود و اتصال را زنده
-        // نگه می‌دارد، ولی تا اجازه نگیرد سراغ SD/آپلود نمی‌رود.
+        // الف) ذخیره‌سازی اولویت مطلق دارد و به اجازه‌ی شبکه ربطی ندارد.
+        //     (قبلاً پشت انتظارِ اجازه بود و اگر سیکل طول می‌کشید، رکوردها
+        //      در صف می‌ماندند.)
+        while (xQueueReceive(xDataQueue, &q, pdMS_TO_TICKS(10)) == pdPASS) {
+          if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
+            saveToSD(q);
+            xSemaphoreGive(xSDMutex);
+          } else {
+            // نتوانستیم قفل بگیریم؛ رکورد را برمی‌گردانیم تا گم نشود
+            xQueueSendToFront(xDataQueue, (void *)&q, pdMS_TO_TICKS(100));
+            DEBUG_PRINTLN("[SD] قفل آزاد نشد؛ رکورد در صف ماند");
+            break;
+          }
+        }
+
+        // ب) کارهای شبکه فقط با اجازه (تا با زمان‌بندی رله تداخل نکند)
         EventBits_t permit = xEventGroupWaitBits(xSystemEvents, BIT_WIFI_PERMIT,
                                                  pdFALSE, pdTRUE, pdMS_TO_TICKS(2000));
         if (!(permit & BIT_WIFI_PERMIT)) {
           wifiService();   // سیکل رله در جریان است؛ فقط لینک را نگه می‌داریم
           break;
-        }
-
-        // الف) هر چه در صف است روی SD ذخیره شود
-        while (xQueueReceive(xDataQueue, &q, pdMS_TO_TICKS(10)) == pdPASS) {
-          if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(1000))) {
-            saveToSD(q);
-            xSemaphoreGive(xSDMutex);
-          }
         }
 
         // ب) اگر شبکه قطع است، هر ۲۰ ثانیه دوباره تلاش کن (باگ نسخه‌ی قبل)
@@ -1720,12 +1780,28 @@ void TaskInternalWiFiConnection(void *pv) {
 //   core 2.x و 3.x فرق دارد و کد را غیرقابل‌کامپایل می‌کند.
 // =====================================================================
 void TaskHealthMonitor(void *pv) {
-  const TickType_t period = pdMS_TO_TICKS(15000);
-  const uint32_t STALL_LIMIT = 20;  // ۲۰ دور ۱۵ ثانیه‌ای = ۵ دقیقه
-
-  uint32_t lastRelay = 0, lastNet = 0;
-  uint32_t relayStall = 0, netStall = 0;
+  const TickType_t period = pdMS_TO_TICKS(WDT_CHECK_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
+
+  // آخرین مقدار و آخرین زمانی که هر ضربان تغییر کرده است
+  struct Beat {
+    const char *name;
+    volatile uint32_t *counter;
+    uint32_t timeoutMs;
+    uint32_t lastValue;
+    uint32_t lastChangeMs;
+  };
+
+  Beat beats[] = {
+    { "شبکه", &hbNet, WDT_TIMEOUT_NET_MS, 0, millis() },
+    { "رله", &hbRelay, WDT_TIMEOUT_RELAY_MS, 0, millis() },
+    { "دیجیتال", &hbDigital, WDT_TIMEOUT_DIGITAL_MS, 0, millis() },
+    { "سنسور", &hbSht, WDT_TIMEOUT_SHT_MS, 0, millis() },
+  };
+  const int beatCount = sizeof(beats) / sizeof(beats[0]);
+
+  // در حالت نمایش دیتا فقط تسک شبکه زنده است
+  bool viewMode = (xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW) != 0;
 
   for (;;) {
     vTaskDelayUntil(&lastWake, period);
@@ -1733,7 +1809,8 @@ void TaskHealthMonitor(void *pv) {
     size_t freeHeap = ESP.getFreeHeap();
     size_t minHeap = ESP.getMinFreeHeap();
 
-    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | wifi=%s rssi=%d drops=%u | up=%lus\n",
+    DEBUG_PRINTF("[HEALTH] heap=%u min=%u | hb R:%u D:%u S:%u N:%u | "
+                 "wifi=%s rssi=%d drops=%u | up=%lus\n",
                  (unsigned)freeHeap, (unsigned)minHeap,
                  (unsigned)hbRelay, (unsigned)hbDigital,
                  (unsigned)hbSht, (unsigned)hbNet,
@@ -1741,60 +1818,56 @@ void TaskHealthMonitor(void *pv) {
                  WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0,
                  (unsigned)wifiDropCount,
                  (unsigned long)(millis() / 1000));
-    DEBUG_PRINTF("[STATE] مرحله: %s | سیکل بعدی هر %lu ثانیه\n",
-                 relayPhaseText, (unsigned long)(CYCLE_PERIOD_MS / 1000));
+    DEBUG_PRINTF("[STATE] مرحله: %s | سیکل هر %lu ثانیه | SD خطا: %u\n",
+                 relayPhaseText, (unsigned long)(CYCLE_PERIOD_MS / 1000),
+                 (unsigned)sdWriteFailures);
     DEBUG_PRINTF("[LINK] connects=%u failures=%u linkUp=%lus\n",
                  (unsigned)wifiLink.connects, (unsigned)wifiLink.failures,
                  (unsigned long)(wifiLink.upSinceMs ? (millis() - wifiLink.upSinceMs) / 1000 : 0));
 
-    if (freeHeap < 20000) {
-      DEBUG_PRINTLN("[HEALTH] WARNING: low heap!");
-    }
+    if (freeHeap < 20000) DEBUG_PRINTLN("[HEALTH] هشدار: حافظه کم است!");
 
-    // تسک شبکه باید در هر دور چند بار بچرخد
-    if (hbNet == lastNet) {
-      if (++netStall >= STALL_LIMIT) {
-        Serial.println("[HEALTH] Network task stalled -> restarting device");
+    // ---------------- واچ‌داگ ضربان تسک‌ها ----------------
+    for (int i = 0; i < beatCount; i++) {
+      // در حالت نمایش دیتا، تسک‌های رله/دیجیتال/سنسور عمداً وجود ندارند
+      if (viewMode && i > 0) continue;
+
+      uint32_t now = *(beats[i].counter);
+      if (now != beats[i].lastValue) {
+        beats[i].lastValue = now;
+        beats[i].lastChangeMs = millis();
+        continue;
+      }
+
+      uint32_t silent = millis() - beats[i].lastChangeMs;
+      if (silent > beats[i].timeoutMs) {
+        Serial.printf("[WDT] تسک «%s» %lu ثانیه است پیشرفتی ندارد -> ری‌استارت\n",
+                      beats[i].name, (unsigned long)(silent / 1000));
+        Serial.flush();
         delay(200);
         ESP.restart();
-      }
-    } else {
-      netStall = 0;
-      lastNet = hbNet;
-    }
-
-    // اگر وای‌فای خیلی طولانی قطع بماند، یک ریست کنترل‌شده معمولاً
-    // درایور را از حالت گیرکرده بیرون می‌آورد (دیتا روی SD امن است)
-    if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-      // فقط وقتی ریست می‌کنیم که قبلاً یک بار وصل شده باشیم؛ یعنی درایور
-      // وای‌فای گیر کرده. اگر برد گیرنده اصلاً روشن نباشد، ریست کردن هر پنج
-      // دقیقه فقط دستگاه را در حلقه‌ی بوت می‌انداخت و کار مفیدی نمی‌کرد
-      // (دیتا در همین حالت هم روی SD ذخیره می‌شود).
-      if (wifiLink.connects > 0 && wifiLink.downSinceMs != 0 &&
-          millis() - wifiLink.downSinceMs > LINK_DOWN_RESET_MS) {
-        Serial.println("[HEALTH] لینک بعد از اتصال موفق، طولانی قطع مانده -> ریست کنترل‌شده");
-        delay(200);
-        ESP.restart();
-      } else if (wifiLink.connects == 0 && wifiLink.failures > 0 &&
-                 (wifiLink.failures % 10) == 0) {
-        Serial.println("[HEALTH] هنوز هیچ‌وقت وصل نشده‌ایم؛ کار ادامه دارد و "
-                       "دیتا روی SD ذخیره می‌شود (گیرنده روشن است؟)");
+      } else if (silent > beats[i].timeoutMs / 2) {
+        DEBUG_PRINTF("[WDT] هشدار: «%s» %lu ثانیه ساکت است (آستانه %lu ثانیه)\n",
+                     beats[i].name, (unsigned long)(silent / 1000),
+                     (unsigned long)(beats[i].timeoutMs / 1000));
       }
     }
 
-    // تسک رله در حالت نمایش دیتا حذف شده است؛ فقط در حالت عادی چک می‌شود
-    if (!(xEventGroupGetBits(xSystemEvents) & BIT_REQUEST_AP_DATA_VIEW)) {
-      if (hbRelay == lastRelay) {
-        // هر سیکل ۲ دقیقه است؛ ۵ دقیقه بی‌حرکتی یعنی گیر کرده
-        if (++relayStall >= STALL_LIMIT) {
-          Serial.println("[HEALTH] Relay task stalled -> restarting device");
-          delay(200);
-          ESP.restart();
-        }
-      } else {
-        relayStall = 0;
-        lastRelay = hbRelay;
-      }
+    // ---------------- قطعی طولانی لینک ----------------
+    if (!viewMode && wifiLink.connects > 0 && wifiLink.downSinceMs != 0 &&
+        millis() - wifiLink.downSinceMs > LINK_DOWN_RESET_MS) {
+      Serial.println("[WDT] لینک بعد از اتصال موفق، طولانی قطع مانده -> ری‌استارت");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
+    }
+
+    // ---------------- خطای مکرر کارت حافظه ----------------
+    if (sdWriteFailures >= SD_FAIL_LIMIT) {
+      Serial.println("[WDT] نوشتن روی SD مکرراً شکست خورد -> ری‌استارت");
+      Serial.flush();
+      delay(200);
+      ESP.restart();
     }
   }
 }

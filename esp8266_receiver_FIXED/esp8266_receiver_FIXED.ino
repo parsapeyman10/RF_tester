@@ -70,7 +70,8 @@ struct WifiData {
     int      NUM;
     float    Temp;
     float    Hum;
-    bool     NBCM1, NBCM2, NBCM3, NBCM4;
+    // چهار نتیجه‌ی تفکیکی: باز/بسته برای هر یک از دو دستگاه
+    bool     BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
     uint16_t Year;
     uint8_t  Month, Day, Hour, Minute, Second;
 };
@@ -338,16 +339,17 @@ bool parseData(char* inputBuffer) {
 
   // تطابق کامل با فرمت snprintf ارسالی شما
   int itemsParsed = sscanf(inputBuffer, 
-    "NUM=%d,NBCM1=%9[^,],NBCM2=%9[^,],NBCM3=%9[^,],NBCM4=%9[^,],Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d",
+    "NUM=%d,BCM1_OPEN=%9[^,],BCM1_CLOSE=%9[^,],BCM2_OPEN=%9[^,],BCM2_CLOSE=%9[^,],"
+    "Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d",
     &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec
   );
 
   if (itemsParsed == 13) {
     WData.NUM = num;
-    WData.NBCM1 = strToBool(bcm1);
-    WData.NBCM2 = strToBool(bcm2);
-    WData.NBCM3 = strToBool(bcm3);
-    WData.NBCM4 = strToBool(bcm4);
+    WData.BCM1_OPEN  = strToBool(bcm1);
+    WData.BCM1_CLOSE = strToBool(bcm2);
+    WData.BCM2_OPEN  = strToBool(bcm3);
+    WData.BCM2_CLOSE = strToBool(bcm4);
     WData.Temp = atof(tStr); 
     WData.Hum = atof(hStr);
     WData.Year = yr; WData.Month = mon; WData.Day = day;
@@ -361,19 +363,20 @@ bool parseData(char* inputBuffer) {
 // این تابع تنها پل ارتباطی بین ESP8266 و سرور Flask (روی سریال) است.
 // نسخه‌ی قبلی این خط را به فرمت انسان‌خوان "[LOG]: ID:.. | BCMs:.."
 // می‌فرستاد که هیچ‌گاه با پارسر Flask (که دنبال کلیدهای
-// NUM=,NBCM1=,...,Date=,Time= می‌گردد) مطابقت نداشت؛ یعنی داده هرگز
+// NUM=,BCM1_OPEN=,...,Date=,Time= می‌گردد) مطابقت نداشت؛ یعنی داده هرگز
 // وارد دیتابیس نمی‌شد. اکنون دقیقاً همان فرمت استاندارد پروژه ارسال
 // می‌شود که هم با sscanf ورودی و هم با parse_industrial_line در app.py
 // سازگار است.
 // =====================================================================
 void sendDataToComputer() {
   Serial.printf(
-    "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d\n",
+    "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
+    "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d\n",
     WData.NUM,
-    WData.NBCM1 ? "OK" : "NOK",
-    WData.NBCM2 ? "OK" : "NOK",
-    WData.NBCM3 ? "OK" : "NOK",
-    WData.NBCM4 ? "OK" : "NOK",
+    WData.BCM1_OPEN ? "OK" : "NOK",
+    WData.BCM1_CLOSE ? "OK" : "NOK",
+    WData.BCM2_OPEN ? "OK" : "NOK",
+    WData.BCM2_CLOSE ? "OK" : "NOK",
     WData.Temp, WData.Hum,
     WData.Year, WData.Month, WData.Day,
     WData.Hour, WData.Minute, WData.Second

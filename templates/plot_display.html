@@ -240,11 +240,11 @@
                 Plotly.newPlot('main-chart', envTraces, {...layoutBase, title: chartTitle}, {responsive: true});
 
                 // 2. نمودار نتیجه‌ی تست: باز/بسته برای هر دستگاه
-                const nbcms = ['NBCM1', 'NBCM2', 'NBCM3', 'NBCM4'];
+                const fields = ['BCM1_OPEN', 'BCM1_CLOSE', 'BCM2_OPEN', 'BCM2_CLOSE'];
                 const nbcmLabels = ['BCM1 باز', 'BCM1 بسته', 'BCM2 باز', 'BCM2 بسته'];
                 const colors = ['#22c55e', '#16a34a', '#eab308', '#ca8a04'];
-                const nTraces = nbcms.map((name, i) => {
-                    const base = (nbcms.length - 1 - i) * 2;
+                const nTraces = fields.map((name, i) => {
+                    const base = (fields.length - 1 - i) * 2;
                     return {
                         x: xLabels,
                         y: data.map(d => d.nbcm_statuses[name] === 'active' ? (base + 1) : base),

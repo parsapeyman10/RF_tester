@@ -28,7 +28,7 @@ def _make_record(rid: int) -> str:
     n1 = "OK" if random.random() > 0.15 else "NOK"
     n2 = "OK" if random.random() > 0.2 else "NOK"
     return (
-        "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=NOK,NBCM4=NOK,"
+        "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=OK,BCM2_CLOSE=NOK,"
         "Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s"
         % (rid, n1, n2, temp, hum,
            now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"))

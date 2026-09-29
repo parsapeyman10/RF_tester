@@ -26,8 +26,8 @@ object EspProtocol {
     /** فرمت واحد پروژه — عیناً همان چیزی که app.py هم پارس می‌کند */
     private val LINE_RE = Regex(
         "NUM=(-?\\d+)," +
-            "NBCM1=([A-Za-z0-9]+),NBCM2=([A-Za-z0-9]+)," +
-            "NBCM3=([A-Za-z0-9]+),NBCM4=([A-Za-z0-9]+)," +
+            "(?:BCM1_OPEN|NBCM1)=([A-Za-z0-9]+),(?:BCM1_CLOSE|NBCM2)=([A-Za-z0-9]+)," +
+            "(?:BCM2_OPEN|NBCM3)=([A-Za-z0-9]+),(?:BCM2_CLOSE|NBCM4)=([A-Za-z0-9]+)," +
             "Temp=(-?\\d+(?:\\.\\d+)?),Humidity=(-?\\d+(?:\\.\\d+)?)," +
             "Date=(\\d{4})-(\\d{1,2})-(\\d{1,2})," +
             "Time=(\\d{1,2}):(\\d{1,2}):(\\d{1,2})"
@@ -52,8 +52,10 @@ object EspProtocol {
             append("   T = ").append(String.format("%.2f", temp)).append(" C")
             append("   |   H = ").append(String.format("%.2f", humidity)).append(" %")
             append('\n')
-            append("   NBCM1 = ").append(if (nbcm1) "OK" else "NOK")
-            append("   |   NBCM2 = ").append(if (nbcm2) "OK" else "NOK")
+            append("   BCM1 باز = ").append(if (nbcm1) "OK" else "NOK")
+            append("   |   BCM1 بسته = ").append(if (nbcm2) "OK" else "NOK")
+            append("\n   BCM2 باز = ").append(if (nbcm3) "OK" else "NOK")
+            append("   |   BCM2 بسته = ").append(if (nbcm4) "OK" else "NOK")
         }
     }
 
@@ -106,7 +108,8 @@ object EspProtocol {
     /** خط‌های آماده برای POST به /api/ingest سرور Flask */
     fun toServerLines(records: List<Reading>): List<String> = records.map { r ->
         if (r.rawLine.isNotEmpty()) r.rawLine else String.format(
-            "NUM=%d,NBCM1=%s,NBCM2=%s,NBCM3=%s,NBCM4=%s,Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s",
+            "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s," +
+                "Temp=%.2f,Humidity=%.2f,Date=%s,Time=%s",
             r.id,
             if (r.nbcm1) "OK" else "NOK", if (r.nbcm2) "OK" else "NOK",
             if (r.nbcm3) "OK" else "NOK", if (r.nbcm4) "OK" else "NOK",

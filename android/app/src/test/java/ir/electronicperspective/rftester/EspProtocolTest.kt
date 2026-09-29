@@ -12,9 +12,9 @@ import org.junit.Test
  */
 class EspProtocolTest {
 
-    private val line1 = "NUM=42,NBCM1=OK,NBCM2=NOK,NBCM3=OK,NBCM4=NOK," +
+    private val line1 = "NUM=42,BCM1_OPEN=OK,BCM1_CLOSE=NOK,BCM2_OPEN=OK,BCM2_CLOSE=NOK," +
         "Temp=23.45,Humidity=51.20,Date=2026-01-05,Time=13:04:09"
-    private val line2 = "NUM=43,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK," +
+    private val line2 = "NUM=43,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=NOK," +
         "Temp=-4.50,Humidity=88.00,Date=2026-01-05,Time=13:06:09"
 
     @Test
@@ -50,6 +50,15 @@ class EspProtocolTest {
     }
 
     @Test
+    fun stillParsesLegacyNames() {
+        val old = "NUM=50,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK," +
+            "Temp=20.00,Humidity=30.00,Date=2026-01-05,Time=10:00:00"
+        val recs = EspProtocol.parseRecords(old)
+        assertEquals(1, recs.size)
+        assertTrue(recs[0].nbcm1 && recs[0].nbcm2 && !recs[0].nbcm3)
+    }
+
+    @Test
     fun stillParsesLegacyJson() {
         val json = "{\"ID\":7,\"T\":20.00,\"H\":30.00,\"N1\":1,\"N2\":0,\"Time\":\"2026-01-05 10:00:00\"}"
         val records = EspProtocol.parseRecords(json)
@@ -62,6 +71,6 @@ class EspProtocolTest {
         assertTrue(EspProtocol.isNoData("NO_DATA"))
         assertTrue(EspProtocol.parseRecords("NO_DATA\nEND").isEmpty())
         assertTrue(EspProtocol.parseRecords("[VIEW] Client connected.").isEmpty())
-        assertTrue(EspProtocol.parseRecords("NUM=44,NBCM1=OK,Temp=20.0").isEmpty())
+        assertTrue(EspProtocol.parseRecords("NUM=44,BCM1_OPEN=OK,Temp=20.0").isEmpty())
     }
 }

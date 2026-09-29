@@ -77,7 +77,8 @@ class App(tk.Tk):
 
         # --- جدول ---
         cols = ("id", "time", "temp", "hum", "n1", "n2")
-        titles = ("ID", "زمان دستگاه", "دما (C)", "رطوبت (%)", "NBCM1", "NBCM2")
+        titles = ("ID", "زمان دستگاه", "دما (C)", "رطوبت (%)",
+                  "BCM1 باز", "BCM1 بسته", "BCM2 باز", "BCM2 بسته")
         widths = (70, 190, 100, 110, 100, 100)
         self.tree = ttk.Treeview(self, columns=cols, show="headings")
         for c, t, w in zip(cols, titles, widths):
@@ -159,10 +160,12 @@ class App(tk.Tk):
     def _fill(self, recs):
         self.tree.delete(*self.tree.get_children())
         for r in recs:
-            tag = "good" if (r.nbcm1 and r.nbcm2) else "bad"
+            # سالم = هر دو دستگاه هم باز شده‌اند و هم بسته
+            tag = "good" if (r.nbcm1 and r.nbcm2 and r.nbcm3 and r.nbcm4) else "bad"
             self.tree.insert("", "end", tags=(tag,), values=(
                 r.id, r.timestamp, f"{r.temp:.2f}", f"{r.humidity:.2f}",
-                "OK" if r.nbcm1 else "NOK", "OK" if r.nbcm2 else "NOK"))
+                "OK" if r.nbcm1 else "NOK", "OK" if r.nbcm2 else "NOK",
+                "OK" if r.nbcm3 else "NOK", "OK" if r.nbcm4 else "NOK"))
 
     def clear(self):
         self.records = []
@@ -181,10 +184,12 @@ class App(tk.Tk):
             return
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             w = csv.writer(f)
-            w.writerow(["ID", "Timestamp", "Temp", "Humidity", "NBCM1", "NBCM2"])
+            w.writerow(["ID", "Timestamp", "Temp", "Humidity",
+                        "BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE"])
             for r in self.records:
                 w.writerow([r.id, r.timestamp, r.temp, r.humidity,
-                            "OK" if r.nbcm1 else "NOK", "OK" if r.nbcm2 else "NOK"])
+                            "OK" if r.nbcm1 else "NOK", "OK" if r.nbcm2 else "NOK",
+                            "OK" if r.nbcm3 else "NOK", "OK" if r.nbcm4 else "NOK"])
         self.status.config(text="ذخیره شد: " + path, fg="#22c55e")
 
 

@@ -44,32 +44,45 @@ def _resolve_templates():
 # =====================================================================
 #  نتیجه‌ی تست — تنها جای تعریف
 #
-#  سخت‌افزار دو دستگاه دارد (BCM1 و BCM2) و هر سیکل برای هر دستگاه دو
-#  نتیجه‌ی جدا تولید می‌کند: «باز شد» و «بسته شد».
+#  هر سیکل برای هر دستگاه دو نتیجه‌ی جدا تولید می‌کند و نام فیلدها در کل
+#  زنجیره (فریمور، سریال، دیتابیس، API، رابط کاربری) دقیقاً همین‌هاست:
 #
-#      فیلد پروتکل   معنی واقعی
-#      -----------   ----------------
-#      NBCM1         BCM1 - باز شدن
-#      NBCM2         BCM1 - بسته شدن
-#      NBCM3         BCM2 - باز شدن
-#      NBCM4         BCM2 - بسته شدن
-#
-#  فرمت روی سیم دست‌نخورده (۱۳ فیلد) می‌ماند؛ فقط معنی فیلدها صریح شد.
+#      BCM1_OPEN    BCM1_CLOSE    BCM2_OPEN    BCM2_CLOSE
 # =====================================================================
-NBCM_CHANNELS = ("NBCM1", "NBCM2", "NBCM3", "NBCM4")
-
-# (فیلد پروتکل، نام دستگاه، نوع حرکت، برچسب فارسی)
-RESULT_MAP = (
-    ("NBCM1", "BCM1", "open",  "BCM1 باز شدن"),
-    ("NBCM2", "BCM1", "close", "BCM1 بسته شدن"),
-    ("NBCM3", "BCM2", "open",  "BCM2 باز شدن"),
-    ("NBCM4", "BCM2", "close", "BCM2 بسته شدن"),
-)
-
+RESULT_FIELDS = ("BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE")
 DEVICES = ("BCM1", "BCM2")
 
+# (نام فیلد، دستگاه، حرکت، برچسب فارسی)
+RESULT_MAP = (
+    ("BCM1_OPEN",  "BCM1", "open",  "BCM1 باز شدن"),
+    ("BCM1_CLOSE", "BCM1", "close", "BCM1 بسته شدن"),
+    ("BCM2_OPEN",  "BCM2", "open",  "BCM2 باز شدن"),
+    ("BCM2_CLOSE", "BCM2", "close", "BCM2 بسته شدن"),
+)
 
-def build_bcm_results(nbcm_selected):
+# رکوردهای قدیمی با نام‌گذاری NBCMx ذخیره شده‌اند و باید خوانده شوند
+LEGACY_FIELD_MAP = {
+    "NBCM1": "BCM1_OPEN",
+    "NBCM2": "BCM1_CLOSE",
+    "NBCM3": "BCM2_OPEN",
+    "NBCM4": "BCM2_CLOSE",
+}
+
+
+def normalize_fields(values):
+    """نام‌های قدیمی NBCMx را به نام‌های جدید تبدیل و مرتب می‌کند"""
+    out = []
+    for v in values:
+        v = (v or "").strip()
+        if not v:
+            continue
+        v = LEGACY_FIELD_MAP.get(v, v)
+        if v in RESULT_FIELDS and v not in out:
+            out.append(v)
+    return [f for f in RESULT_FIELDS if f in out]
+
+
+def build_bcm_results(stored_fields):
     """
     از رشته‌ی ذخیره‌شده، نتیجه‌ی تفکیکی هر دستگاه را می‌سازد:
 
@@ -77,7 +90,7 @@ def build_bcm_results(nbcm_selected):
 
     ok یعنی هم باز شدن و هم بسته شدن تأیید شده‌اند.
     """
-    selected = set((nbcm_selected or "").split(","))
+    selected = set(normalize_fields((stored_fields or "").split(",")))
     out = {dev: {"open": False, "close": False, "ok": False} for dev in DEVICES}
     for field, dev, motion, _label in RESULT_MAP:
         if field in selected:
@@ -85,6 +98,7 @@ def build_bcm_results(nbcm_selected):
     for dev in DEVICES:
         out[dev]["ok"] = out[dev]["open"] and out[dev]["close"]
     return out
+
 
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
@@ -226,6 +240,36 @@ def insert_daily_rows(date_str, rows):
         conn.close()
 
 
+UNSAVED_LOG = os.path.join(BASE_DIR, "unsaved_records.log")
+
+
+def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
+    """ساخت همان خط استاندارد پروژه از روی مقادیر یک رکورد"""
+    sel = set(normalize_fields((fields or "").split(",")))
+    parts = [f"NUM={num_value}"]
+    for name in RESULT_FIELDS:
+        parts.append(f"{name}={'OK' if name in sel else 'NOK'}")
+    parts.append(f"Temp={temp}")
+    parts.append(f"Humidity={humidity}")
+    parts.append(f"Date={date_str}")
+    parts.append(f"Time={time_str}")
+    return ",".join(parts)
+
+
+def stash_unsaved(line, reason):
+    """
+    اگر به هر دلیلی نوشتن در دیتابیس شکست بخورد، خط خام در یک فایل متنی
+    نگه داشته می‌شود تا هیچ داده‌ای از بین نرود. با /api/recover_unsaved
+    دوباره وارد دیتابیس می‌شود.
+    """
+    try:
+        with open(UNSAVED_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.datetime.now().isoformat()}\t{reason}\t{line}\n")
+        print(f"[DB] رکورد در {os.path.basename(UNSAVED_LOG)} نگه داشته شد: {reason}")
+    except Exception as exc:
+        print(f"[DB] حتی ذخیره‌ی پشتیبان هم ناموفق بود: {exc}")
+
+
 def master_exists(num_value, date_str, time_str):
     """آیا این رکورد قبلاً در دیتابیس اصلی ثبت شده است؟"""
     try:
@@ -321,7 +365,7 @@ def save_sensor_data(data_source):
         # -------------------------------------------------------
 
         # هرچه غیر از کانال‌های تعریف‌شده باشد کنار گذاشته می‌شود
-        nbcm_checked_list = [n for n in nbcm_checked_list if n in NBCM_CHANNELS]
+        nbcm_checked_list = normalize_fields(nbcm_checked_list)
         nbcm_str = ",".join(nbcm_checked_list)
         log_str = f"NUM:{num_int}, H:{h_val}, T:{t_val}"
 
@@ -350,7 +394,13 @@ def save_sensor_data(data_source):
 
     except Exception as e:
         db.session.rollback()
-        print(f"[CRITICAL_DB_ERROR] {e}")
+        print(f"[DB_ERROR] {e}")
+        # تضمین: داده هرگز گم نمی‌شود
+        try:
+            stash_unsaved(record_to_line(num_int, nbcm_str, t_val, h_val, i_date, i_time),
+                          f"db_error: {e}")
+        except Exception:
+            pass
         return False
     
 # --- مدیریت سریال ---
@@ -367,8 +417,18 @@ manual_disconnect = False
 # (که موقع ریست برد یا نویز پیش می‌آید) اصلاً وارد دیتابیس نشوند.
 INDUSTRIAL_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
-    r"NBCM1=(?P<n1>[A-Za-z0-9]+),NBCM2=(?P<n2>[A-Za-z0-9]+),"
-    r"NBCM3=(?P<n3>[A-Za-z0-9]+),NBCM4=(?P<n4>[A-Za-z0-9]+),"
+    r"BCM1_OPEN=(?P<f1>[A-Za-z0-9]+),BCM1_CLOSE=(?P<f2>[A-Za-z0-9]+),"
+    r"BCM2_OPEN=(?P<f3>[A-Za-z0-9]+),BCM2_CLOSE=(?P<f4>[A-Za-z0-9]+),"
+    r"Temp=(?P<temp>-?\d+(?:\.\d+)?),Humidity=(?P<hum>-?\d+(?:\.\d+)?),"
+    r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
+    r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+)
+
+# فریمورهای قدیمی که هنوز NBCM1..4 می‌فرستند هم پذیرفته می‌شوند
+LEGACY_LINE_RE = re.compile(
+    r"NUM=(?P<num>-?\d+),"
+    r"NBCM1=(?P<f1>[A-Za-z0-9]+),NBCM2=(?P<f2>[A-Za-z0-9]+),"
+    r"NBCM3=(?P<f3>[A-Za-z0-9]+),NBCM4=(?P<f4>[A-Za-z0-9]+),"
     r"Temp=(?P<temp>-?\d+(?:\.\d+)?),Humidity=(?P<hum>-?\d+(?:\.\d+)?),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
@@ -381,14 +441,14 @@ def parse_industrial_line(line):
     """یک خط سریال را به دیکشنری استاندارد تبدیل می‌کند (یا None اگر معتبر نبود)."""
     if not line:
         return None
-    m = INDUSTRIAL_LINE_RE.search(line)
+    m = INDUSTRIAL_LINE_RE.search(line) or LEGACY_LINE_RE.search(line)
     if not m:
         return None
     g = m.groupdict()
     try:
         # هر چهار فیلد معنی دارند: باز/بسته برای هر یک از دو دستگاه
-        nbcm = [f"NBCM{i}" for i in (1, 2, 3, 4)
-                if g[f"n{i}"].strip().upper() in TRUE_TOKENS]
+        nbcm = [RESULT_FIELDS[i] for i in range(4)
+                if g[f"f{i + 1}"].strip().upper() in TRUE_TOKENS]
         date_str = "%04d-%02d-%02d" % (int(g["y"]), int(g["mo"]), int(g["d"]))
         time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
         # اعتبارسنجی واقعی تاریخ (مثلاً 2026-02-31 رد می‌شود)
@@ -516,11 +576,9 @@ def upload_dat_page():
                         
                         # لاژیک NBCM
                         # چهار نتیجه‌ی تفکیکی: باز/بسته برای هر دستگاه
-                        nbcm_list = []
-                        if data[3]: nbcm_list.append('NBCM1')   # BCM1 باز
-                        if data[4]: nbcm_list.append('NBCM2')   # BCM1 بسته
-                        if data[5]: nbcm_list.append('NBCM3')   # BCM2 باز
-                        if data[6]: nbcm_list.append('NBCM4')   # BCM2 بسته
+                        # چهار بولینِ ساختار باینری به‌ترتیب:
+                        # BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE
+                        nbcm_list = [RESULT_FIELDS[k] for k in range(4) if data[3 + k]]
                         nbcm_str = ",".join(nbcm_list)
 
                         # زمان سنسور
@@ -679,7 +737,7 @@ def get_sensor_data():
             # پارس کردن وضعیت‌های NBCM برای روشن/خاموش کردن چراغ‌ها
             nbcm_map = {
                 key: ("active" if r.nbcm_selected and key in r.nbcm_selected else "notactive")
-                for key in NBCM_CHANNELS
+                for key in RESULT_FIELDS
             }
             
             output.append({
@@ -726,7 +784,7 @@ def get_master_data():
     for r in readings:
         # پارس کردن وضعیت‌های NBCM
         nbcm_map = {}
-        for key in NBCM_CHANNELS:
+        for key in RESULT_FIELDS:
             nbcm_map[key] = "active" if r.nbcm_selected and key in r.nbcm_selected else "inactive"
 
         # *** بخش حیاتی: ساخت فرمت استاندارد ISO با حرف T ***
@@ -801,6 +859,32 @@ def api_ingest():
                     'duplicates': duplicates, 'invalid': invalid})
 
 
+@app.route('/api/recover_unsaved', methods=['POST', 'GET'])
+def api_recover_unsaved():
+    """رکوردهایی که قبلاً در فایل پشتیبان مانده‌اند را دوباره وارد دیتابیس می‌کند"""
+    if not os.path.exists(UNSAVED_LOG):
+        return jsonify({'status': 'success', 'recovered': 0, 'remaining': 0})
+
+    with open(UNSAVED_LOG, encoding='utf-8') as fh:
+        lines = fh.readlines()
+
+    recovered, remaining = 0, []
+    for raw in lines:
+        parts = raw.rstrip("\n").split("\t")
+        payload = parse_industrial_line(parts[-1]) if parts else None
+        if payload and save_sensor_data(payload):
+            recovered += 1
+        else:
+            remaining.append(raw)
+
+    with open(UNSAVED_LOG, "w", encoding="utf-8") as fh:
+        fh.writelines(remaining)
+
+    print(f"[DB] بازیابی: {recovered} رکورد برگشت، {len(remaining)} باقی ماند")
+    return jsonify({'status': 'success', 'recovered': recovered,
+                    'remaining': len(remaining)})
+
+
 @app.route('/api/serial_ports')
 def list_serial_ports():
     ports = [port.device for port in serial.tools.list_ports.comports()]
@@ -816,6 +900,15 @@ def set_serial_config():
     active_serial_port = data.get('port')
     active_baud_rate = data.get('baud_rate', 115200)
     manual_disconnect = False
+    # اگر از اجرای قبلی رکورد نجات‌یافته‌ای مانده، همین اول برش گردان
+    if os.path.exists(UNSAVED_LOG):
+        with app.app_context():
+            try:
+                with app.test_request_context():
+                    api_recover_unsaved()
+            except Exception as exc:
+                print(f"[DB] بازیابی خودکار ناموفق: {exc}")
+
     stop_event.clear()
     serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
     serial_thread.start()
@@ -941,7 +1034,7 @@ def get_sensor_data_api():
 
 # تابع کمکی برای پارس کردن NBCM ها (اگر ندارید اضافه کنید)
 def parse_nbcm(nbcm_str):
-    status = {key: 'inactive' for key in NBCM_CHANNELS}
+    status = {key: 'inactive' for key in RESULT_FIELDS}
     if nbcm_str:
         selected = nbcm_str.split(',')
         for item in selected:

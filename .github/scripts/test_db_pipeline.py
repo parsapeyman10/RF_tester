@@ -72,15 +72,15 @@ def daily_count(date_str):
         conn.close()
 
 
-LINE = ("NUM=42,NBCM1=OK,NBCM2=NOK,NBCM3=OK,NBCM4=NOK,"
+LINE = ("NUM=42,BCM1_OPEN=OK,BCM1_CLOSE=NOK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,"
         "Temp=23.45,Humidity=51.20,Date=2026-01-05,Time=13:04:09")
-LINE2 = ("NUM=43,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,"
+LINE2 = ("NUM=43,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=NOK,"
          "Temp=-4.50,Humidity=88.00,Date=2026-01-05,Time=13:06:09")
 
 print("\n[1] پارس و ذخیره‌ی یک خط استاندارد")
 payload = flask_app.parse_industrial_line(LINE)
 check(payload is not None, "خط استاندارد پارس شد")
-check(payload and payload["nbcm"] == ["NBCM1", "NBCM3"],
+check(payload and payload["nbcm"] == ["BCM1_OPEN", "BCM2_OPEN"],
       f"چهار نتیجه‌ی تفکیکی پارس شد ({payload['nbcm'] if payload else None})")
 _res = flask_app.build_bcm_results(",".join(payload["nbcm"])) if payload else {}
 check(_res.get("BCM1") == {"open": True, "close": False, "ok": False},
@@ -107,10 +107,10 @@ check(daily_count("2026-01-05") == 2, "رکورد جدید در دیتابیس �
 
 print("\n[4] خطوط خراب نباید پارس شوند")
 bad_lines = [
-    "NUM=44,NBCM1=OK,NBCM2=NOK,Temp=20.0",                       # ناقص
+    "NUM=44,BCM1_OPEN=OK,BCM1_CLOSE=NOK,Temp=20.0",              # ناقص
     "[LINE RECV]: garbage",                                      # بدون دیتا
-    "NUM=,NBCM1=OK,NBCM2=OK,NBCM3=OK,NBCM4=OK,Temp=x,Humidity=y,Date=2026-01-05,Time=13:04:09",
-    "NUM=45,NBCM1=OK,NBCM2=OK,NBCM3=OK,NBCM4=OK,Temp=20.0,Humidity=40.0,Date=2026-02-31,Time=13:04:09",
+    "NUM=,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,Temp=x,Humidity=y,Date=2026-01-05,Time=13:04:09",
+    "NUM=45,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,Temp=20.0,Humidity=40.0,Date=2026-02-31,Time=13:04:09",
 ]
 for bad in bad_lines:
     check(flask_app.parse_industrial_line(bad) is None, f"رد شد: {bad[:45]}…")
@@ -143,10 +143,10 @@ check("uq_daily_record" in idx, f"ایندکس یکتا ساخته شد (این�
 
 print("\n[7b] دو دستگاه، هرکدام دو نتیجه (باز / بسته)")
 check(len(flask_app.DEVICES) == 2, "دو دستگاه تعریف شده است")
-full = flask_app.build_bcm_results("NBCM1,NBCM2,NBCM3,NBCM4")
+full = flask_app.build_bcm_results("BCM1_OPEN,BCM1_CLOSE,BCM2_OPEN,BCM2_CLOSE")
 check(full["BCM1"] == {"open": True, "close": True, "ok": True}, "BCM1 کامل OK")
 check(full["BCM2"] == {"open": True, "close": True, "ok": True}, "BCM2 کامل OK")
-half = flask_app.build_bcm_results("NBCM1,NBCM4")
+half = flask_app.build_bcm_results("BCM1_OPEN,BCM2_CLOSE")
 check(half["BCM1"]["open"] and not half["BCM1"]["close"] and not half["BCM1"]["ok"],
       "BCM1 فقط باز شد -> ناقص")
 check(half["BCM2"]["close"] and not half["BCM2"]["open"] and not half["BCM2"]["ok"],
@@ -175,12 +175,23 @@ if rec:
     check(_r["BCM1"]["ok"] and _r["BCM2"]["open"] and not _r["BCM2"]["close"],
           f"چهار نتیجه از فایل باینری درست خوانده شد ({rec.nbcm_selected})")
 
+print("\n[7d] هیچ رکوردی گم نمی‌شود")
+flask_app.stash_unsaved(LINE2.replace("NUM=43", "NUM=4300"), "تست دستی")
+check(os.path.exists(flask_app.UNSAVED_LOG), "فایل پشتیبان ساخته شد")
+with flask_app.app.test_request_context():
+    _rec_resp = flask_app.api_recover_unsaved()
+_j = _rec_resp.get_json() if hasattr(_rec_resp, "get_json") else {}
+check(_j.get("recovered") == 1, f"رکورد نجات‌یافته برگشت ({_j})")
+with flask_app.app.app_context():
+    _back = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=4300).first()
+check(_back is not None, "رکورد بازیابی‌شده در دیتابیس است")
+
 print("\n[8] مسیر واحد دیتا: /api/ingest (همان چیزی که گوشی و دسکتاپ می‌فرستند)")
 flask_app.app.config["TESTING"] = True
 _c = flask_app.app.test_client()
 _lines = [
-    "NUM=900,NBCM1=OK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,Temp=25.00,Humidity=44.00,Date=2026-01-07,Time=08:00:00",
-    "NUM=901,NBCM1=NOK,NBCM2=OK,NBCM3=NOK,NBCM4=NOK,Temp=25.50,Humidity=44.50,Date=2026-01-07,Time=08:02:00",
+    "NUM=900,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=NOK,Temp=25.00,Humidity=44.00,Date=2026-01-07,Time=08:00:00",
+    "NUM=901,BCM1_OPEN=NOK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=NOK,Temp=25.50,Humidity=44.50,Date=2026-01-07,Time=08:02:00",
     "END",
     "چرند",
 ]

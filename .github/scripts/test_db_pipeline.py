@@ -186,6 +186,41 @@ with flask_app.app.app_context():
     _back = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=4300).first()
 check(_back is not None, "رکورد بازیابی‌شده در دیتابیس است")
 
+print("\n[7e] ترتیب همیشه بر اساس ساعت ذخیره‌شده توسط دستگاه است")
+_mixed = [
+    ("NUM=500,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+     "Temp=20.00,Humidity=40.00,Date=2026-05-02,Time=09:00:00"),
+    ("NUM=501,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+     "Temp=20.00,Humidity=40.00,Date=2026-05-01,Time=23:30:00"),
+    ("NUM=502,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+     "Temp=20.00,Humidity=40.00,Date=2026-05-02,Time=17:45:00"),
+]
+# عمداً به ترتیب نامرتب وارد می‌شوند
+for ln in _mixed:
+    with flask_app.app.app_context():
+        flask_app.save_sensor_data(flask_app.parse_industrial_line(ln))
+
+with flask_app.app.app_context():
+    rows = (flask_app.MasterReading.query
+            .filter(flask_app.MasterReading.num_value.in_([500, 501, 502]))
+            .order_by(*flask_app.device_clock_order()).all())
+order = [r.num_value for r in rows]
+check(order == [502, 500, 501],
+      f"جدیدترین لحظه‌ی دستگاه اول می‌آید (ترتیب: {order})")
+
+_c2 = flask_app.app.test_client()
+_api = _c2.get("/api/sensor_data").get_json()
+_seq = [(d["date"], d["time"]) for d in _api if d["num_value"] in (500, 501, 502)]
+check(_seq == sorted(_seq),
+      f"خروجی نمودار از قدیم به جدید مرتب است ({_seq})")
+
+# داشبورد آخرین رکورد را از همان کوئری می‌گیرد (رندر سمت مرورگر است)
+with flask_app.app.app_context():
+    _last = flask_app.MasterReading.query.order_by(*flask_app.device_clock_order()).first()
+check(_last is not None and (_last.date, _last.time) == ("2026-05-02", "17:45:00"),
+      f"آخرین رکورد داشبورد = جدیدترین ساعت دستگاه ({_last.date} {_last.time})")
+check(_c2.get("/").status_code == 200, "داشبورد بدون خطا رندر می‌شود")
+
 print("\n[8] مسیر واحد دیتا: /api/ingest (همان چیزی که گوشی و دسکتاپ می‌فرستند)")
 flask_app.app.config["TESTING"] = True
 _c = flask_app.app.test_client()

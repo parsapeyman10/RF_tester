@@ -269,6 +269,19 @@ def stash_unsaved(line, reason):
         print(f"[DB] حتی ذخیره‌ی پشتیبان هم ناموفق بود: {exc}")
 
 
+def device_clock_order(newest_first=True):
+    """
+    ترتیب استاندارد نمایش در کل سیستم: بر اساس «ساعت ذخیره‌شده توسط دستگاه»
+    (RTC خود ESP32)، نه زمان آپلود یا ساعت سرور.
+
+    مرتب‌سازی روی (تاریخ، ساعت) انجام می‌شود تا رکوردهای روزهای مختلف
+    درهم نروند؛ یعنی جدیدترین لحظه‌ی دستگاه همیشه اول می‌آید.
+    """
+    if newest_first:
+        return (MasterReading.date.desc(), MasterReading.time.desc())
+    return (MasterReading.date.asc(), MasterReading.time.asc())
+
+
 def master_exists(num_value, date_str, time_str):
     """آیا این رکورد قبلاً در دیتابیس اصلی ثبت شده است؟"""
     try:
@@ -647,10 +660,7 @@ def upload_dat_page():
 def home():
     # اصلاحیه صنعتی: دریافت آخرین رکورد بر اساس "زمان دستگاه"
     # سورت نزولی روی تاریخ و سپس ساعت
-    last = MasterReading.query.order_by(
-        MasterReading.date.desc(), 
-        MasterReading.time.desc()
-    ).first()
+    last = MasterReading.query.order_by(*device_clock_order()).first()
     
     return render_template('index.html', last_data=last)
 
@@ -700,11 +710,11 @@ def history():
             # (مثلاً برای داده‌های قدیمی که قبل از این آپدیت ثبت شده‌اند)
             label = f"آرشیو فیلتر شده (Master DB): {target_date}"
             query = MasterReading.query.filter(MasterReading.date == target_date)
-            readings = query.order_by(MasterReading.timestamp.desc()).all()
+            readings = query.order_by(*device_clock_order()).all()
             
     else:
         # حالت پیش‌فرض: نمایش تمام داده‌ها از مستر
-        readings = MasterReading.query.order_by(MasterReading.timestamp.desc()).all()
+        readings = MasterReading.query.order_by(*device_clock_order()).all()
 
     return render_template('history.html', readings=readings, label=label,
                            dates=available_dates, current_date=target_date,
@@ -723,10 +733,7 @@ def get_sensor_data():
     try:
         # گام 1: دریافت 50 رکورد آخر بر اساس "زمان دستگاه"
         # این کوئری تضمین می‌کند جدیدترین دیتای تولید شده در سنسور خوانده شود
-        readings = MasterReading.query.order_by(
-            MasterReading.date.desc(), 
-            MasterReading.time.desc()
-        ).limit(50).all()
+        readings = MasterReading.query.order_by(*device_clock_order()).limit(50).all()
         
         # گام 2: معکوس کردن لیست برای نمایش درست در نمودار (از چپ به راست: قدیم به جدید)
         readings = readings[::-1]
@@ -768,7 +775,7 @@ def get_master_data():
     # اگر فیلتر تاریخ نداشتیم، به جای 1 روز، 1000 رکورد آخر را بیاور (برای سرعت و پر بودن نمودار)
     if not start_date and not end_date:
         # دریافت 1000 رکورد آخر بر اساس زمان سنسور
-        readings = MasterReading.query.order_by(MasterReading.date.desc(), MasterReading.time.desc()).limit(1000).all()
+        readings = MasterReading.query.order_by(*device_clock_order()).limit(1000).all()
         # چون limit دیتای آخر را می‌آورد، باید لیست را برعکس کنیم تا در نمودار از چپ به راست باشد
         readings = readings[::-1]
     else:
@@ -777,7 +784,7 @@ def get_master_data():
             query = query.filter(MasterReading.date >= start_date)
         if end_date:
             query = query.filter(MasterReading.date <= end_date)
-        readings = query.order_by(MasterReading.date.asc(), MasterReading.time.asc()).all()
+        readings = query.order_by(*device_clock_order(newest_first=False)).all()
     
     output = []
     for r in readings:
@@ -937,7 +944,7 @@ def export_excel():
     query = MasterReading.query
     if target_date:
         query = query.filter(MasterReading.date == target_date)
-    recs = query.order_by(MasterReading.timestamp.desc()).all()
+    recs = query.order_by(*device_clock_order()).all()
     
     for r in recs:
         res = build_bcm_results(r.nbcm_selected)
@@ -1000,10 +1007,7 @@ def get_sensor_data_api():
         # دریافت 50 داده آخر
         # نکته مهم: سورت باید بر اساس تاریخ و ساعت سنسور باشد، نه زمان آپلود
         # چون ممکن است فایل‌ها پس و پیش آپلود شوند
-        readings = MasterReading.query.order_by(
-            MasterReading.date.desc(), 
-            MasterReading.time.desc()
-        ).limit(50).all()
+        readings = MasterReading.query.order_by(*device_clock_order()).limit(50).all()
         
         # معکوس کردن لیست برای نمایش درست در نمودار (چپ به راست)
         readings = readings[::-1]

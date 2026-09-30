@@ -11,6 +11,7 @@
 
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, send_file
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
 import datetime 
 import io
 import csv 
@@ -31,8 +32,22 @@ import re
 #  مسیرها مستقل از پوشه‌ای که برنامه از آن اجرا می‌شود
 #  (باگ: اجرای app.py از ریشه‌ی ریپو با خطای TemplateNotFound: index.html
 #   می‌خورد چون Flask دنبال ./templates کنار فایل می‌گردد)
+#
+#  DATA_DIR از BASE_DIR جدا است تا خروجی PyInstaller (اپ دسکتاپ) هم
+#  کار کند: قالب‌ها داخل بسته‌ی موقت (_MEIPASS) ولی دیتابیس‌ها، لاگ‌ها
+#  و تنظیمات کنار خود فایل exe بمانند.
 # =====================================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def _app_paths():
+    if getattr(sys, 'frozen', False):          # اجرا از خروجی PyInstaller
+        bundle_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        data_dir = os.path.dirname(sys.executable)
+    else:
+        bundle_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = bundle_dir
+    return bundle_dir, data_dir
+
+
+BASE_DIR, DATA_DIR = _app_paths()
 
 
 def _resolve_templates():
@@ -104,21 +119,37 @@ def build_bcm_results(stored_fields):
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
-# دیتابیس‌های روزانه همیشه کنار app.py ساخته می‌شوند، نه در پوشه‌ی جاری
-DAILY_DB_DIR = BASE_DIR
+# دیتابیس‌های روزانه همیشه در پوشه‌ی داده (کنار app.py یا کنار exe)
+# ساخته می‌شوند، نه در پوشه‌ی جاری
+DAILY_DB_DIR = DATA_DIR
 
 
 def daily_db_file(date_str):
     return os.path.join(DAILY_DB_DIR, f"{date_str}.db")
 
 
-app = Flask(__name__, template_folder=TEMPLATE_DIR, static_folder=STATIC_DIR)
+_flask_kwargs = {'template_folder': TEMPLATE_DIR, 'static_folder': STATIC_DIR}
+if getattr(sys, 'frozen', False):
+    # در خروجی exe، دیتابیس master کنار خود exe ساخته شود نه در پوشه‌ی موقت
+    _flask_kwargs['instance_path'] = os.path.join(DATA_DIR, 'instance')
+    os.makedirs(_flask_kwargs['instance_path'], exist_ok=True)
+app = Flask(__name__, **_flask_kwargs)
 print(f"[INIT] templates: {TEMPLATE_DIR}")
 app.config['SECRET_KEY'] = 'industrial_secret_key_v3_7_live_fix' 
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024
 # --- تنظیمات زمانی و دیتابیس جامع ---
 TEHRAN_TZ = pytz.timezone('Asia/Tehran')
-MASTER_DB_URI = 'sqlite:///master_industrial.db'
+
+# مسیر دیتابیس اصلی:
+#   پیش‌فرض            → instance/master_industrial.db کنار پروژه
+#                        (مستقل از پوشه‌ای که برنامه از آن اجرا می‌شود)
+#   متغیر محیطی RF_MASTER_DB → مسیر مطلق دلخواه (برای تست‌ها و جداسازی،
+#                        تا هرگز دیتابیس واقعی لمس نشود)
+_master_env = os.environ.get('RF_MASTER_DB')
+if _master_env:
+    MASTER_DB_URI = 'sqlite:///' + os.path.abspath(_master_env).replace('\\', '/')
+else:
+    MASTER_DB_URI = 'sqlite:///master_industrial.db'
 
 app.config['SQLALCHEMY_DATABASE_URI'] = MASTER_DB_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False 
@@ -241,11 +272,14 @@ def insert_daily_rows(date_str, rows):
         conn.close()
 
 
-UNSAVED_LOG = os.path.join(BASE_DIR, "unsaved_records.log")
+UNSAVED_LOG = os.path.join(DATA_DIR, "unsaved_records.log")
 
 
 def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
     """ساخت همان خط استاندارد پروژه از روی مقادیر یک رکورد"""
+    # fields می‌تواند رشته‌ی «,»جداشده یا لیست باشد
+    if isinstance(fields, (list, tuple, set)):
+        fields = ",".join(fields)
     sel = set(normalize_fields((fields or "").split(",")))
     parts = [f"NUM={num_value}"]
     for name in RESULT_FIELDS:
@@ -262,13 +296,22 @@ def stash_unsaved(line, reason):
     اگر به هر دلیلی نوشتن در دیتابیس شکست بخورد، خط خام در یک فایل متنی
     نگه داشته می‌شود تا هیچ داده‌ای از بین نرود. با /api/recover_unsaved
     دوباره وارد دیتابیس می‌شود.
+
+    این تابع هرگز exception پرتاب نمی‌کند و True/False برمی‌گرداند —
+    چون خودش آخرین حلقه‌ی نجات داده است.
     """
     try:
+        if not line or not str(line).strip():
+            return False
         with open(UNSAVED_LOG, "a", encoding="utf-8") as fh:
             fh.write(f"{datetime.datetime.now().isoformat()}\t{reason}\t{line}\n")
+            fh.flush()
+            os.fsync(fh.fileno())   # مقاوم در برابر قطع برق
         print(f"[DB] رکورد در {os.path.basename(UNSAVED_LOG)} نگه داشته شد: {reason}")
+        return True
     except Exception as exc:
         print(f"[DB] حتی ذخیره‌ی پشتیبان هم ناموفق بود: {exc}")
+        return False
 
 
 # ترتیب مرتب‌سازی کل سیستم بر اساس «تاریخ و ساعتی که خودِ دستگاه ذخیره
@@ -357,50 +400,63 @@ def safe_int(val, default=0):
         return int(numeric_filter) if numeric_filter else default
     except: return default
 
-def save_sensor_data(data_source):
+def save_sensor_data(data_source, raw_line=None):
+    """
+    ذخیره‌ی یک رکورد در هر دو دیتابیس.
+
+    raw_line: خط خامِ استاندارد (NUM=...). اگر ذخیره در دیتابیس شکست
+    بخورد، همین خط — بی‌هیچ وابستگی به متغیرهای میانی — در
+    unsaved_records.log نگه داشته می‌شود تا هیچ داده‌ای گم نشود.
+    """
     global _last_cleanup_ts
+    # مقدار اولیه‌ی همه‌ی متغیرها؛ اگر exception در همان اول کار رخ دهد
+    # handler خطا دیگر به NameError نمی‌خورد و بکاپ ساخته می‌شود
+    num_int = 0
+    nbcm_str = ""
+    t_val = "0"
+    h_val = "0"
+    i_date = None
+    i_time = None
     try:
         # پاکسازی دیتابیس‌های قدیمی حداکثر هر ۱۰ دقیقه، نه به ازای هر رکورد
         if time.time() - _last_cleanup_ts > 600:
             _last_cleanup_ts = time.time()
             cleanup_old_databases()
-        
+
         # --- استخراج داده‌ها ---
-        if hasattr(data_source, 'getlist'): 
+        if hasattr(data_source, 'getlist'):
             nbcm_checked_list = data_source.getlist('nbcm')
             num_val_raw = data_source.get('num_value')
-        else: 
-            nbcm_checked_list = data_source.get('nbcm', []) 
-            num_val_raw = data_source.get('num_value') 
+        else:
+            nbcm_checked_list = data_source.get('nbcm', [])
+            num_val_raw = data_source.get('num_value')
 
         num_int = safe_int(num_val_raw)
         h_val = normalize_value(data_source.get('humidity'), -100, 100, 0)
         t_val = normalize_value(data_source.get('temp'), -100, 155, 0)
-        
+
         now_tehran = datetime.datetime.now(TEHRAN_TZ)
-        
+
         # دریافت زمان و تاریخ از پکت (یا استفاده از زمان حال در صورت نبودن)
         i_time = data_source.get('time') or now_tehran.strftime('%H:%M:%S')
         i_date = data_source.get('date') or now_tehran.strftime('%Y-%m-%d')
-        
-        # --- بخش اصلاح شده: ساخت Timestamp واقعی از روی فایل ---
+
+        # --- ساخت Timestamp واقعی از روی دستگاه ---
         try:
-            # ترکیب تاریخ و ساعت فایل برای ساخت آبجکت زمان
             dt_str = f"{i_date} {i_time}"
-            # تبدیل رشته به آبجکت زمان (Real Device Time)
             real_timestamp = datetime.datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
-            
-            # نکته: چون دیتابیس شما از نوع DateTime بدون تایم‌زون است، 
-            # اگر نیاز به تایم‌زون دارید اینجا اضافه کنید. فعلاً Native نگه می‌داریم.
         except Exception:
             # در صورت خطا در فرمت، همان زمان آپلود را بگذار
             real_timestamp = now_tehran
-        # -------------------------------------------------------
 
         # هرچه غیر از کانال‌های تعریف‌شده باشد کنار گذاشته می‌شود
         nbcm_checked_list = normalize_fields(nbcm_checked_list)
         nbcm_str = ",".join(nbcm_checked_list)
         log_str = f"NUM:{num_int}, H:{h_val}, T:{t_val}"
+
+        # خط استاندارد برای بکاپ — از همین لحظه آماده است
+        backup_line = raw_line or record_to_line(
+            num_int, nbcm_str, t_val, h_val, i_date, i_time)
 
         # --- جلوگیری از رکورد تکراری ---
         # منابع تکرار: اکوی سریال، ارسال مجدد ESP32 وقتی ACK گم می‌شود،
@@ -413,27 +469,40 @@ def save_sensor_data(data_source):
         master_entry = MasterReading(
             num_value=num_int, nbcm_selected=nbcm_str,
             humidity=h_val, temp=t_val, time=i_time, date=i_date,
-            timestamp=real_timestamp,  # <--- تغییر مهم: استفاده از زمان واقعی دستگاه
+            timestamp=real_timestamp,  # زمان واقعی دستگاه
             formatted_log=log_str
         )
         db.session.add(master_entry)
-        db.session.commit()
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # دو درخواست هم‌زمان از یک رکورد: ایندکس یکتا جلوی دوباره‌نویسی را گرفت
+            db.session.rollback()
+            print(f"[DB] تکراری موازی رد شد: NUM={num_int} {i_date} {i_time}")
+            return True
 
         # 2. ذخیره در Daily DB (با ایندکس یکتا و INSERT OR IGNORE)
-        insert_daily_rows(i_date, [(num_int, nbcm_str, t_val, h_val,
-                                    i_date, i_time, real_timestamp)])
+        #    اگر این مرحله شکست بخورد داده از دست نرفته — در master هست؛
+        #    فقط یک هشدار چاپ می‌شود.
+        try:
+            insert_daily_rows(i_date, [(num_int, nbcm_str, t_val, h_val,
+                                        i_date, i_time, real_timestamp)])
+        except Exception as daily_err:
+            print(f"[DB] ذخیره در دیتابیس روزانه ناموفق بود (رکورد در master سالم است): {daily_err}")
 
         return True
 
     except Exception as e:
-        db.session.rollback()
-        print(f"[DB_ERROR] {e}")
-        # تضمین: داده هرگز گم نمی‌شود
         try:
-            stash_unsaved(record_to_line(num_int, nbcm_str, t_val, h_val, i_date, i_time),
-                          f"db_error: {e}")
+            db.session.rollback()
         except Exception:
             pass
+        print(f"[DB_ERROR] {e}")
+        # تضمین: داده هرگز گم نمی‌شود — خط خام (اگر بود) وگرنه خط بازسازی‌شده
+        line = raw_line
+        if not line and i_date and i_time:
+            line = record_to_line(num_int, nbcm_str, t_val, h_val, i_date, i_time)
+        stash_unsaved(line, f"db_error: {e}")
         return False
     
 # --- مدیریت سریال ---
@@ -450,7 +519,7 @@ manual_disconnect = False
 #  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
 #  می‌رفت و باید دوباره دستی انتخاب می‌شد.
 # =====================================================================
-SERIAL_CONFIG_FILE = os.path.join(BASE_DIR, 'serial_config.json')
+SERIAL_CONFIG_FILE = os.path.join(DATA_DIR, 'serial_config.json')
 
 
 def save_serial_config():
@@ -477,14 +546,23 @@ def load_serial_config():
     except Exception as exc:
         print(f"[SERIAL] خواندن تنظیمات ناموفق: {exc}")
 
-# الگوی دقیق خطی که ESP8266 روی سریال می‌فرستد (۱۳ فیلد).
-# استفاده از regex به‌جای split باعث می‌شود خطوط ناقص/به‌هم‌ریخته‌ی سریال
-# (که موقع ریست برد یا نویز پیش می‌آید) اصلاً وارد دیتابیس نشوند.
+# =====================================================================
+#  الگوی دقیق خطی که ESP8266 روی سریال می‌فرستد (۱۳ فیلد).
+#  استفاده از regex به‌جای split باعث می‌شود خطوط ناقص/به‌هم‌ریخته‌ی سریال
+#  (که موقع ریست برد یا نویز پیش می‌آید) اصلاً وارد دیتابیس نشوند.
+#
+#  نکته: Temp/Humidity می‌تواند nan یا inf باشد — ESP32 برای حافظه‌های
+#  خالی SPI با %.2f مقدار «nan» چاپ می‌کند. قبلاً چنین خطی کلأً رد
+#  می‌شد (از دست رفتن رکورد سالم)؛ حالا پذیرفته و در normalize_value
+#  به مقدار پیش‌فرض تبدیل می‌شود (همان رفتار آپلود فایل .dat).
+# =====================================================================
+_FLOAT_RE = r"-?(?:\d+(?:\.\d+)?|nan|NaN|NAN|inf|Inf|INF)"
+
 INDUSTRIAL_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
     r"BCM1_OPEN=(?P<f1>[A-Za-z0-9]+),BCM1_CLOSE=(?P<f2>[A-Za-z0-9]+),"
     r"BCM2_OPEN=(?P<f3>[A-Za-z0-9]+),BCM2_CLOSE=(?P<f4>[A-Za-z0-9]+),"
-    r"Temp=(?P<temp>-?\d+(?:\.\d+)?),Humidity=(?P<hum>-?\d+(?:\.\d+)?),"
+    rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
 )
@@ -494,7 +572,7 @@ LEGACY_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
     r"NBCM1=(?P<f1>[A-Za-z0-9]+),NBCM2=(?P<f2>[A-Za-z0-9]+),"
     r"NBCM3=(?P<f3>[A-Za-z0-9]+),NBCM4=(?P<f4>[A-Za-z0-9]+),"
-    r"Temp=(?P<temp>-?\d+(?:\.\d+)?),Humidity=(?P<hum>-?\d+(?:\.\d+)?),"
+    rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
 )
@@ -531,9 +609,63 @@ def parse_industrial_line(line):
         return None
 
 
+class SerialLineBuffer:
+    """
+    بافر خطوط سریال.
+
+    چرا لازم است؟ خواندنِ «یک readline در هر لوپ» دو مشکل داشت:
+      1) اگر نیمه‌ی یک خط خوانده می‌شد، بقیه‌اش در خواندنِ بعدی می‌آمد و
+         هر دو تکه بی‌اعتبار می‌شدند (دو رکورد گم‌شده).
+      2) نرخ تخلیه‌ی بافر کند بود و در ارسال پشت‌سرهمِ ESP8266 بایت‌ها
+         سرریز و گم می‌شدند.
+    این کلاس بایت‌ها را انباشته و فقط خطوط «کامل» (جداشده با \\n) تحویل
+    می‌دهد؛ نیمه‌خط برای رسیدن بقیه‌ی بایت‌ها نگه داشته می‌شود.
+    """
+
+    def __init__(self):
+        self._buf = b""
+
+    def feed(self, chunk):
+        """بایت جدید اضافه می‌کند و فهرست خطوط کامل را برمی‌گرداند"""
+        if not chunk:
+            return []
+        self._buf += chunk
+        lines = []
+        while b"\n" in self._buf:
+            raw, self._buf = self._buf.split(b"\n", 1)
+            text = raw.decode("utf-8", errors="ignore").strip()
+            if text:
+                lines.append(text)
+        return lines
+
+    def pending(self):
+        """آیا نیمه‌خطی در انتظار بقیه‌ی بایت‌ها مانده است؟"""
+        return len(self._buf) > 0
+
+
+def handle_serial_line(line):
+    """
+    یک خط کامل سریال را پارس و ذخیره می‌کند.
+
+    هیچ خطی که NUM= داشته باشد دور ریخته نمی‌شود: اگر فرمتش کامل نبود
+    در unsaved_records.log نگه داشته می‌شود تا بعداً بررسی شود.
+    """
+    payload = parse_industrial_line(line)
+    if payload:
+        print(f"[RX] NUM={payload['num_value']} {payload['date']} {payload['time']}")
+        with app.app_context():
+            save_sensor_data(payload, raw_line=line)
+        return True
+    if "NUM=" in line:
+        print(f"[RX_BAD] {line[:120]}")
+        stash_unsaved(line, "serial_parse_fail")
+    return False
+
+
 def read_serial_worker():
     global ser, active_serial_port, manual_disconnect
-    
+    line_buf = SerialLineBuffer()
+
     while not stop_event.is_set():
         try:
             if (ser is None or not ser.is_open) and not manual_disconnect:
@@ -543,7 +675,8 @@ def read_serial_worker():
                 if target_port and target_port in available:
                     active_serial_port = target_port
                     try:
-                        ser = serial.Serial(active_serial_port, active_baud_rate, timeout=1)
+                        ser = serial.Serial(active_serial_port, active_baud_rate, timeout=0.2)
+                        line_buf = SerialLineBuffer()   # بافرِ پورت قبلی دیگر معتبر نیست
                         print(f"[SERIAL] Connected to {active_serial_port}")
                     except Exception as e:
                         print(f"[SERIAL_ERR] {e}")
@@ -552,21 +685,24 @@ def read_serial_worker():
                     time.sleep(5)
                     continue
 
-            if ser and ser.is_open and ser.in_waiting > 0:
-                try:
-                    raw = ser.readline().decode('utf-8', errors='ignore').strip()
-                    if not raw: continue
-                    payload = parse_industrial_line(raw)
-                    if payload:
-                        print(f"[RX] NUM={payload['num_value']} {payload['date']} {payload['time']}")
-                        with app.app_context():
-                            save_sensor_data(payload)
-                    elif "NUM=" in raw:
-                        # خط شبیه دیتا بود ولی فرمتش کامل نبود -> دور ریخته می‌شود
-                        print(f"[RX_BAD] {raw[:120]}")
-                except Exception as read_err:
-                    print(f"[READ_ERR] {read_err}")
-            time.sleep(0.01)
+            if ser and ser.is_open:
+                waiting = ser.in_waiting
+                if waiting > 0:
+                    # همه‌ی بایت‌های موجود یک‌جا خوانده می‌شوند تا بافر
+                    # سریال در ارسال‌های پشت‌سرهم سرریز نکند
+                    chunk = ser.read(waiting if waiting < 8192 else 8192)
+                    for line in line_buf.feed(chunk):
+                        try:
+                            handle_serial_line(line)
+                        except Exception as line_err:
+                            print(f"[READ_ERR] {line_err}")
+                elif line_buf.pending():
+                    # نیمه‌خطی داریم؛ چند لحظه صبر تا بقیه‌ی خط برسد
+                    time.sleep(0.02)
+                else:
+                    time.sleep(0.01)
+            else:
+                time.sleep(0.2)
 
         except Exception as e:
             if ser: 
@@ -592,11 +728,12 @@ def upload_dat_page():
         EXPECTED_SIZE = 25
         
         master_buffer = []
-        daily_buffer_map = {} 
         
-        success_count = 0
-        fail_count = 0
-        skipped_count = 0
+        success_count = 0      # رکوردهای سالمِ جدید که برای ذخیره آماده شدند
+        fail_count = 0         # فایل‌هایی که اصلاً رکورد کاملی نداشتند
+        skipped_count = 0      # رکوردهای تکراری (از قبل در دیتابیس)
+        partial_files = 0      # فایل‌هایی که انتهایشان رکورد ناقص داشت
+        stashed_count = 0      # رکوردهایی که فقط در فایل پشتیبان ماندند
         
         upload_time_server = datetime.datetime.now(TEHRAN_TZ)
 
@@ -606,89 +743,75 @@ def upload_dat_page():
             
             try:
                 file_bytes = file.read()
-                if len(file_bytes) > 0 and len(file_bytes) % EXPECTED_SIZE == 0:
-                    for i in range(0, len(file_bytes), EXPECTED_SIZE):
-                        chunk = file_bytes[i : i + EXPECTED_SIZE]
-                        data = struct.unpack(STRUCT_FORMAT, chunk)
-                        
-                        # --- استخراج و کستینگ (Fix: تبدیل اجباری به رشته) ---
-                        raw_num = data[0]
-                        raw_temp = data[1]
-                        raw_hum = data[2]
+                # اگر انتهای فایل خراب/ناقص بود، رکوردهای «کامل» داخلش
+                # نجات داده می‌شوند — قبلاً کل فایل دور ریخته می‌شد.
+                usable = (len(file_bytes) // EXPECTED_SIZE) * EXPECTED_SIZE
+                if usable == 0:
+                    fail_count += 1
+                    continue
+                if usable < len(file_bytes):
+                    partial_files += 1
+                    print(f"[UPLOAD] {filename}: {len(file_bytes) - usable} بایت انتهایی "
+                          f"ناقص بود؛ {usable // EXPECTED_SIZE} رکورد کامل نجات داده شد")
 
-                        # 1. هندل کردن مقدار NUM
-                        num_val = raw_num
+                for i in range(0, usable, EXPECTED_SIZE):
+                    chunk = file_bytes[i : i + EXPECTED_SIZE]
+                    data = struct.unpack(STRUCT_FORMAT, chunk)
+                    
+                    # --- استخراج و کستینگ (تبدیل اجباری به رشته) ---
+                    num_val = data[0]
+                    raw_temp = data[1]
+                    raw_hum = data[2]
 
-                        # 2. هندل کردن دما (Temp) - تبدیل دقیق Float به String
-                        # بررسی خطای NaN (برای حافظه های SPI خالی)
-                        if math.isnan(raw_temp) or math.isinf(raw_temp):
-                            temp_str = "0"
-                            temp_val_float = 0.0
-                        else:
-                            # محدود سازی (Clamp)
-                            safe_temp = max(-100.0, min(155.0, raw_temp))
-                            temp_val_float = round(safe_temp, 2)
-                            temp_str = str(temp_val_float) # <--- فیکس اصلی اینجاست
+                    # دما (Temp) — بررسی NaN/Inf برای حافظه‌های SPI خالی
+                    if math.isnan(raw_temp) or math.isinf(raw_temp):
+                        temp_str = "0"
+                    else:
+                        temp_str = str(round(max(-100.0, min(155.0, raw_temp)), 2))
 
-                        # 3. هندل کردن رطوبت (Humidity)
-                        if math.isnan(raw_hum) or math.isinf(raw_hum):
-                            hum_str = "0"
-                            hum_val_float = 0.0
-                        else:
-                            safe_hum = max(0.0, min(100.0, raw_hum))
-                            hum_val_float = round(safe_hum, 2)
-                            hum_str = str(hum_val_float) # <--- فیکس اصلی اینجاست
-                        
-                        # لاژیک NBCM
-                        # چهار نتیجه‌ی تفکیکی: باز/بسته برای هر دستگاه
-                        # چهار بولینِ ساختار باینری به‌ترتیب:
-                        # BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE
-                        nbcm_list = [RESULT_FIELDS[k] for k in range(4) if data[3 + k]]
-                        nbcm_str = ",".join(nbcm_list)
+                    # رطوبت (Humidity)
+                    if math.isnan(raw_hum) or math.isinf(raw_hum):
+                        hum_str = "0"
+                    else:
+                        hum_str = str(round(max(0.0, min(100.0, raw_hum)), 2))
+                    
+                    # چهار نتیجه‌ی تفکیکی: باز/بسته برای هر دستگاه
+                    # چهار بولینِ ساختار باینری به‌ترتیب:
+                    # BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE
+                    nbcm_str = ",".join(RESULT_FIELDS[k] for k in range(4) if data[3 + k])
 
-                        # زمان سنسور
-                        year, month, day = data[7], data[8], data[9]
-                        hour, minute, second = data[10], data[11], data[12]
-                        
-                        device_date_str = f"{year}-{month:02d}-{day:02d}"
-                        device_time_str = f"{hour:02d}:{minute:02d}:{second:02d}"
-                        
-                        try:
-                            sensor_dt = datetime.datetime.strptime(f"{device_date_str} {device_time_str}", '%Y-%m-%d %H:%M:%S')
-                        except:
-                            sensor_dt = upload_time_server
+                    # زمان سنسور (RTC دستگاه)
+                    year, month, day = data[7], data[8], data[9]
+                    hour, minute, second = data[10], data[11], data[12]
+                    
+                    device_date_str = f"{year}-{month:02d}-{day:02d}"
+                    device_time_str = f"{hour:02d}:{minute:02d}:{second:02d}"
+                    
+                    try:
+                        sensor_dt = datetime.datetime.strptime(
+                            f"{device_date_str} {device_time_str}", '%Y-%m-%d %H:%M:%S')
+                    except Exception:
+                        sensor_dt = upload_time_server
 
-                        formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
+                    formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
 
-                        # ذخیره در Master (ارسال رشته به جای عدد)
-                        master_obj = MasterReading(
-                            num_value=num_val, 
-                            nbcm_selected=nbcm_str,
-                            humidity=hum_str, # اینجا قبلا Float بود که باعث خطا می‌شد
-                            temp=temp_str,    # اینجا قبلا Float بود که باعث خطا می‌شد
-                            time=device_time_str,   
-                            date=device_date_str,   
-                            # ناهم‌خوانی: قبلاً Master زمان آپلود سرور را ثبت
-                            # می‌کرد ولی دیتابیس روزانه زمان RTC دستگاه را.
-                            # مرجع زمان در کل سیستم، RTC دستگاه است.
-                            timestamp=sensor_dt,
-                            formatted_log=formatted_log
-                        )
-                        # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
-                        if master_exists(num_val, device_date_str, device_time_str):
-                            skipped_count += 1
-                            continue
-                        master_buffer.append(master_obj)
-                        
-                        # ذخیره در Daily (ارسال رشته برای یکدستی)
-                        if device_date_str not in daily_buffer_map:
-                            daily_buffer_map[device_date_str] = []
-                        
-                        daily_buffer_map[device_date_str].append(
-                            (num_val, nbcm_str, temp_str, hum_str, device_date_str, device_time_str, sensor_dt)
-                        )
-                        success_count += 1
-                else: fail_count += 1
+                    # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
+                    if master_exists(num_val, device_date_str, device_time_str):
+                        skipped_count += 1
+                        continue
+
+                    master_buffer.append(MasterReading(
+                        num_value=num_val,
+                        nbcm_selected=nbcm_str,
+                        humidity=hum_str,   # قبلاً Float بود که باعث خطا می‌شد
+                        temp=temp_str,      # قبلاً Float بود که باعث خطا می‌شد
+                        time=device_time_str,
+                        date=device_date_str,
+                        # مرجع زمان در کل سیستم، RTC دستگاه است
+                        timestamp=sensor_dt,
+                        formatted_log=formatted_log
+                    ))
+                    success_count += 1
             except Exception as e:
                 print(f"[Batch Err] {filename}: {e}")
                 fail_count += 1
@@ -697,16 +820,47 @@ def upload_dat_page():
             try:
                 db.session.bulk_save_objects(master_buffer)
                 db.session.commit()
-                
-                for log_date, records in daily_buffer_map.items():
+            except Exception as e:
+                # ثبت دسته‌ای شکست خورد -> رکورد به رکورد تلاش می‌کنیم؛
+                # قبلاً کل دسته با خطای ۵۰۰ از بین می‌رفت و هیچ ردی نمی‌ماند.
+                db.session.rollback()
+                print(f"[UPLOAD] ثبت دسته‌ای ناموفق ({e})؛ تلاش تک‌به‌تک...")
+                saved_one_by_one = 0
+                for m in master_buffer:
+                    try:
+                        db.session.add(m)
+                        db.session.commit()
+                        saved_one_by_one += 1
+                    except IntegrityError:
+                        # تکراری واقعی (ثبت هم‌زمان) — نه خطا، نه از دست رفتن
+                        db.session.rollback()
+                        skipped_count += 1
+                    except Exception as e2:
+                        db.session.rollback()
+                        stash_unsaved(
+                            record_to_line(m.num_value, m.nbcm_selected, m.temp,
+                                           m.humidity, m.date, m.time),
+                            f"upload_db_error: {e2}")
+                        stashed_count += 1
+                success_count = saved_one_by_one
+
+            # دیتابیس روزانه از روی همان رکوردهای master پر می‌شود؛
+            # خرابیِ آن یعنی از دست رفتن داده نیست (master مرجع است)
+            try:
+                daily_map = {}
+                for m in master_buffer:
+                    daily_map.setdefault(m.date, []).append(
+                        (m.num_value, m.nbcm_selected, m.temp, m.humidity,
+                         m.date, m.time, m.timestamp))
+                for log_date, records in daily_map.items():
                     inserted = insert_daily_rows(log_date, records)
                     print(f"[UPLOAD] {log_date}: {inserted}/{len(records)} رکورد جدید")
             except Exception as e:
-                db.session.rollback()
-                return jsonify({'status': 'error', 'message': str(e)}), 500
+                print(f"[UPLOAD] دیتابیس روزانه ناموفق (رکوردها در master سالم‌اند): {e}")
 
         return jsonify({'status': 'success', 'processed': success_count,
-                        'failed': fail_count, 'skipped_duplicates': skipped_count})
+                        'failed': fail_count, 'skipped_duplicates': skipped_count,
+                        'partial_files': partial_files, 'stashed': stashed_count})
     return render_template('upload.html')
 
 @app.route('/')
@@ -896,6 +1050,7 @@ def api_ingest():
     duplicates = 0
     invalid = 0
     ignored = 0
+    stashed = 0
     device = request.headers.get('X-Device', request.remote_addr or 'unknown')
 
     for line in raw_lines:
@@ -908,20 +1063,26 @@ def api_ingest():
         parsed = parse_industrial_line(line)
         if not parsed:
             invalid += 1
+            # هیچ داده‌ای بی‌ردپا دور ریخته نمی‌شود: خطِ ناقص در
+            # unsaved_records.log نگه داشته می‌شود
+            if stash_unsaved(line, "ingest_parse_fail"):
+                stashed += 1
             continue
         if master_exists(safe_int(parsed['num_value']), parsed['date'], parsed['time']):
             duplicates += 1
             continue
-        if save_sensor_data(parsed):
+        if save_sensor_data(parsed, raw_line=line):
             saved += 1
         else:
+            # خط خام همین حالا داخل save_sensor_data در فایل پشتیبان است
             invalid += 1
+            stashed += 1
 
     print(f"[INGEST] from {device}: saved={saved} dup={duplicates} "
-          f"bad={invalid} ignored={ignored}")
+          f"bad={invalid} ignored={ignored} stashed={stashed}")
     return jsonify({'status': 'success', 'saved': saved,
                     'duplicates': duplicates, 'invalid': invalid,
-                    'ignored': ignored})
+                    'ignored': ignored, 'stashed': stashed})
 
 
 @app.after_request
@@ -953,7 +1114,7 @@ def save_data():
             return jsonify({'status': 'error', 'message': 'فایل دیتابیس پیدا نشد'}), 404
 
         stamp = datetime.datetime.now(TEHRAN_TZ).strftime('%Y%m%d_%H%M%S')
-        out_path = os.path.join(BASE_DIR, f'backup_{stamp}.db')
+        out_path = os.path.join(DATA_DIR, f'backup_{stamp}.db')
 
         src = sqlite3.connect(src_path)
         dst = sqlite3.connect(out_path)
@@ -1036,11 +1197,15 @@ def import_csv():
                 'date': date_s,
                 'time': time_s,
             }
+            # خط استاندارد برای بکاپ‌گیری در صورت شکست ذخیره
+            raw_line = record_to_line(safe_int(num), fields,
+                                      payload['temp'], payload['humidity'],
+                                      date_s, time_s)
 
             if master_exists(safe_int(num), date_s, time_s):
                 duplicates += 1
                 continue
-            if save_sensor_data(payload):
+            if save_sensor_data(payload, raw_line=raw_line):
                 saved += 1
             else:
                 invalid += 1
@@ -1214,24 +1379,57 @@ def parse_nbcm(nbcm_str):
     return status
 
 
-if __name__ == '__main__':
+def _ensure_master_unique_index():
+    """
+    ایندکس یکتا روی کلید (num, date, time) در دیتابیس اصلی.
+
+    مثل دیتابیس روزانه، سطح دیتابیس هم در برابر رکورد تکراری مقاوم می‌شود؛
+    اگر دو درخواست هم‌زمان از یک رکورد برسد، دیتابیس جلوی دوباره‌نویسی را
+    می‌گیرد. اگر دیتابیس قدیمی رکورد تکراری داشته باشد، ساخته‌شدن ایندکس
+    رد می‌شود و برنامه مثل قبل با چکِ نرمی ادامه می‌دهد.
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_master_record "
+                "ON master_reading (num_value, date, time)"))
+        return True
+    except Exception as exc:
+        print(f"[DB] ایندکس یکتای master ساخته نشد (رکورد تکراری قدیمی؟): {exc}")
+        return False
+
+
+def bootstrap_server(recover_unsaved=True, start_serial=True):
+    """
+    راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
+      1. ساخت جدول‌ها و ایندکس یکتا
+      2. برگرداندن رکوردهای مانده در unsaved_records.log
+      3. بازیابی تنظیمات سریال و شروع کارگرِ خواندن سریال
+    """
+    global serial_thread
+
     with app.app_context():
         db.create_all()
+        _ensure_master_unique_index()
 
-    # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
-    if os.path.exists(UNSAVED_LOG):
-        with app.app_context(), app.test_request_context():
+        # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
+        if recover_unsaved and os.path.exists(UNSAVED_LOG):
             try:
                 api_recover_unsaved()
             except Exception as exc:
                 print(f"[DB] بازیابی خودکار ناموفق: {exc}")
 
-    load_serial_config()          # آخرین پورت و باود انتخاب‌شده
+    if start_serial:
+        load_serial_config()      # آخرین پورت و باود انتخاب‌شده
+        stop_event.clear()
+        serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
+        serial_thread.start()
 
-    stop_event.clear()
-    serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
-    serial_thread.start()
-    
+
+if __name__ == '__main__':
+    bootstrap_server()
+
     # host='0.0.0.0' لازم است تا گوشی هم بتواند به سرور وصل شود؛
     # با مقدار پیش‌فرض (127.0.0.1) فقط از خود همان کامپیوتر در دسترس بود.
     print('[INIT] سرور روی http://0.0.0.0:5000 بالا آمد '

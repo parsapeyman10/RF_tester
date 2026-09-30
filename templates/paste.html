@@ -42,6 +42,7 @@
         <li>نام قدیمی <span dir="ltr">NBCM1..4</span> هم پذیرفته می‌شود.</li>
         <li>رکورد تکراری (همان شماره، تاریخ و ساعت) دوباره ثبت نمی‌شود.</li>
         <li>مرجع زمان، همان تاریخ و ساعتی است که دستگاه ذخیره کرده.</li>
+        <li>هیچ خطی که <span dir="ltr">NUM=</span> داشته باشد دور ریخته نمی‌شود؛ خطِ ناقص در <span dir="ltr">unsaved_records.log</span> نگه داشته می‌شود.</li>
       </ul>
     </div>
 
@@ -76,7 +77,7 @@
     <!-- نتیجه -->
     <div id="result" class="glass-card rounded-2xl p-5 hidden">
       <h2 class="font-bold mb-4">نتیجه</h2>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
         <div class="bg-slate-900/70 rounded-xl p-4">
           <div id="rSaved" class="text-3xl font-black text-emerald-400">0</div>
           <div class="text-xs text-slate-400 mt-1">ذخیره شد</div>
@@ -92,6 +93,10 @@
         <div class="bg-slate-900/70 rounded-xl p-4">
           <div id="rIgn" class="text-3xl font-black text-slate-500">0</div>
           <div class="text-xs text-slate-400 mt-1">نادیده گرفته شد</div>
+        </div>
+        <div class="bg-slate-900/70 rounded-xl p-4">
+          <div id="rStash" class="text-3xl font-black text-sky-400">0</div>
+          <div class="text-xs text-slate-400 mt-1">در انتظار بازیابی</div>
         </div>
       </div>
       <p id="rMsg" class="text-sm text-slate-400 mt-4"></p>
@@ -136,11 +141,13 @@ $('btnSend').onclick = async () => {
     $('rDup').textContent   = d.duplicates ?? 0;
     $('rBad').textContent   = d.invalid ?? 0;
     $('rIgn').textContent   = d.ignored ?? 0;
+    $('rStash').textContent = d.stashed ?? 0;
 
     let msg = '';
     if (d.saved)      msg += `${d.saved} رکورد جدید وارد دیتابیس شد. `;
     if (d.duplicates) msg += `${d.duplicates} رکورد از قبل موجود بود و دوباره ثبت نشد. `;
     if (d.invalid)    msg += `${d.invalid} خط شبیه رکورد بود ولی فرمتش کامل نبود. `;
+    if (d.stashed)    msg += `${d.stashed} خط ناقص در unsaved_records.log نگه داشته شد و از بین نرفت. `;
     if (!d.saved && !d.duplicates) msg += 'هیچ رکورد معتبری پیدا نشد — فرمت خط را با نمونه مقایسه کنید.';
     $('rMsg').textContent = msg;
     $('result').classList.remove('hidden');

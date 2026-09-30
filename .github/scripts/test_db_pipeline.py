@@ -31,10 +31,16 @@ sys.path.insert(0, ROOT)
 WORKDIR = tempfile.mkdtemp(prefix="rf_db_test_")
 os.chdir(WORKDIR)
 
+# ایزوله‌سازی کامل: دیتابیس اصلی هم داخل پوشه‌ی موقت ساخته می‌شود
+# تا دیتابیس واقعیِ کنار پروژه هرگز لمس (یا حذف!) نشود.
+# RF_MASTER_DB باید قبل از import app تنظیم شود.
+os.environ['RF_MASTER_DB'] = os.path.join(WORKDIR, "test_master.db")
+
 import app as flask_app  # noqa: E402
 
 # دیتابیس‌های روزانه هم در پوشه‌ی موقت ساخته شوند
 flask_app.DAILY_DB_DIR = WORKDIR
+flask_app.UNSAVED_LOG = os.path.join(WORKDIR, "unsaved_records.log")
 
 failures = []
 
@@ -47,7 +53,7 @@ def check(cond, msg):
         print(f"  FAIL- {msg}")
 
 
-# دیتابیس اصلی هرجا که هست، برای تست از صفر ساخته می‌شود
+# دیتابیس اصلیِ تست از صفر ساخته می‌شود
 with flask_app.app.app_context():
     MASTER_DB_FILE = flask_app.db.engine.url.database
     flask_app.db.engine.dispose()

@@ -131,6 +131,10 @@
 
     <section id="view-monitoring" class="view-section active space-y-6">
         
+        <div id="empty-note" class="hidden mb-3 text-center text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-xl py-2">
+            هنوز رکوردی در دیتابیس نیست — با اتصال پورت سریال، ثبت دستی یا آپلود فایل، این کارت‌ها زنده می‌شوند.
+        </div>
+
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             
             <div class="glass-card p-4 rounded-2xl border-t-4 border-orange-500 text-center flex flex-col justify-center min-h-[140px]">
@@ -218,7 +222,7 @@
     <section id="view-manual" class="view-section space-y-4">
         <div class="max-w-3xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-emerald-600">
             <h3 class="text-xl font-bold mb-6 text-emerald-400">ثبت دستی رویداد</h3>
-            <form action="/submit_form" method="POST" class="space-y-6">
+            <form id="manualForm" action="/submit_form" method="POST" class="space-y-6">
                 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div class="space-y-2">
@@ -230,6 +234,12 @@
                         <label class="text-xs text-slate-400">تاریخ ثبت (اختیاری)</label>
                         <input type="date" name="date" class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none">
                         <p class="text-[9px] text-slate-500 text-right">* پیش‌فرض: امروز</p>
+                    </div>
+
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400">ساعت ثبت (اختیاری)</label>
+                        <input type="time" step="1" name="time" class="w-full p-3 rounded-xl focus:ring-2 focus:ring-emerald-500 transition-all outline-none">
+                        <p class="text-[9px] text-slate-500 text-right">* پیش‌فرض: همین الان</p>
                     </div>
                 </div>
 
@@ -259,6 +269,7 @@
                 <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-2xl font-bold transition-all text-white shadow-lg hover:shadow-emerald-900/20">
                     ذخیره در دیتابیس صنعتی
                 </button>
+                <p id="manualMsg" class="text-sm text-center text-slate-400"></p>
             </form>
         </div>
     </section>
@@ -364,7 +375,12 @@
         try {
             const res = await fetch('/api/sensor_data');
             const data = await res.json();
-            if (data.length === 0) return;
+            const badge = document.getElementById('empty-note');
+            if (data.length === 0) {
+                if (badge) badge.classList.remove('hidden');
+                return;
+            }
+            if (badge) badge.classList.add('hidden');
 
             const last = data[data.length - 1]; 
             
@@ -446,6 +462,37 @@
         if (t) t.textContent = `${p(serverClock.getHours())}:${p(serverClock.getMinutes())}:${p(serverClock.getSeconds())}`;
         if (dt) dt.textContent = `${serverClock.getFullYear()}-${p(serverClock.getMonth()+1)}-${p(serverClock.getDate())}`;
     }
+    // ================= فرم ثبت دستی: بدون رفرش، با به‌روزرسانی فوری =================
+    const manualForm = document.getElementById('manualForm');
+    if (manualForm) {
+        manualForm.addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            const msg = document.getElementById('manualMsg');
+            msg.textContent = 'در حال ذخیره…';
+            try {
+                const resp = await fetch('/submit_form', {
+                    method: 'POST',
+                    body: new FormData(manualForm),
+                    headers: {'X-Requested-With': 'fetch'}
+                });
+                if (resp.ok) {
+                    msg.textContent = '✅ ثبت شد — کارت‌های بالا همین الان به‌روز می‌شوند';
+                    msg.className = 'text-sm text-center text-emerald-400';
+                    manualForm.reset();
+                    updateLiveDashboard();          // به‌روزرسانی فوری
+                    const frame = document.getElementById('plotIframe');
+                    if (frame) frame.contentWindow.location.reload();
+                } else {
+                    msg.textContent = '❌ ثبت نشد';
+                    msg.className = 'text-sm text-center text-red-400';
+                }
+            } catch (e) {
+                msg.textContent = 'خطا: ' + e;
+                msg.className = 'text-sm text-center text-red-400';
+            }
+        });
+    }
+
     setInterval(() => { if (serverClock) { serverClock = new Date(serverClock.getTime() + 1000); renderServerClock(); } }, 1000);
     setInterval(syncServerClock, 60000);   // هر دقیقه با سرور میزان می‌شود
     syncServerClock();

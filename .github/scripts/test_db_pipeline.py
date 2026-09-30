@@ -361,6 +361,27 @@ _t = _dc.get("/api/server_time").get_json()
 check(all(k in _t for k in ("server_time", "server_date", "iso")),
       f"API ساعت سرور کار می‌کند ({_t.get('server_time')})")
 
+print("\n[8g] تب ثبت دستی: فیلد ساعت و به‌روزرسانی فوری")
+_mf = flask_app.app.test_client()
+_ix2 = _mf.get("/").get_data(as_text=True)
+check('name="time"' in _ix2 and 'name="date"' in _ix2,
+      "فرم دستی هم تاریخ و هم ساعت دارد")
+check('id="manualForm"' in _ix2 and "updateLiveDashboard();" in _ix2,
+      "ارسال فرم بدون رفرش و با به‌روزرسانی فوری است")
+check('id="empty-note"' in _ix2, "حالت «بدون داده» پیام گویا دارد")
+
+_resp = _mf.post("/submit_form", data={
+    "num_value": "6001", "date": "2026-11-11", "time": "08:15:30",
+    "temp": "21.5", "humidity": "39.5", "nbcm": ["BCM1_OPEN", "BCM2_CLOSE"]})
+check(_resp.status_code in (200, 302), f"ثبت دستی پذیرفته شد ({_resp.status_code})")
+with flask_app.app.app_context():
+    _rec = flask_app.MasterReading.query.filter_by(num_value=6001).first()
+check(_rec is not None and _rec.time == "08:15:30" and _rec.date == "2026-11-11",
+      f"ساعت واردشده در فرم ذخیره شد ({_rec.date if _rec else '-'} {_rec.time if _rec else '-'})")
+_r6 = flask_app.build_bcm_results(_rec.nbcm_selected) if _rec else {}
+check(_r6.get("BCM1", {}).get("open") and _r6.get("BCM2", {}).get("close"),
+      f"تیک‌های انتخاب‌شده درست ذخیره شدند ({_rec.nbcm_selected if _rec else '-'})")
+
 print("\n[9] رندر شدن صفحات (جلوگیری از TemplateNotFound)")
 check(os.path.isfile(os.path.join(flask_app.TEMPLATE_DIR, "index.html")),
       f"پوشه‌ی قالب‌ها پیدا شد: {flask_app.TEMPLATE_DIR}")

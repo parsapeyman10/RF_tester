@@ -63,6 +63,12 @@ if m:
           f"[ESP8266] sscanf باید دقیقاً 13 فیلد بدهد ولی {m.group(1)} چک شده است")
 
 # ------------------------------------ 3) پارس واقعی خط توسط سرور Flask
+# دیتابیس تست: قبل از import جداسازی می‌شود تا رکوردهای تستِ داینامیک
+# (بخش 5f) به دیتابیس واقعی پروژه راه پیدا نکنند
+import tempfile  # noqa: E402
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="rf_protocol_test_")
+os.environ["RF_MASTER_DB"] = os.path.join(_TEST_DB_DIR, "master.db")
+
 sys.path.insert(0, ROOT)
 import app as flask_app  # noqa: E402  (import بعد از تنظیم مسیر)
 
@@ -288,6 +294,134 @@ warn("#define DEBUG_ENABLE false" in esp8266,
 
 warn("#define DEBUG_MODE 0" in esp32,
      "[ESP32] DEBUG_MODE روی 1 است (فقط برای دیباگ مناسب است).")
+
+# ------------------------- 5f) پروتکل لینک v2 — انتقال مطمئن سه‌مرحله‌ای
+# زنجیره: ESP32 --TCP--> ESP8266 --Serial--> سرور (Flask)
+# چهار قاعده‌ی زنجیره:
+#   ۱) سرور تا پورت سریال باز نشود هیچ درخواست/اعلامی نمی‌دهد
+#   ۲) شناسه‌ی نشست (sid) یکسان در هر سه لایه حرکت می‌کند
+#   ۳) وقتی شرایط اوکی شد، ارسال با سرعت کامل (پنجره‌ی ۸تایی)
+#   ۴) روی هر مشکل، ارسال تکرار تا موفق — هیچ data loss
+
+# --- لایه‌ی سرور (app.py) ---
+check("def make_session_id(" in app_src, "[app.py] سازنده‌ی شناسه‌ی نشست وجود دارد")
+check("def send_serial_line(" in app_src, "[app.py] ارسال خط پروتکل با قفل نوشتن سریال")
+check("SRV_READY_PERIOD = 10.0" in app_src, "[app.py] ضربان SRV_READY هر ۱۰ ثانیه")
+check('send_serial_line(f"SRV_READY {serial_session_id}")' in app_src,
+      "[app.py] بعد از باز شدن پورت، SRV_READY با شناسه‌ی نشست اعلام می‌شود")
+check("serial_session_id = make_session_id()" in app_src,
+      "[app.py] هر بار باز شدن پورت، نشست تازه ساخته می‌شود")
+check("serial_session_id = None" in app_src,
+      "[app.py] با بسته شدن پورت، نشست باطل می‌شود")
+_srv_handler = app_src.split("def handle_serial_line(")[1][:2600]
+check("SRV_HELLO" in _srv_handler and "SRV_READY" in _srv_handler,
+      "[app.py] به سلام بوت گیرنده (SRV_HELLO) با SRV_READY پاسخ داده می‌شود")
+check("SRV_PING" in _srv_handler and "SRV_PONG" in _srv_handler,
+      "[app.py] به ضربان گیرنده (SRV_PING) با SRV_PONG پاسخ داده می‌شود")
+check('send_serial_line(f"ACK {payload[\'num_value\']}")' in _srv_handler,
+      "[app.py] ACK فقط بعد از ثبت واقعی (یا تکراری بودن) رکورد برمی‌گردد")
+check("ok = save_sensor_data(payload, raw_line=line)" in _srv_handler,
+      "[app.py] نتیجه‌ی ذخیره چک می‌شود؛ خطای DB یعنی بدون ACK (برای retry)")
+check("'session_id': serial_session_id" in app_src,
+      "[app.py] شناسه‌ی نشست به API وضعیت سریال اضافه شده")
+
+# --- لایه‌ی گیرنده (ESP8266) ---
+check("void handleServerLine(" in esp8266, "[ESP8266] خطوط سریال سرور پردازش می‌شوند")
+check("void serviceServerLink(" in esp8266, "[ESP8266] سرویس دوره‌ای لینک سریال")
+check('Serial.println("SRV_HELLO")' in esp8266,
+      "[ESP8266] موقع بوت خودش را به سرور معرفی می‌کند")
+check('strncmp(line, "SRV_READY", 9)' in esp8266,
+      "[ESP8266] اعلام آمادگی سرور (SRV_READY) خوانده می‌شود")
+check('currentClient.printf("ACK %d\\n", num)' in esp8266,
+      "[ESP8266] تایید واقعی سرور عیناً به ESP32 فوروارد می‌شود")
+check('currentClient.println("OK")' not in esp8266,
+      "[ESP8266] پاسخ OK قبلی حذف شده (تاییدِ قبل از ثبت = منبع گم شدن داده)")
+_rx_fwd = esp8266.split("else if (parseData(rxBuffer))")[1][:1400]
+check("if (!serverReady)" in _rx_fwd and "WAIT" in _rx_fwd and "sendDataToComputer()" in _rx_fwd,
+      "[ESP8266] رکورد فقط با سرورِ آماده به کامپیوتر می‌رود؛ وگرنه WAIT")
+check('currentClient.printf("READY %s\\n", srvSid)' in esp8266,
+      "[ESP8266] آمادگی با همان شناسه‌ی نشست سرور به ESP32 اعلام می‌شود")
+check('currentClient.println("SRV_LOST")' in esp8266,
+      "[ESP8266] قطع شدن ضربان سرور به ESP32 اعلام می‌شود (SRV_LOST)")
+check('Serial.println("SRV_PING")' in esp8266,
+      "[ESP8266] وقتی سرور آماده نیست خودش یادآوری می‌کند (SRV_PING)")
+
+# --- لایه‌ی فرستنده (ESP32) ---
+check("const uint8_t  ACK_WINDOW      = 8;" in esp32,
+      "[ESP32] پنجره‌ی ارسال ۸ رکوردی تعریف شده (سرعت کامل)")
+check("int serviceIncomingLink(bool windowActive)" in esp32,
+      "[ESP32] خطوط ورودی گیرنده (ACK/READY/WAIT/SRV_LOST) پردازش می‌شوند")
+check('uploadClient.println("HELLO")' in esp32,
+      "[ESP32] قبل از هر پنجره، آمادگی سرور با HELLO پرسیده می‌شود")
+check('strncmp(line, "ACK ", 4)' in esp32,
+      "[ESP32] تایید واقعی سرور (ACK <num>) تشخیص داده می‌شود")
+check('indexOf("OK")' not in esp32,
+      '[ESP32] چک قدیمی indexOf("OK") حذف شده — ACK واقعی جایش را گرفت')
+check("void processLinkLine(" in esp32,
+      "[ESP32] هر خط لینک جداگانه پردازش می‌شود (بدون پارس نیمه‌خط)")
+_up = esp32.split("case MODE_CLIENT_UPLOAD:")[1].split("case MODE_HOTSPOT_VIEW:")[0]
+check("winAcked" in _up and "writeUploadPos(dayFile, pos)" in _up,
+      "[ESP32] آفست فقط به اندازه‌ی پیشوند پیاپیِ ACK شده جلو می‌رود")
+check("linkServerReady = false;" in _up and "HELLO_WAIT_MS" in _up,
+      "[ESP32] هر دور آپلود با گیت تازه‌ی READY شروع می‌شود")
+check("uploadClient.stop()" in _up,
+      "[ESP32] اگر هیچ ACK نیامد سوکت مشکوک بسته و پنجره دوباره می‌رود")
+check("WAIT_BACKOFF_MS" in esp32,
+      "[ESP32] عقب‌نشینی کنترل‌شده وقتی سرور آماده نیست")
+
+# --- تست داینامیک: رفتار واقعی سرور بدون سخت‌افزار ---
+# send_serial_line قلاب می‌شود تا دقیقاً ببینیم چه خطوطی به گیرنده می‌رود
+with flask_app.app.app_context():
+    flask_app.db.create_all()
+    flask_app._ensure_master_unique_index()
+
+_sid = flask_app.make_session_id()
+check(re.fullmatch(r"S[0-9A-F]{6}", _sid) is not None,
+      f"[app.py/داینامیک] قالب شناسه‌ی نشست درست است ({_sid})")
+
+_sent = []
+_orig_send = flask_app.send_serial_line
+_orig_unsaved = flask_app.UNSAVED_LOG
+flask_app.send_serial_line = lambda line: (_sent.append(line), True)[1]
+flask_app.UNSAVED_LOG = os.path.join(_TEST_DB_DIR, "unsaved_test.log")
+flask_app.serial_session_id = "STEST01"
+try:
+    # ۱) رکورد تازه: باید دقیقاً «ACK <num>» برگردد
+    _rec = ("NUM=99001,BCM1_OPEN=OK,BCM1_CLOSE=NOK,BCM2_OPEN=OK,BCM2_CLOSE=NOK,"
+            "Temp=23.45,Humidity=51.20,Date=2026-09-30,Time=10:11:12")
+    _sent.clear()
+    _ok_new = flask_app.handle_serial_line(_rec)
+    check(_ok_new is True and _sent == ["ACK 99001"],
+          f"[app.py/داینامیک] رکورد تازه باید «ACK 99001» بگیرد (نتیجه={_ok_new}، ارسالی={_sent})")
+
+    # ۲) ارسال مجدد همان رکورد (ACK گم شده): تکراری است ولی باز ACK می‌گیرد
+    #    تا retry فرستنده تمام شود و داده دوبله هم ثبت نشود
+    _sent.clear()
+    _ok_dup = flask_app.handle_serial_line(_rec)
+    check(_ok_dup is True and _sent == ["ACK 99001"],
+          f"[app.py/داینامیک] رکورد تکراری هم ACK می‌گیرد (نتیجه={_ok_dup}، ارسالی={_sent})")
+
+    # ۳) سلام و پینگ گیرنده با شناسه‌ی نشست فعلی
+    _sent.clear()
+    flask_app.handle_serial_line("SRV_HELLO")
+    check(_sent == ["SRV_READY STEST01"],
+          f"[app.py/داینامیک] SRV_HELLO باید «SRV_READY STEST01» بگیرد ({_sent})")
+    _sent.clear()
+    flask_app.handle_serial_line("SRV_PING")
+    check(_sent == ["SRV_PONG STEST01"],
+          f"[app.py/داینامیک] SRV_PING باید «SRV_PONG STEST01» بگیرد ({_sent})")
+
+    # ۴) خط خراب: ACK نمی‌گیرد تا فرستنده دوباره بفرستد
+    _sent.clear()
+    _ok_bad = flask_app.handle_serial_line("NUM=99002,Temp=xx,Humidity=yy,Date=2026-09-30,Time=10:11:12")
+    check(_ok_bad is False and len(_sent) == 0,
+          f"[app.py/داینامیک] خط خراب نباید ACK بگیرد (نتیجه={_ok_bad}، ارسالی={_sent})")
+finally:
+    flask_app.send_serial_line = _orig_send
+    flask_app.UNSAVED_LOG = _orig_unsaved
+
+import shutil  # noqa: E402
+shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
 
 # --------------------------------------------------------------- گزارش
 for w in warnings:

@@ -351,6 +351,7 @@
                     const okConn = data.connection_status === 'Connected';
                     statusDiv.innerHTML = `${okConn ? '📡' : '⏳'} وضعیت: ${okConn ? 'متصل' : 'در انتظار اتصال'}`
                         + ` | پورت: <b>${data.active_port}</b> | Baud: <b>${data.baud_rate}</b>`
+                        + (data.session_id ? ` | نشست لینک: <b class="text-emerald-400">${data.session_id}</b>` : '')
                         + (okConn ? '' : ' <span class="text-amber-400">(تنظیمات ذخیره شده، منتظر در دسترس شدن پورت)</span>');
                 }
                 if(data.connection_status === 'Connected') {

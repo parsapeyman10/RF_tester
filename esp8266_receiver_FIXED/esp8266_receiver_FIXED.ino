@@ -41,7 +41,7 @@
 #define ST_PRINTF(...)
 #endif
 
-#define FW_VERSION "2.0"
+#define FW_VERSION "2.1"
 
 // تنظیمات شبکه و ارتباطی
 const char* SSID_NAME = "ESP8266_AP";
@@ -107,9 +107,40 @@ struct ReceiverStats {
   uint32_t pings = 0;          // keep-alive های پاسخ داده‌شده
   uint32_t sessions = 0;       // چند بار کلاینت وصل شده
   uint32_t apRestarts = 0;     // چند بار AP بازسازی شده
+  uint32_t acksFwd = 0;        // تاییدیه‌های سرور که به ESP32 برگردانده شد
+  uint32_t waitsSent = 0;      // چند بار «صبر کن» گفتیم چون سرور آماده نبود
 };
 ReceiverStats stats;
 unsigned long lastDataMs = 0;      // آخرین باری که دیتای معتبر رسید
+
+// =====================================================================
+//  لینک با سرور (پروتکل نسخه ۲ — انتقال مطمئن سه‌مرحله‌ای)
+//
+//  قواعد زنجیره (سرور <-> ESP8266 <-> ESP32):
+//   1) سرور تا وقتی پورت سریالش باز نشده، هیچ درخواست/اعلامی نمی‌دهد.
+//      فقط بعد از اتصال خط «SRV_READY <sid>» می‌فرستد (و هر ۱۰ ثانیه
+//      تکرارش می‌کند). تا آن لحظه هیچ داده‌ای به کامپیوتر نمی‌رود و
+//      هیچ تاییدی به ESP32 داده نمی‌شود.
+//   2) <sid> شناسه‌ی نشست است که یکسان در هر سه لایه حرکت می‌کند:
+//      همین‌جا ذخیره و با «READY <sid>» به ESP32 اعلام می‌شود.
+//   3) تاییدیه‌ی واقعی فقط از سرور می‌آید («ACK <num>») و عیناً به
+//      ESP32 برمی‌گردد. یعنی ESP32 فقط وقتی رکوردش را «رسیده» می‌داند
+//      که واقعاً در دیتابیس ثبت شده باشد — نه صرفِ رسیدن به این برد.
+//   4) اگر سرور برود (ضربان SRV_READY قطع شود) فوروارد متوقف و با
+//      «SRV_LOST» به ESP32 اعلام می‌شود؛ همه‌چیز روی حافظه‌ی خود ESP32
+//      سالم می‌ماند و بعد از READY جدید دوباره ارسال می‌شود.
+// =====================================================================
+bool serverReady = false;             // سرور پشت پورت سریال نشسته و آماده است؟
+char srvSid[12] = "";                 // شناسه‌ی نشست سرور (خالی = هنوز ندیده‌ایم)
+unsigned long lastSrvReadyMs = 0;     // آخرین ضربان SRV_READY
+unsigned long lastSrvPingMs = 0;      // آخرین SRV_HELLO / SRV_PING خودمان
+const unsigned long SRV_HEARTBEAT_MS = 30000;  // بی‌ضربانی = سرور رفته
+const unsigned long SRV_PING_PERIOD_MS = 10000;
+
+// بافر دریافت خطوط سریال از سرور
+const int SRV_RX_SIZE = 96;
+char srvRx[SRV_RX_SIZE];
+int srvRxLen = 0;
 
 // هندلرهای رویداد اکسس‌پوینت (باید سراسری بمانند)
 WiFiEventHandler onStationConnectedHandler;
@@ -129,6 +160,9 @@ void sendDataToComputer();
 void clearRxBuffer();
 void stopClient(const char* reason);
 bool strToBool(const char* str);
+void handleServerLine(const char* line);
+void serviceServerLink();
+void notifyClientServerState();
 
 /** وقتی ESP32 (یا هر کلاینتی) به اکسس‌پوینت می‌پیوندد */
 void handleStationConnected(const WiFiEventSoftAPModeStationConnected &evt) {
@@ -143,10 +177,20 @@ void handleStationDisconnected(const WiFiEventSoftAPModeStationDisconnected &evt
 }
 
 void setup() {
+  // بافر دریافت سریال را قبل از begin بزرگ می‌کنیم: حالا علاوه بر داده،
+  // خطوط کنترلی لینک (SRV_READY/ACK) هم از این مسیر می‌آیند
+  Serial.setRxBufferSize(512);
   Serial.begin(SERIAL_BAUD);
   delay(1000);
 
   ST_PRINTF("\n[BOOT] ESP8266 Receiver FW %s\n", FW_VERSION);
+
+  // --- دست‌دادن با سرور (لینک v2) ---
+  // خودمان را معرفی می‌کنیم تا اگر سرور از قبل پشت پورت نشسته، بلافاصله
+  // SRV_READY و شناسه‌ی نشست را بگیریم. (قاعده ۱: سرور تا پورت سریالش
+  // باز نشده هیچ چیزی نمی‌فرستد، پس شروع گفتگو با ماست)
+  Serial.println("SRV_HELLO");
+  lastSrvPingMs = millis();
 
   onStationConnectedHandler = WiFi.onSoftAPModeStationConnected(&handleStationConnected);
   onStationDisconnectedHandler = WiFi.onSoftAPModeStationDisconnected(&handleStationDisconnected);
@@ -164,6 +208,9 @@ void setup() {
 }
 
 void loop() {
+  // لینک سریال با سرور: خواندن SRV_READY/ACK/SRV_PONG + ضربان و تشخیص قطع
+  serviceServerLink();
+
   // مدیریت اتصال کلاینت جدید
   if (server.hasClient()) {
     if (currentClient && currentClient.connected()) {
@@ -174,6 +221,8 @@ void loop() {
     lastClientActivity = millis();
     clearRxBuffer();
     DBG_PRINTLN("\n[SYSTEM] New client connected.");
+    // بلافاصله به ESP32 می‌گوییم سرور آماده است یا نه تا بی‌جهت نفرستد
+    notifyClientServerState();
   }
 
   // پردازش داده‌های دریافتی
@@ -209,16 +258,33 @@ void loop() {
               stats.pings++;
               lastDataMs = millis();
             }
+            // پرسش وضعیت از سمت ESP32: «سرور آماده‌ای؟»
+            else if (strcmp(rxBuffer, "HELLO") == 0) {
+              if (serverReady) {
+                currentClient.printf("READY %s\n", srvSid);
+              } else {
+                currentClient.println("WAIT");
+              }
+              lastDataMs = millis();
+            }
             // تحلیل دیتا و بررسی مطابقت با فرمت درخواستی
             else if (parseData(rxBuffer)) {
-              // ارسال تاییدیه OK به فرستنده (ESP32)
-              currentClient.println("OK");
-              stats.linesOk++;
-              lastDataMs = millis();
-              DBG_PRINTLN("[RESPONSE]: Sent 'OK' to Client (Handshake Complete)");
-              // تنها خروجی غیرمشروط به کامپیوتر: همیشه چاپ می‌شود
-              // چون Flask دقیقاً منتظر همین یک خط با فرمت NUM=... است
-              sendDataToComputer();
+              if (!serverReady) {
+                // گیت قاعده ۱: سرور پشت پورت نیست. خط به کامپیوتر نمی‌رود
+                // و «هیچ» تاییدیه‌ای نمی‌گیرد تا ESP32 بداند باید نگهش دارد
+                // و دوباره بفرستد. (پاسخ OK قبلی حذف شد — تایید واقعی فقط
+                // ACK سرور است که بعداً فوروارد می‌شود)
+                currentClient.println("WAIT");
+                stats.waitsSent++;
+                lastDataMs = millis();   // کلاینت زنده است؛ فقط سرور غایب است
+              } else {
+                stats.linesOk++;
+                lastDataMs = millis();
+                // ارسال به کامپیوتر — تاییدیه به ESP32 «فقط» وقتی برمی‌گردد
+                // که سرور رکورد را واقعاً ثبت کرده باشد (ACK از مسیر
+                // handleServerLine فوروارد می‌شود)
+                sendDataToComputer();
+              }
             } else {
               // در صورت عدم تطابق فرمت
               currentClient.println("ERR:FORMAT");
@@ -419,4 +485,93 @@ void sendDataToComputer() {
     WData.Year, WData.Month, WData.Day,
     WData.Hour, WData.Minute, WData.Second
   );
+}
+
+// =====================================================================
+//  لینک v2 — خط کامل دریافت‌شده از سرور روی سریال
+//  (SRV_READY <sid> / ACK <num> / SRV_PONG <sid>)
+// =====================================================================
+void handleServerLine(const char* line) {
+  if (strncmp(line, "SRV_READY", 9) == 0) {
+    char sid[12] = "";
+    if (sscanf(line, "SRV_READY %11s", sid) == 1 && sid[0] != '\0') {
+      strlcpy(srvSid, sid, sizeof(srvSid));
+    }
+    bool wasReady = serverReady;
+    serverReady = true;
+    lastSrvReadyMs = millis();          // ضربان زنده است
+    if (!wasReady) {
+      ST_PRINTF("[LINK] سرور آماده است (نشست %s)\n", srvSid);
+      notifyClientServerState();        // خبر دادن به ESP32
+    }
+  }
+  else if (strncmp(line, "ACK", 3) == 0) {
+    int num = -1;
+    if (sscanf(line, "ACK %d", &num) == 1) {
+      // جریان ACK هم دلیل زنده بودن لینک است (هنگام آپلود، ضربان
+      // SRV_READY ممکن است بین رکوردها فرصت ارسال نیابد)
+      lastSrvReadyMs = millis();
+      if (isClientConnected && currentClient.connected()) {
+        currentClient.printf("ACK %d\n", num);
+        stats.acksFwd++;
+      }
+    }
+  }
+  else if (strncmp(line, "SRV_PONG", 8) == 0) {
+    lastSrvReadyMs = millis();
+  }
+  else {
+    DBG_PRINTF("[LINK] خط ناشناخته از سرور: %s\n", line);
+  }
+}
+
+// =====================================================================
+//  لینک v2 — سرویس دوره‌ای: خواندن ورودی سریال + ضربان + تشخیص قطع
+// =====================================================================
+void serviceServerLink() {
+  // ۱) خواندن همه‌ی بایت‌های موجود و سهم‌گذاری خطوط
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (srvRxLen > 0) {
+        srvRx[srvRxLen] = '\0';
+        handleServerLine(srvRx);
+        srvRxLen = 0;
+      }
+    } else if (srvRxLen < SRV_RX_SIZE - 1) {
+      srvRx[srvRxLen++] = c;
+    } else {
+      // سرریز: خط را دور بریز تا با خط بعدی قاطی نشود
+      srvRxLen = 0;
+      DBG_PRINTLN("[LINK] خط سریال سرور بلندتر از بافر؛ دور ریخته شد");
+    }
+  }
+
+  // ۲) تشخیص قطع سرور: مدتی هیچ نشانه‌ی حیاتی نیامده است
+  if (serverReady && millis() - lastSrvReadyMs > SRV_HEARTBEAT_MS) {
+    serverReady = false;
+    srvSid[0] = '\0';
+    ST_PRINTF("[LINK] ضربان سرور قطع شد (> %lus) -> فوروارد متوقف\n",
+              SRV_HEARTBEAT_MS / 1000);
+    if (isClientConnected && currentClient.connected()) {
+      currentClient.println("SRV_LOST");
+    }
+  }
+
+  // ۳) وقتی سرور آماده نیست هر ۱۰ ثانیه یادآوری می‌کنیم؛ سرور به
+  //    SRV_PING جواب SRV_PONG و به SRV_HELLO جواب SRV_READY می‌دهد
+  if (!serverReady && millis() - lastSrvPingMs > SRV_PING_PERIOD_MS) {
+    lastSrvPingMs = millis();
+    Serial.println("SRV_PING");
+  }
+}
+
+// وضعیت جاری لینک سرور را به کلاینت TCP (ESP32) اعلام می‌کند
+void notifyClientServerState() {
+  if (!isClientConnected || !currentClient.connected()) return;
+  if (serverReady) {
+    currentClient.printf("READY %s\n", srvSid);
+  } else {
+    currentClient.println("WAIT");
+  }
 }

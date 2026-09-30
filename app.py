@@ -515,6 +515,51 @@ DEFAULT_PORT = "COM9"
 manual_disconnect = False
 
 # =====================================================================
+#  لایه‌ی پروتکل لینک با ESP8266 (نسخه ۲ — انتقال مطمئن سه‌مرحله‌ای)
+#
+#  مسیر داده:   ESP32 --TCP--> ESP8266 --Serial--> سرور
+#  مسیر تایید:  سرور --Serial("ACK <num>")--> ESP8266 --TCP--> ESP32
+#
+#  قواعد:
+#   1) تا وقتی پورت سریال باز نشده، سرور هیچ «درخواست داده‌ای» نمی‌دهد؛
+#      فقط بعد از اتصال، خط «SRV_READY <sid>» را می‌فرستد (هر ۱۰ ثانیه
+#      تکرار می‌شود تا گیرنده تازه‌وصل/ریست‌شده هم بفهمد).
+#   2) <sid> شناسه‌ی نشست است که یکسان در هر سه لایه حرکت می‌کند:
+#      سرور -> ESP8266 -> ESP32. هر بار باز شدن پورت، شناسه‌ی تازه.
+#   3) برای هر رکوردی که واقعاً در دیتابیس ثبت شد (یا از قبل بود) خط
+#      «ACK <num>» برمی‌گردد. تا ACK نیامده، فرستنده همان رکورد را
+#      دوباره می‌فرستد — دیتابیس رکورد تکراری را ACK می‌کند و دوبله
+#      ثبت نمی‌شود، پس هیچ داده‌ای از دست نمی‌رود.
+#   4) خطی که پارس نشد ACK نمی‌گیرد (تا دوباره ارسال شود) ولی در
+#      unsaved_records.log هم نگه داشته می‌شود.
+# =====================================================================
+serial_write_lock = threading.Lock()
+serial_session_id = None          # شناسه‌ی نشست فعلی (None = پورت بسته)
+SRV_READY_PERIOD = 10.0           # ضربان «آماده‌ام» روی سریال (ثانیه)
+
+
+def make_session_id():
+    """شناسه‌ی نشست — کوتاه و خوانا، مثل S3F9A2"""
+    import secrets
+    return "S" + secrets.token_hex(3).upper()
+
+
+def send_serial_line(line):
+    """
+    ارسال یک خط پروتکل به ESP8266 روی سریال.
+    اگر پورت بسته باشد بی‌صدا False برمی‌گردد — نجات داده به عهده‌ی
+    سازوکار retry فرستنده است، نه این تابع.
+    """
+    try:
+        with serial_write_lock:
+            if ser and ser.is_open:
+                ser.write((line + "\n").encode("utf-8"))
+                return True
+    except Exception as exc:
+        print(f"[SERIAL-TX] ارسال ناموفق ({line}): {exc}")
+    return False
+
+# =====================================================================
 #  تنظیمات پورت سریال ماندگار می‌شوند
 #  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
 #  می‌رفت و باید دوباره دستی انتخاب می‌شد.
@@ -645,17 +690,35 @@ class SerialLineBuffer:
 
 def handle_serial_line(line):
     """
-    یک خط کامل سریال را پارس و ذخیره می‌کند.
+    یک خط کامل سریال را پردازش می‌کند.
+
+    خطوط کنترلی لینک (SRV_HELLO / SRV_PING) همین‌جا جواب داده می‌شوند.
+    برای خطوط داده: فقط وقتی «ACK <num>» برمی‌گردانیم که رکورد واقعاً در
+    دیتابیس ثبت شده (یا از قبل موجود) باشد — یعنی فرستنده تا موفقیت
+    واقعی تایید نمی‌گیرد و هیچ داده‌ای از دست نمی‌رود.
 
     هیچ خطی که NUM= داشته باشد دور ریخته نمی‌شود: اگر فرمتش کامل نبود
     در unsaved_records.log نگه داشته می‌شود تا بعداً بررسی شود.
     """
+    # --- خطوط کنترلی لینک (بدون NUM=) ---
+    if line.startswith("SRV_HELLO"):
+        # گیرنده تازه بوت/وصل شده؛ وضعیت آماده بودن و شناسه‌ی نشست را بده
+        send_serial_line(f"SRV_READY {serial_session_id or make_session_id()}")
+        return True
+    if line.startswith("SRV_PING"):
+        send_serial_line(f"SRV_PONG {serial_session_id or ''}".strip())
+        return True
+
     payload = parse_industrial_line(line)
     if payload:
         print(f"[RX] NUM={payload['num_value']} {payload['date']} {payload['time']}")
         with app.app_context():
-            save_sensor_data(payload, raw_line=line)
-        return True
+            ok = save_sensor_data(payload, raw_line=line)
+        if ok:
+            # ثبت شد (یا تکراری بود) -> تایید به فرستنده؛
+            # اگر خطای دیتابیس بود ACK نمی‌رود تا دستگاه دوباره بفرستد
+            send_serial_line(f"ACK {payload['num_value']}")
+        return ok
     if "NUM=" in line:
         print(f"[RX_BAD] {line[:120]}")
         stash_unsaved(line, "serial_parse_fail")
@@ -663,8 +726,9 @@ def handle_serial_line(line):
 
 
 def read_serial_worker():
-    global ser, active_serial_port, manual_disconnect
+    global ser, active_serial_port, manual_disconnect, serial_session_id
     line_buf = SerialLineBuffer()
+    last_ready_sent = 0.0
 
     while not stop_event.is_set():
         try:
@@ -677,7 +741,14 @@ def read_serial_worker():
                     try:
                         ser = serial.Serial(active_serial_port, active_baud_rate, timeout=0.2)
                         line_buf = SerialLineBuffer()   # بافرِ پورت قبلی دیگر معتبر نیست
-                        print(f"[SERIAL] Connected to {active_serial_port}")
+                        # نشست تازه: شناسه‌ی جدید ساخته و اعلام آمادگی می‌شود.
+                        # این تنها جایی است که سرور «درخواست داده» می‌دهد —
+                        # یعنی فقط بعد از اینکه پورت واقعاً باز شده است.
+                        serial_session_id = make_session_id()
+                        last_ready_sent = time.time()
+                        send_serial_line(f"SRV_READY {serial_session_id}")
+                        print(f"[SERIAL] Connected to {active_serial_port} "
+                              f"(session {serial_session_id})")
                     except Exception as e:
                         print(f"[SERIAL_ERR] {e}")
                         time.sleep(2)
@@ -696,12 +767,20 @@ def read_serial_worker():
                             handle_serial_line(line)
                         except Exception as line_err:
                             print(f"[READ_ERR] {line_err}")
+                    last_ready_sent = time.time()   # داده دارد می‌رسد؛ لینک زنده است
                 elif line_buf.pending():
                     # نیمه‌خطی داریم؛ چند لحظه صبر تا بقیه‌ی خط برسد
                     time.sleep(0.02)
                 else:
+                    # ضربان «آماده‌ام»: گیرنده‌ی تازه‌وصل یا ریست‌شده بدون
+                    # معطلی می‌فهمد که سرور پشت پورت نشسته است
+                    if time.time() - last_ready_sent >= SRV_READY_PERIOD:
+                        send_serial_line(f"SRV_READY {serial_session_id}")
+                        last_ready_sent = time.time()
                     time.sleep(0.01)
             else:
+                if serial_session_id is not None:
+                    serial_session_id = None   # پورت بسته شد؛ نشست تمام شد
                 time.sleep(0.2)
 
         except Exception as e:
@@ -1269,7 +1348,11 @@ def list_serial_ports():
         'active_port': active_serial_port,
         'baud_rate': active_baud_rate,
         'baud_rates': [9600, 19200, 38400, 57600, 115200, 230400],
-        'connection_status': 'Connected' if (ser and ser.is_open) else 'Disconnected'
+        'connection_status': 'Connected' if (ser and ser.is_open) else 'Disconnected',
+        # شناسه‌ی نشست لینک — همان شناسه‌ای که به ESP8266 و از آنجا به
+        # ESP32 می‌رسد؛ برای مطمئن شدن از اینکه هر سه با یک id پیش می‌روند
+        'session_id': serial_session_id,
+        'link_protocol': 'v2'
     })
 
 @app.route('/api/set_serial_config', methods=['POST'])

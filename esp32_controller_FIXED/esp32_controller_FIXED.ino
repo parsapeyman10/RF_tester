@@ -122,6 +122,15 @@ const uint32_t WIFI_CONNECT_TIMEOUT_MS = 8000;   // مهلت هر تلاش ات�
 const uint32_t WIFI_BACKOFF_MIN_MS = 2000;       // فاصله‌ی تلاش‌ها: از ۲ ثانیه
 const uint32_t WIFI_BACKOFF_MAX_MS = 30000;      // تا سقف ۳۰ ثانیه
 const uint32_t TCP_KEEPALIVE_MS = 25000;         // PING برای زنده نگه داشتن سوکت
+
+// --- پروتکل انتقال مطمئن v2 (لینک سه‌مرحله‌ای با گیرنده/سرور) ---
+// ESP32 هیچ رکوردی را «ارسال‌شده» نمی‌داند مگر اینکه ACK واقعی سرور
+// (از مسیر گیرنده) برایش برگردد. آفست آپلود فقط به اندازه‌ی پیشوندِ
+// پیاپیِ تاییدشده جلو می‌رود؛ بقیه دور بعد دوباره ارسال می‌شوند.
+const uint8_t  ACK_WINDOW      = 8;      // چند رکورد در هر پنجره می‌رود
+const uint32_t ACK_TIMEOUT_MS  = 3000;   // سقف انتظار برای ACK های سرور
+const uint32_t WAIT_BACKOFF_MS = 2000;   // عقب‌نشینی وقتی سرور آماده نیست
+const uint32_t HELLO_WAIT_MS   = 2000;   // سقف انتظار برای READY بعد از HELLO
 // --- زمان‌بندی واچ‌داگ (بازبینی‌شده) ---
 // هر تسک یک «ضربان» دارد. اگر ضربانی در بازه‌ی زیر تکان نخورد یعنی قفل کرده
 // و برد کنترل‌شده ری‌استارت می‌شود. مقادیر با سرعت طبیعی هر تسک تنظیم شده‌اند:
@@ -359,6 +368,16 @@ String cfgTimeSsid, cfgTimePass;  // مودم یا هات‌اسپات گوشی 
 WiFiClient uploadClient;
 WebServer setupServer(80);
 
+// --- وضعیت لینک v2 با سرور (از مسیر گیرنده) ---
+// linkSid همان شناسه‌ای است که سرور موقع باز شدن پورت سریال می‌سازد و
+// با SRV_READY تا گیرنده و با READY تا همین‌جا می‌رسد — هر سه لایه با
+// یک id پیش می‌روند تا معلوم باشد داده‌ی چه نشستی در جریان است.
+char linkSid[12] = "";           // شناسه‌ی نشست مشترک (خالی = هنوز ندیده‌ایم)
+bool linkServerReady = false;    // سرور واقعاً آماده‌ی دریافت است؟ (READY دیدیم)
+uint32_t winNums[ACK_WINDOW];    // شماره‌ی رکوردهای پنجره‌ی ارسال جاری
+bool winAcked[ACK_WINDOW];       // کدام اسلات‌ها ACK واقعی سرور گرفتند
+uint8_t winLen = 0;              // طول مؤثر پنجره
+
 volatile int currentGlobalID = 0;
 volatile WifiData globalSystemState;
 
@@ -391,6 +410,8 @@ void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
 void wifiService();
 void handleSerialCommands();
+int serviceIncomingLink(bool windowActive);   // لینک v2: خواندن خطوط گیرنده
+void processLinkLine(const char* line, bool windowActive);
 void waitForDataLink(uint32_t timeoutMs);
 void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
 void scanForDataAp();
@@ -1168,9 +1189,11 @@ void handleSerialCommands() {
         Serial.printf("[CMD] پاک‌سازی %s ...\n", storageName());
         eraseStorage();
       } else if (buf.equalsIgnoreCase("STATUS")) {
-        Serial.printf("[CMD] مرحله=%s | wifi=%s | حافظه=%s | رکورد بعدی=%d | heap=%uk\n",
+        Serial.printf("[CMD] مرحله=%s | wifi=%s | لینک=%s%s | حافظه=%s | رکورد بعدی=%d | heap=%uk\n",
                       relayPhaseText,
                       WiFi.status() == WL_CONNECTED ? "UP" : "DOWN",
+                      linkServerReady ? "READY" : "WAIT",
+                      linkSid,
                       storageName(),
                       currentGlobalID + 1, (unsigned)(ESP.getFreeHeap() / 1024));
       } else if (buf.length()) {
@@ -1181,6 +1204,74 @@ void handleSerialCommands() {
       buf += c;
     }
   }
+}
+
+// =====================================================================
+//  لینک v2 — پردازش یک خط کامل از گیرنده (ESP8266)
+//  خطوط: ACK <num> / READY <sid> / WAIT / SRV_LOST / ERR:* / PONG
+// =====================================================================
+void processLinkLine(const char* line, bool windowActive) {
+  if (strncmp(line, "ACK ", 4) == 0) {
+    // تایید واقعی سرور (گیرنده فقط عین همان ACK ای را فوروارد می‌کند
+    // که از سرور آمده) -> اسلات متناظر در پنجره‌ی جاری علامت می‌خورد
+    long num = strtol(line + 4, NULL, 10);
+    if (windowActive) {
+      for (uint8_t i = 0; i < winLen; i++) {
+        if (!winAcked[i] && winNums[i] == (uint32_t)num) {
+          winAcked[i] = true;
+          break;
+        }
+      }
+    }
+  }
+  else if (strncmp(line, "READY", 5) == 0) {
+    const char* sid = line + 5;
+    while (*sid == ' ') sid++;
+    strlcpy(linkSid, sid, sizeof(linkSid));
+    linkServerReady = true;
+    VERBOSE_PRINTF("[LINK] سرور آماده است (نشست %s)\n", linkSid);
+  }
+  else if (strcmp(line, "WAIT") == 0) {
+    linkServerReady = false;
+  }
+  else if (strncmp(line, "SRV_LOST", 8) == 0) {
+    linkServerReady = false;
+    DEBUG_PRINTLN("[LINK] سرور از دست رفت -> آپلود متوقف تا READY جدید");
+  }
+  else if (strncmp(line, "ERR:", 4) == 0) {
+    // گیرنده فرمت را رد کرد؛ چون ACK نمی‌آید همان رکورد دور بعد
+    // دوباره ارسال می‌شود (retry تا موفق — هیچ داده‌ای دور ریخته نمی‌شود)
+    DEBUG_PRINTF("[LINK] گیرنده رد کرد: %s\n", line);
+  }
+  // PONG و هر خط ناشناخته‌ی دیگر: نادیده گرفته می‌شود
+}
+
+// =====================================================================
+//  لینک v2 — خواندن غیرمسدودکننده‌ی همه‌ی خطوط موجود از گیرنده.
+//  فقط خطوط «کامل» (با newline) پردازش می‌شوند تا نیمه‌خط پارس اشتباهی
+//  نسازد. تعداد خطوط پردازش‌شده را برمی‌گرداند.
+// =====================================================================
+int serviceIncomingLink(bool windowActive) {
+  static char rxBuf[96];
+  static uint8_t rxLen = 0;
+  int handled = 0;
+
+  while (uploadClient.available() > 0) {
+    char c = (char)uploadClient.read();
+    if (c == '\n' || c == '\r') {
+      if (rxLen > 0) {
+        rxBuf[rxLen] = '\0';
+        processLinkLine(rxBuf, windowActive);
+        rxLen = 0;
+        handled++;
+      }
+    } else if (rxLen < sizeof(rxBuf) - 1) {
+      rxBuf[rxLen++] = c;
+    } else {
+      rxLen = 0;   // سرریز؛ خط دور ریخته شد تا با بعدی قاطی نکند
+    }
+  }
+  return handled;
 }
 
 void wifiService() {
@@ -1198,12 +1289,12 @@ void wifiService() {
     if (uploadClient.connected() && millis() - lastTxMillis > TCP_KEEPALIVE_MS) {
       uploadClient.println("PING");
       lastTxMillis = millis();
+      // جواب (PONG — یا هر خط لینک v2 دیگری مثل READY/SRV_LOST) را
+      // با همان پارسر لینک می‌خوانیم؛ سقف ۵۰۰ میلی‌ثانیه
       uint32_t t0 = millis();
       while (millis() - t0 < 500) {
-        if (uploadClient.available()) {
-          uploadClient.readStringUntil('\n');  // PONG
-          break;
-        }
+        if (serviceIncomingLink(false) > 0) break;   // جواب آمد
+        if (!uploadClient.connected()) break;
         vTaskDelay(pdMS_TO_TICKS(5));
       }
     }
@@ -2129,79 +2220,131 @@ void TaskInternalWiFiConnection(void *pv) {
           break;
         }
 
-        // ج) Store & Forward با آفست:
+        // ج) Store & Forward با آفست (لینک v2 — پنجره‌ای):
         //    قدیمی‌ترین فایل روزانه را برمی‌داریم، از روی آفستِ ذخیره‌شده
-        //    رکورد بعدی را می‌خوانیم و می‌فرستیم. بعد از ACK فقط آفست جلو
-        //    می‌رود (نه حذف فایل) -> نوشتن روی SD خیلی کمتر و امن‌تر می‌شود.
+        //    تا ۸ رکورد بعدی را یک‌جا می‌خوانیم (فایل بلافاصله بسته می‌شود)
+        //    و پشت سر هم می‌فرستیم. آفست «فقط» به اندازه‌ی پیشوندِ پیاپی‌ای
+        //    که ACK واقعی سرور گرفته جلو می‌رود -> هیچ رکورد تاییدنشده‌ای
+        //    از دست نمی‌رود و نوشتن روی SD هم به حداقل می‌رسد.
         if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(100))) {
-          String dayFile = pickDayFile(true);
-          if (dayFile.length()) {
+          bool needBackoff = false;
+          do {   // فقط برای خروج زودهنگامِ تمیز؛ دقیقاً یک‌بار اجرا می‌شود
+            String dayFile = pickDayFile(true);
+            if (!dayFile.length()) break;
+
             uint32_t pos = readUploadPos(dayFile);
             File f = gFs->open(dayFile, FILE_READ);
-            if (f) {
-              size_t fileSize = f.size();
+            if (!f) break;
+            size_t fileSize = f.size();
 
-              if (pos + REC_SIZE <= fileSize) {
-                WifiData stored;
-                f.seek(pos);
-                bool readOk = (f.read((uint8_t *)&stored, REC_SIZE) == (int)REC_SIZE);
-                f.close();
+            if (pos + REC_SIZE > fileSize) {
+              // فایل کامل آپلود شده؛ اگر مربوط به امروز نیست پاکش کن
+              f.close();
+              rtc.read();
+              String today = dayFilePath(2000 + rtc.getYear(), rtc.getMonth(), rtc.getDay());
+              if (dayFile != today) {
+                gFs->remove(posPathOf(dayFile));
+                gFs->remove(dayFile);
+                DEBUG_PRINTF("[UPLOAD] %s fully uploaded -> removed\n", dayFile.c_str());
+              }
+              break;
+            }
 
-                // اتصال باز نگه داشته می‌شود؛ فقط اگر قطع بود دوباره وصل می‌شویم.
-                // (قبلاً برای هر رکورد یک اتصال جدید باز و بسته می‌شد که هم
-                //  کند بود و هم روی ESP8266 مدام «client connected/disconnected»
-                //  تولید می‌کرد.)
-                bool linkReady = uploadClient.connected();
-                if (!linkReady) {
-                  linkReady = uploadClient.connect(serverIP, serverPort);
-                  if (linkReady) {
-                    uploadClient.setNoDelay(true);
-                    VERBOSE_PRINTLN("[UPLOAD] اتصال TCP برقرار شد");
-                  }
-                }
+            // ۱) پر کردن پنجره از فایل؛ فایل همین‌جا برای این دور بسته می‌شود
+            WifiData win[ACK_WINDOW];
+            uint8_t n = 0;
+            uint32_t sendPos = pos;
+            while (n < ACK_WINDOW && sendPos + REC_SIZE <= fileSize) {
+              f.seek(sendPos);
+              if (f.read((uint8_t *)&win[n], REC_SIZE) != (int)REC_SIZE) break;
+              winNums[n] = (uint32_t)win[n].NUM;
+              winAcked[n] = false;
+              n++;
+              sendPos += REC_SIZE;
+            }
+            f.close();
+            winLen = n;
+            if (n == 0) break;   // خواندن فایل ناقص بود؛ دور بعد دوباره
 
-                if (readOk && linkReady) {
-                  // این فرمت باید دقیقاً با sscanf سمت ESP8266 و با
-                  // parse_industrial_line در app.py یکی بماند (۱۳ فیلد)
-                  char buf[300];
-                  formatRecordLine(stored, buf, sizeof(buf));  // فرمت واحد پروژه
-                  uploadClient.println(buf);
-                  lastTxMillis = millis();
-
-                  uint32_t t0 = millis();
-                  bool ack = false;
-                  while (millis() - t0 < 3000) {
-                    if (uploadClient.available() &&
-                        uploadClient.readStringUntil('\n').indexOf("OK") != -1) {
-                      ack = true;
-                      break;
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                  }
-                  if (ack) {
-                    pos += REC_SIZE;
-                    writeUploadPos(dayFile, pos);
-                    VERBOSE_PRINTF("[UPLOAD] #%d sent, offset -> %u/%u\n",
-                                 stored.NUM, (unsigned)pos, (unsigned)fileSize);
-                  } else {
-                    DEBUG_PRINTLN("[UPLOAD] No ACK, will retry same record.");
-                    uploadClient.stop();  // اتصال مشکوک -> دور بعد تازه باز شود
-                  }
-                }
+            // ۲) اتصال TCP: باز نگه داشته می‌شود؛ فقط اگر قطع بود وصل می‌شویم.
+            //    (قبلاً برای هر رکورد یک اتصال تازه باز و بسته می‌شد که هم
+            //    کند بود و هم روی گیرنده مدام connect/disconnect می‌ساخت)
+            bool linkReady = uploadClient.connected();
+            if (!linkReady) {
+              linkReady = uploadClient.connect(serverIP, serverPort);
+              if (linkReady) {
+                uploadClient.setNoDelay(true);
+                VERBOSE_PRINTLN("[UPLOAD] اتصال TCP برقرار شد");
               } else {
-                f.close();
-                // فایل کامل آپلود شده؛ اگر مربوط به امروز نیست پاکش کن
-                rtc.read();
-                String today = dayFilePath(2000 + rtc.getYear(), rtc.getMonth(), rtc.getDay());
-                if (dayFile != today) {
-                  gFs->remove(posPathOf(dayFile));
-                  gFs->remove(dayFile);
-                  DEBUG_PRINTF("[UPLOAD] %s fully uploaded -> removed\n", dayFile.c_str());
-                }
+                break;   // گیرنده در دسترس نیست؛ دور بعد دوباره
               }
             }
-          }
+
+            // ۳) گیت قاعده ۱: بدون READY صریح سرور هیچ داده‌ای نمی‌رود.
+            //    HELLO می‌فرستیم و حداکثر ۲ ثانیه منتظر «READY <sid>» می‌مانیم
+            linkServerReady = false;
+            uploadClient.println("HELLO");
+            {
+              uint32_t t0 = millis();
+              while (!linkServerReady && millis() - t0 < HELLO_WAIT_MS) {
+                serviceIncomingLink(false);
+                vTaskDelay(pdMS_TO_TICKS(5));
+              }
+            }
+            if (!linkServerReady) {
+              DEBUG_PRINTLN("[UPLOAD] سرور آماده نیست -> عقب‌نشینی و تلاش بعدی");
+              needBackoff = true;
+              break;
+            }
+
+            // ۴) ارسال پشت‌سرهم همه‌ی پنجره (سرعت کامل). این فرمت باید
+            //    دقیقاً با sscanf گیرنده و parse_industrial_line سرور یکی
+            //    بماند (۱۳ فیلد) — formatRecordLine همان فرمت واحد است
+            for (uint8_t i = 0; i < n; i++) {
+              char buf[300];
+              formatRecordLine(win[i], buf, sizeof(buf));
+              uploadClient.println(buf);
+            }
+            lastTxMillis = millis();
+
+            // ۵) جمع‌کردن ACK ها تا سقف مهلت. رکوردی که ACK واقعی نگرفته
+            //    باشد همان‌جا می‌ماند و در پنجره‌ی بعد دوباره می‌رود
+            {
+              uint32_t t0 = millis();
+              for (;;) {
+                serviceIncomingLink(true);
+                uint8_t done = 0;
+                while (done < winLen && winAcked[done]) done++;
+                if (done >= winLen) break;                  // همه تایید شدند
+                if (!uploadClient.connected()) break;       // سوکت قطع شد
+                if (millis() - t0 >= ACK_TIMEOUT_MS) break; // مهلت تمام
+                vTaskDelay(pdMS_TO_TICKS(5));
+              }
+            }
+
+            // آفست فقط به اندازه‌ی پیشوند پیاپیِ تاییدشده جلو می‌رود
+            uint8_t acked = 0;
+            while (acked < winLen && winAcked[acked]) acked++;
+            if (acked > 0) {
+              pos += (uint32_t)acked * REC_SIZE;
+              writeUploadPos(dayFile, pos);
+              VERBOSE_PRINTF("[UPLOAD] %u/%u تایید شد، آفست -> %u/%u (نشست %s)\n",
+                             (unsigned)acked, (unsigned)winLen,
+                             (unsigned)pos, (unsigned)fileSize, linkSid);
+            }
+            if (acked < winLen) {
+              if (acked == 0) {
+                DEBUG_PRINTLN("[UPLOAD] هیچ ACK نیامد -> سوکت مشکوک؛ دور بعد تازه");
+                uploadClient.stop();
+              } else {
+                DEBUG_PRINTF("[UPLOAD] %u رکورد بی‌ACK ماند -> پنجره‌ی بعد دوباره\n",
+                             (unsigned)(winLen - acked));
+              }
+              if (!linkServerReady) needBackoff = true;   // SRV_LOST/WAIT وسط پنجره
+            }
+          } while (false);
           xSemaphoreGive(xSDMutex);
+          if (needBackoff) vTaskDelay(pdMS_TO_TICKS(WAIT_BACKOFF_MS));   // بدون قفل SD
         }
         break;
       }

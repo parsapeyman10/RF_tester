@@ -420,6 +420,105 @@ finally:
     flask_app.send_serial_line = _orig_send
     flask_app.UNSAVED_LOG = _orig_unsaved
 
+# --- تست یکپارچگی سطح سیم: کارگرِ واقعی سریال + پورت قلابی ---
+# اینجا همان read_serial_worker واقعی در یک نخ اجرا می‌شود؛ «سیم» بین
+# سرور و ESP8266 با یک پورت قلابی شبیه‌سازی می‌شود تا ثابت شود:
+#   قاعده ۱: تا پورت باز نشود هیچ خطی روی سیم نیست؛ بلافاصله بعد از
+#            اتصال، SRV_READY <sid> می‌آید
+#   قاعده ۲: همان sid در API وضعیت سریال هم دیده می‌شود
+#   قاعده ۴: خط داده فقط بعد از ثبت واقعی ACK می‌گیرد
+import threading as _threading
+import time as _time
+
+
+class _FakeSerialPort:
+    """پورت سریال قلابی — همان سیمِ بین سرور و ESP8266"""
+    is_open = True
+
+    def __init__(self, port, baudrate=115200, timeout=0):
+        self.port = port
+        self._rx = bytearray()   # بایت‌هایی که «ESP8266» به سرور می‌فرستد
+        self._tx = []            # خطوطی که سرور روی سیم گذاشت
+
+    def write(self, data):
+        for ln in data.decode("utf-8", "replace").splitlines():
+            if ln:
+                self._tx.append(ln)
+        return len(data)
+
+    @property
+    def in_waiting(self):
+        return len(self._rx)
+
+    def read(self, size=1):
+        out = bytes(self._rx[:size])
+        del self._rx[:size]
+        return out
+
+    def close(self):
+        self.is_open = False
+
+    def send_from_device(self, line):
+        self._rx.extend((line + "\n").encode())
+
+
+class _FakePortInfo:
+    device = "FAKECOM"
+
+
+_orig_comports = flask_app.serial.tools.list_ports.comports
+_orig_serial_cls = flask_app.serial.Serial
+flask_app.serial.tools.list_ports.comports = lambda: [_FakePortInfo()]
+flask_app.serial.Serial = _FakeSerialPort
+flask_app.active_serial_port = "FAKECOM"
+flask_app.manual_disconnect = False
+flask_app.ser = None
+flask_app.stop_event.clear()
+_wire_worker = _threading.Thread(target=flask_app.read_serial_worker, daemon=True)
+
+
+def _wait_for_tx(pred, timeout=5.0):
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        if flask_app.ser and any(pred(l) for l in flask_app.ser._tx):
+            return True
+        _time.sleep(0.02)
+    return False
+
+
+try:
+    _wire_worker.start()
+    # ۱) بعد از اتصال، اولین خطِ سیم باید SRV_READY با sid معتبر باشد
+    _ok_ready = _wait_for_tx(lambda l: l.startswith("SRV_READY S"))
+    _first = next((l for l in (flask_app.ser._tx if flask_app.ser else [])
+                   if l.startswith("SRV_READY S")), "")
+    check(_ok_ready,
+          "[app.py/سیم] بعد از باز شدن پورت، SRV_READY روی سیم آمد")
+    _sid_wire = _first.split(" ", 1)[1] if " " in _first else ""
+    check(re.fullmatch(r"S[0-9A-F]{6}", _sid_wire) is not None,
+          f"[app.py/سیم] sid روی سیم قالب درست دارد ({_first})")
+    # ۲) همان sid باید از API هم دیده شود (یکسان در هر لایه)
+    _rv = flask_app.app.test_client().get("/api/serial_ports")
+    _api_sid = (_rv.get_json() or {}).get("session_id")
+    check(_rv.status_code == 200 and _api_sid == _sid_wire,
+          f"[app.py/سیم] session_id در API همان sid سیم است (API={_api_sid}، سیم={_sid_wire})")
+    # ۳) رکورد داده → ACK فقط بعد از ثبت واقعی
+    flask_app.ser.send_from_device(
+        "NUM=99077,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=NOK,BCM2_CLOSE=OK,"
+        "Temp=24.00,Humidity=40.00,Date=2026-09-30,Time=11:22:33")
+    check(_wait_for_tx(lambda l: l == "ACK 99077"),
+          "[app.py/سیم] رکورد داده بعد از ثبت، «ACK 99077» روی سیم گرفت")
+    # ۴) ضربان گیرنده → پاسخ با همان sid
+    flask_app.ser.send_from_device("SRV_PING")
+    check(_wait_for_tx(lambda l: l == f"SRV_PONG {_sid_wire}"),
+          f"[app.py/سیم] SRV_PING باید «SRV_PONG {_sid_wire}» بگیرد")
+finally:
+    flask_app.stop_event.set()
+    _wire_worker.join(timeout=5)
+    flask_app.serial.tools.list_ports.comports = _orig_comports
+    flask_app.serial.Serial = _orig_serial_cls
+    flask_app.ser = None
+
 import shutil  # noqa: E402
 shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
 

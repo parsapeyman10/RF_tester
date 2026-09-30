@@ -40,6 +40,11 @@
 
         .tools-group { display: flex; align-items: center; gap: 8px; }
 
+        /* جداکننده‌ی عمودی بین گروه‌های نوار ابزار
+           (قبلاً کلاس‌های Tailwind بود ولی Tailwind در این صفحه لود نمی‌شود
+            و جداکننده‌ها نامرئی بودند) */
+        .v-sep { width: 1px; height: 16px; background: #334155; margin: 0 8px; flex-shrink: 0; }
+
         #wrapper { 
             display: grid; 
             grid-template-columns: 2fr 1fr; 
@@ -117,7 +122,7 @@
                 نمودار مانیتورینگ بلادرنگ دیتابیس
             </div>
 
-            <div class="h-4 w-[1px] bg-slate-700 mx-2"></div>
+            <div class="v-sep"></div>
 
             <label class="checkbox-wrapper temp-toggle-wrapper" title="نمایش/مخفی کردن نمودار دما">
                 <input type="checkbox" id="toggle-temp" checked>
@@ -136,7 +141,7 @@
                 <span>آپدیت خودکار</span>
             </label>
 
-            <div class="h-4 w-[1px] bg-slate-700 mx-1"></div>
+            <div class="v-sep"></div>
 
             <div class="date-input-group">
                 <label>از:</label>

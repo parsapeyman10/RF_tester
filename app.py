@@ -441,13 +441,12 @@ def save_sensor_data(data_source, raw_line=None):
         i_time = data_source.get('time') or now_tehran.strftime('%H:%M:%S')
         i_date = data_source.get('date') or now_tehran.strftime('%Y-%m-%d')
 
-        # --- ساخت Timestamp واقعی از روی دستگاه ---
-        try:
-            dt_str = f"{i_date} {i_time}"
-            real_timestamp = datetime.datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
-        except Exception:
-            # در صورت خطا در فرمت، همان زمان آپلود را بگذار
-            real_timestamp = now_tehran
+        # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
+        # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
+        # «زمان ثبت» باید همان ساعت سرور (کامپیوتر) در لحظه‌ی ذخیره باشد.
+        # تاریخ/ساعت دستگاه هنوز در ستون‌های جداگانه‌ی date/time نگه داشته
+        # می‌شود و مبنای مرتب‌سازی و نمایش «ساعت دستگاه (RTC)» است.
+        real_timestamp = now_tehran.replace(tzinfo=None)
 
         # هرچه غیر از کانال‌های تعریف‌شده باشد کنار گذاشته می‌شود
         nbcm_checked_list = normalize_fields(nbcm_checked_list)
@@ -469,7 +468,7 @@ def save_sensor_data(data_source, raw_line=None):
         master_entry = MasterReading(
             num_value=num_int, nbcm_selected=nbcm_str,
             humidity=h_val, temp=t_val, time=i_time, date=i_date,
-            timestamp=real_timestamp,  # زمان واقعی دستگاه
+            timestamp=real_timestamp,  # زمان ثبت = ساعت سرور در لحظه‌ی ذخیره
             formatted_log=log_str
         )
         db.session.add(master_entry)
@@ -865,12 +864,6 @@ def upload_dat_page():
                     
                     device_date_str = f"{year}-{month:02d}-{day:02d}"
                     device_time_str = f"{hour:02d}:{minute:02d}:{second:02d}"
-                    
-                    try:
-                        sensor_dt = datetime.datetime.strptime(
-                            f"{device_date_str} {device_time_str}", '%Y-%m-%d %H:%M:%S')
-                    except Exception:
-                        sensor_dt = upload_time_server
 
                     formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
 
@@ -886,8 +879,8 @@ def upload_dat_page():
                         temp=temp_str,      # قبلاً Float بود که باعث خطا می‌شد
                         time=device_time_str,
                         date=device_date_str,
-                        # مرجع زمان در کل سیستم، RTC دستگاه است
-                        timestamp=sensor_dt,
+                        # زمان ثبت = ساعت سرور در لحظه‌ی آپلود (نه RTC دستگاه)
+                        timestamp=upload_time_server.replace(tzinfo=None),
                         formatted_log=formatted_log
                     ))
                     success_count += 1
@@ -1048,6 +1041,44 @@ def get_sensor_data():
     except Exception as e:
         print(f"[API Error] {e}")
         return jsonify([])
+
+
+# =====================================================================
+#  آمار تجمعیِ همه‌ی رکوردهای ثبت‌شده (از ابتدا تا الان) برای BCM1 و BCM2
+#  به تفکیک باز شدن (OPEN) و بسته شدن (CLOSE):
+#      «کار کرده»  = همان حرکت در آن رکورد با موفقیت تأیید شده (OK)
+#      «کار نکرده» = همان حرکت تأیید نشده (NOK)
+#  برای نمایش در مکعب دما/رطوبت در بالای داشبورد
+# =====================================================================
+@app.route('/api/bcm_stats')
+def api_bcm_stats():
+    try:
+        from sqlalchemy import func
+
+        total = db.session.query(func.count(MasterReading.id)).scalar() or 0
+
+        def count_like(field_name):
+            return db.session.query(func.count(MasterReading.id)).filter(
+                MasterReading.nbcm_selected.like(f"%{field_name}%")).scalar() or 0
+
+        bcm1_open_ok = count_like("BCM1_OPEN")
+        bcm1_close_ok = count_like("BCM1_CLOSE")
+        bcm2_open_ok = count_like("BCM2_OPEN")
+        bcm2_close_ok = count_like("BCM2_CLOSE")
+
+        def stat(ok):
+            return {'ok': ok, 'fail': max(total - ok, 0)}
+
+        return jsonify({
+            'total': total,
+            'BCM1': {'open': stat(bcm1_open_ok), 'close': stat(bcm1_close_ok)},
+            'BCM2': {'open': stat(bcm2_open_ok), 'close': stat(bcm2_close_ok)},
+        })
+    except Exception as e:
+        print(f"[API Error] bcm_stats: {e}")
+        return jsonify({'total': 0,
+                        'BCM1': {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0}},
+                        'BCM2': {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0}}})
 
 # در فایل app.py، این تابع را جایگزین تابع get_master_data کنید
 

@@ -143,14 +143,40 @@
                 <div id="live-num" class="text-4xl font-bold mt-2 text-orange-400 font-mono">--</div>
             </div>
             
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
-                <div id="live-temp" class="text-4xl font-bold mt-2 text-blue-400 font-mono">--</div>
-            </div>
-            
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-cyan-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
-                <div id="live-humidity" class="text-4xl font-bold mt-2 text-cyan-400 font-mono">--</div>
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 flex flex-col justify-center min-h-[140px] px-3 md:col-span-2">
+                <div class="grid grid-cols-2 gap-2 text-center border-b border-slate-700/60 pb-2 mb-2">
+                    <div>
+                        <span class="text-blue-300 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
+                        <div id="live-temp" class="text-2xl font-bold mt-1 text-blue-400 font-mono">--</div>
+                    </div>
+                    <div>
+                        <span class="text-cyan-300 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
+                        <div id="live-humidity" class="text-2xl font-bold mt-1 text-cyan-400 font-mono">--</div>
+                    </div>
+                </div>
+                <div class="flex items-center justify-center gap-3 text-[9px] text-slate-400 mb-1">
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>کار کرده</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-400 inline-block"></span>کار نکرده</span>
+                </div>
+                <div class="grid grid-cols-2 gap-2 px-1">
+                    {% for dev, label in [('BCM1','BCM1'), ('BCM2','BCM2')] %}
+                    <div class="bg-slate-900/60 rounded-lg px-2 py-2">
+                        <div class="text-[10px] text-slate-300 font-bold text-center mb-1">{{ label }}</div>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                            <span>باز:</span>
+                            <span>
+                                <span id="bcm-{{ dev }}-open-ok" class="text-emerald-400 font-bold">--</span>/<span id="bcm-{{ dev }}-open-fail" class="text-red-400 font-bold">--</span>
+                            </span>
+                        </div>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                            <span>بسته:</span>
+                            <span>
+                                <span id="bcm-{{ dev }}-close-ok" class="text-emerald-400 font-bold">--</span>/<span id="bcm-{{ dev }}-close-fail" class="text-red-400 font-bold">--</span>
+                            </span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
             </div>
             
             <div class="glass-card p-4 rounded-2xl border-t-4 border-purple-500 flex flex-col justify-center min-h-[140px] px-3">
@@ -440,11 +466,31 @@
 
     document.getElementById('refreshSerialPorts').onclick = updateSerialUI;
 
+    // ================= آمار تجمعی BCM1 / BCM2 (باز و بسته، کار کرده/نکرده) =================
+    async function updateBcmStats() {
+        try {
+            const res = await fetch('/api/bcm_stats');
+            const data = await res.json();
+            ['BCM1', 'BCM2'].forEach(dev => {
+                const d = data[dev] || {};
+                const open = d.open || {ok: 0, fail: 0};
+                const close = d.close || {ok: 0, fail: 0};
+                const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+                set(`bcm-${dev}-open-ok`, open.ok);
+                set(`bcm-${dev}-open-fail`, open.fail);
+                set(`bcm-${dev}-close-ok`, close.ok);
+                set(`bcm-${dev}-close-fail`, close.fail);
+            });
+        } catch (e) { console.error("BCM Stats Error:", e); }
+    }
+
     setInterval(updateSerialUI, 10000);
     setInterval(updateLiveDashboard, 2000); // رفرش سریع‌تر برای نمای بهتر
+    setInterval(updateBcmStats, 5000);
     
     updateSerialUI();
     updateLiveDashboard();
+    updateBcmStats();
     // ================= ساعت سرور (کامپیوتر) =================
     let serverClock = null;      // ثانیه‌شمار محلی بین دو همگام‌سازی
     async function syncServerClock() {
@@ -480,6 +526,7 @@
                     msg.className = 'text-sm text-center text-emerald-400';
                     manualForm.reset();
                     updateLiveDashboard();          // به‌روزرسانی فوری
+                    updateBcmStats();                // آمار تجمعی BCM هم به‌روز شود
                     const frame = document.getElementById('plotIframe');
                     if (frame) frame.contentWindow.location.reload();
                 } else {

@@ -1720,12 +1720,16 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
             except Exception as exc:
                 print(f"[DB] بازیابی خودکار ناموفق: {exc}")
 
+    # زمان‌بندی سیکل مستقل از وضعیت سریال بارگذاری می‌شود تا /api/cycle_config
+    # همیشه آخرین مقدار ذخیره‌شده را نشان دهد، حتی اگر سریال هنوز استارت نشده
+    load_cycle_config()
+
     if start_serial:
         load_serial_config()      # آخرین پورت و باود انتخاب‌شده
-        load_cycle_config()       # آخرین زمان‌بندی سیکلِ تنظیم‌شده برای ESP32
         stop_event.clear()
         serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
         serial_thread.start()
+
 
 
 if __name__ == '__main__':

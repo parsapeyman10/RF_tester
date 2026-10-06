@@ -81,7 +81,13 @@ const bool REQUIRE_BOTH_FEEDBACKS = true;
 
 // --- زمان‌بندی تست هر رله ---
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
-const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
+// RELAY_RETRY_GAP_MS از سرور قابل تغییر است (دستور CFG از طریق ESP8266)؛
+// مقدار پیش‌فرض و بازه‌ی مجاز پایین تعریف شده، مقدار جاری در gRelayRetryGapMs
+// نگه داشته می‌شود و در NVS هم ذخیره می‌شود تا بعد از ریست باقی بماند.
+const uint32_t DEFAULT_RELAY_RETRY_GAP_MS = 2000;
+const uint32_t MIN_RELAY_RETRY_GAP_MS = 200;      // حداقل مجاز (ایمنی رله)
+const uint32_t MAX_RELAY_RETRY_GAP_MS = 60000;    // حداکثر مجاز (۶۰ ثانیه)
+volatile uint32_t gRelayRetryGapMs = DEFAULT_RELAY_RETRY_GAP_MS;
 // فاصله‌ی «تریگ تا تریگ»: از لحظه‌ی فعال شدن رله‌ی اول تا لحظه‌ی فعال شدن
 // رله‌ی دوم دقیقاً همین مقدار طول می‌کشد (شامل مدت مانیتورینگ).
 const uint32_t PHASE_TRIGGER_INTERVAL_MS = 5000;
@@ -92,7 +98,12 @@ const uint32_t PHASE_MIN_GAP_MS = 300;
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای معتبر بودن پالس
-const uint32_t CYCLE_PERIOD_MS = 120000;    // فاصله‌ی بین سیکل‌ها (۲ دقیقه)
+// CYCLE_PERIOD_MS هم مثل RELAY_RETRY_GAP_MS از سرور قابل تغییر است؛ همان
+// الگو: پیش‌فرض + بازه‌ی مجاز + متغیر سراسری قابل‌تغییر که در NVS می‌ماند.
+const uint32_t DEFAULT_CYCLE_PERIOD_MS = 120000;  // ۲ دقیقه
+const uint32_t MIN_CYCLE_PERIOD_MS = 5000;        // حداقل مجاز (۵ ثانیه)
+const uint32_t MAX_CYCLE_PERIOD_MS = 3600000;     // حداکثر مجاز (۱ ساعت)
+volatile uint32_t gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
 
 // --- شبکه ---
 const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت کامپیوتر)
@@ -140,9 +151,9 @@ const uint32_t HELLO_WAIT_MS   = 2000;   // سقف انتظار برای READY �
 //   • سنسور  : هر سیکل یک ضربان      -> ۳ برابر دوره‌ی سیکل
 const uint32_t WDT_CHECK_PERIOD_MS = 15000;
 const uint32_t WDT_TIMEOUT_NET_MS = 90000;
-const uint32_t WDT_TIMEOUT_RELAY_MS = CYCLE_PERIOD_MS * 3;
-const uint32_t WDT_TIMEOUT_DIGITAL_MS = CYCLE_PERIOD_MS * 3;
-const uint32_t WDT_TIMEOUT_SHT_MS = CYCLE_PERIOD_MS * 3;
+// این سه سقف به gCyclePeriodMs وابسته‌اند که حالا از سرور قابل تغییر است؛
+// پس دیگر const نیستند و TaskHealthMonitor هر بار آن‌ها را به‌روز می‌کند
+// (نگاه کنید به beats[].timeoutMs داخل همان تسک).
 const uint32_t LINK_DOWN_RESET_MS = 600000;      // ۱۰ دقیقه قطعی بعد از اتصال موفق
 const char *DEVICE_HOSTNAME = "RF-TESTER";
 
@@ -405,6 +416,8 @@ void TaskHealthMonitor(void *pv);
 void loadConfig();
 void saveWifiConfig(const String &dSsid, const String &dPass,
                     const String &tSsid, const String &tPass);
+void loadTimingConfig();
+void saveTimingConfig(uint32_t cycleMs, uint32_t retryGapMs);
 bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
@@ -473,6 +486,7 @@ void setup() {
 
   WiFi.onEvent(onWiFiEvent);  // با اطلاعات دلیل قطعی
   loadConfig();
+  loadTimingConfig();
   rtc.initClock();
 
   // ---------------- SD & شماره‌ی رکورد ----------------
@@ -618,6 +632,40 @@ void saveWifiConfig(const String &dSsid, const String &dPass,
   cfgTimePass = tPass;
   prefs.end();
   DEBUG_PRINTLN("[CFG] WiFi settings saved to NVS.");
+}
+
+// =====================================================================
+//   تنظیمات زمان‌بندی سیکل (CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS)
+//   این دو مقدار از سرور (از طریق ESP8266، خط «CFG ...») قابل تغییرند و
+//   در همان NVS فضای "rfcfg" ذخیره می‌شوند تا بعد از قطع برق/ریست هم بمانند.
+// =====================================================================
+void loadTimingConfig() {
+  prefs.begin("rfcfg", true);  // read-only
+  gCyclePeriodMs = prefs.getUInt("cycleMs", DEFAULT_CYCLE_PERIOD_MS);
+  gRelayRetryGapMs = prefs.getUInt("retryGapMs", DEFAULT_RELAY_RETRY_GAP_MS);
+  prefs.end();
+
+  // اگر مقدار ذخیره‌شده (یا NVS خراب) خارج از بازه‌ی مجاز بود، به پیش‌فرض برگرد
+  if (gCyclePeriodMs < MIN_CYCLE_PERIOD_MS || gCyclePeriodMs > MAX_CYCLE_PERIOD_MS)
+    gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
+  if (gRelayRetryGapMs < MIN_RELAY_RETRY_GAP_MS || gRelayRetryGapMs > MAX_RELAY_RETRY_GAP_MS)
+    gRelayRetryGapMs = DEFAULT_RELAY_RETRY_GAP_MS;
+
+  DEBUG_PRINTF("[CFG] زمان‌بندی سیکل: CYCLE_PERIOD_MS=%u RELAY_RETRY_GAP_MS=%u\n",
+               (unsigned)gCyclePeriodMs, (unsigned)gRelayRetryGapMs);
+}
+
+/** مقدار جدید را اعمال و در NVS ذخیره می‌کند (مقادیر قبلاً clamp شده‌اند) */
+void saveTimingConfig(uint32_t cycleMs, uint32_t retryGapMs) {
+  prefs.begin("rfcfg", false);
+  prefs.putUInt("cycleMs", cycleMs);
+  prefs.putUInt("retryGapMs", retryGapMs);
+  prefs.end();
+  gCyclePeriodMs = cycleMs;
+  gRelayRetryGapMs = retryGapMs;
+  DEBUG_PRINTF("[CFG] زمان‌بندی سیکل از سرور به‌روزرسانی و در NVS ذخیره شد: "
+               "CYCLE_PERIOD_MS=%u RELAY_RETRY_GAP_MS=%u\n",
+               (unsigned)cycleMs, (unsigned)retryGapMs);
 }
 
 bool rtcTimeLooksValid() {
@@ -1243,6 +1291,47 @@ void processLinkLine(const char* line, bool windowActive) {
     // دوباره ارسال می‌شود (retry تا موفق — هیچ داده‌ای دور ریخته نمی‌شود)
     DEBUG_PRINTF("[LINK] گیرنده رد کرد: %s\n", line);
   }
+  else if (strncmp(line, "CFG ", 4) == 0) {
+    // پیکربندی زمان‌بندی از سرور (عیناً توسط ESP8266 فوروارد شده):
+    //   CFG CYCLE_PERIOD_MS=<ms>;RELAY_RETRY_GAP_MS=<ms>
+    // هر دو کلید اختیاری‌اند؛ هرکدام نبود همان مقدار فعلی باقی می‌ماند.
+    long newCycleMs = (long)gCyclePeriodMs;
+    long newGapMs = (long)gRelayRetryGapMs;
+    bool changed = false;
+
+    char body[80];
+    strlcpy(body, line + 4, sizeof(body));
+    char *saveptr = nullptr;
+    char *tok = strtok_r(body, ";", &saveptr);
+    while (tok != nullptr) {
+      char *eq = strchr(tok, '=');
+      if (eq) {
+        *eq = '\0';
+        const char *key = tok;
+        long val = strtol(eq + 1, NULL, 10);
+        if (strcmp(key, "CYCLE_PERIOD_MS") == 0 && val > 0) {
+          newCycleMs = val;
+          changed = true;
+        } else if (strcmp(key, "RELAY_RETRY_GAP_MS") == 0 && val > 0) {
+          newGapMs = val;
+          changed = true;
+        }
+      }
+      tok = strtok_r(nullptr, ";", &saveptr);
+    }
+
+    if (changed) {
+      // مقادیر خارج از بازه‌ی امن نادیده گرفته می‌شوند (کلمپ به نزدیک‌ترین حد مجاز)
+      if (newCycleMs < (long)MIN_CYCLE_PERIOD_MS) newCycleMs = MIN_CYCLE_PERIOD_MS;
+      if (newCycleMs > (long)MAX_CYCLE_PERIOD_MS) newCycleMs = MAX_CYCLE_PERIOD_MS;
+      if (newGapMs < (long)MIN_RELAY_RETRY_GAP_MS) newGapMs = MIN_RELAY_RETRY_GAP_MS;
+      if (newGapMs > (long)MAX_RELAY_RETRY_GAP_MS) newGapMs = MAX_RELAY_RETRY_GAP_MS;
+
+      if ((uint32_t)newCycleMs != gCyclePeriodMs || (uint32_t)newGapMs != gRelayRetryGapMs) {
+        saveTimingConfig((uint32_t)newCycleMs, (uint32_t)newGapMs);
+      }
+    }
+  }
   // PONG و هر خط ناشناخته‌ی دیگر: نادیده گرفته می‌شود
 }
 
@@ -1565,14 +1654,15 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
 
     if (attempt < RELAY_MAX_ATTEMPTS) {
       DEBUG_PRINTLN("[TEST] نتیجه ناقص -> کل سیکل دوباره تکرار می‌شود");
-      vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
+      vTaskDelay(pdMS_TO_TICKS(gRelayRetryGapMs));
     }
   }
 
 }
 
 void TaskRelayControl(void *pv) {
-  const TickType_t period = pdMS_TO_TICKS(CYCLE_PERIOD_MS);
+  // period دیگر یک‌بار در ابتدای تسک ثابت نمی‌شود، چون gCyclePeriodMs ممکن
+  // است در حین اجرا از سرور تغییر کند؛ هر دور از روی مقدار تازه حساب می‌شود.
   TickType_t lastWake = xTaskGetTickCount();
 
   xEventGroupWaitBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE, pdFALSE, pdTRUE, portMAX_DELAY);
@@ -1642,6 +1732,7 @@ void TaskRelayControl(void *pv) {
 
     xEventGroupSetBits(xSystemEvents, BIT_WIFI_PERMIT);
     relayPhaseText = "انتظار تا سیکل بعد";
+    TickType_t period = pdMS_TO_TICKS(gCyclePeriodMs);  // ممکن است از سرور عوض شده باشد
     vTaskDelayUntil(&lastWake, period);
   }
 }
@@ -2488,11 +2579,14 @@ void TaskHealthMonitor(void *pv) {
     uint32_t lastChangeMs;
   };
 
+  // سقف‌های رله/دیجیتال/سنسور از gCyclePeriodMs مشتق می‌شوند که از سرور
+  // قابل تغییر است؛ مقدار اولیه از همان لحظه‌ی شروع تسک گرفته می‌شود و در
+  // حلقه‌ی زیر هر بار به‌روز می‌شود تا تغییرات زمان اجرا هم اعمال شوند.
   Beat beats[] = {
     { "شبکه", &hbNet, WDT_TIMEOUT_NET_MS, 0, millis() },
-    { "رله", &hbRelay, WDT_TIMEOUT_RELAY_MS, 0, millis() },
-    { "دیجیتال", &hbDigital, WDT_TIMEOUT_DIGITAL_MS, 0, millis() },
-    { "سنسور", &hbSht, WDT_TIMEOUT_SHT_MS, 0, millis() },
+    { "رله", &hbRelay, gCyclePeriodMs * 3, 0, millis() },
+    { "دیجیتال", &hbDigital, gCyclePeriodMs * 3, 0, millis() },
+    { "سنسور", &hbSht, gCyclePeriodMs * 3, 0, millis() },
   };
   const int beatCount = sizeof(beats) / sizeof(beats[0]);
 
@@ -2501,6 +2595,12 @@ void TaskHealthMonitor(void *pv) {
 
   for (;;) {
     vTaskDelayUntil(&lastWake, period);
+
+    // سقف‌های وابسته به دوره‌ی سیکل را تازه نگه دار (ممکن است از سرور
+    // در حین اجرا تغییر کرده باشد؛ اندیس‌ها مطابق ترتیب تعریف beats[] بالاست)
+    beats[1].timeoutMs = gCyclePeriodMs * 3;
+    beats[2].timeoutMs = gCyclePeriodMs * 3;
+    beats[3].timeoutMs = gCyclePeriodMs * 3;
 
     size_t freeHeap = ESP.getFreeHeap();
     size_t minHeap = ESP.getMinFreeHeap();

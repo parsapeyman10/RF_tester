@@ -574,6 +574,58 @@ def send_serial_line(line):
     return False
 
 # =====================================================================
+#  تنظیم از‌راه‌دور زمان‌بندی سیکل ESP32 (CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS)
+#
+#  به‌جای هاردکد در فرم‌ور، این دو مقدار از داشبورد قابل تغییرند و از
+#  مسیر سرور --Serial--> ESP8266 --TCP--> ESP32 به‌صورت یک خط
+#  «CFG CYCLE_PERIOD_MS=<ms>;RELAY_RETRY_GAP_MS=<ms>» فرستاده می‌شوند.
+#  ESP32 خودش مقدار را اعتبارسنجی/clamp و در NVS دائمی می‌کند.
+#
+#  چون این مسیر «ارسال و فراموش» است (نه مثل داده‌ها که ACK دارند)، برای
+#  اطمینان از رسیدن حتی اگر لحظه‌ی تنظیم، ESP32 آنلاین نباشد، همین خط
+#  همراه هر ضربان SRV_READY (هر ۱۰ ثانیه) هم دوباره فرستاده می‌شود؛ به
+#  محض اینکه ESP32 وصل شود، در اولین ضربان بعدی مقدار را می‌گیرد.
+# =====================================================================
+CYCLE_CONFIG_FILE = os.path.join(DATA_DIR, 'cycle_config.json')
+DEFAULT_CYCLE_PERIOD_MS = 120000     # باید با DEFAULT_CYCLE_PERIOD_MS فرم‌ور ESP32 یکی باشد
+DEFAULT_RELAY_RETRY_GAP_MS = 2000    # باید با DEFAULT_RELAY_RETRY_GAP_MS فرم‌ور ESP32 یکی باشد
+MIN_CYCLE_PERIOD_MS, MAX_CYCLE_PERIOD_MS = 5000, 3600000
+MIN_RELAY_RETRY_GAP_MS, MAX_RELAY_RETRY_GAP_MS = 200, 60000
+
+cycle_config = {
+    'cycle_period_ms': DEFAULT_CYCLE_PERIOD_MS,
+    'relay_retry_gap_ms': DEFAULT_RELAY_RETRY_GAP_MS,
+}
+
+
+def load_cycle_config():
+    global cycle_config
+    if not os.path.exists(CYCLE_CONFIG_FILE):
+        return
+    try:
+        with open(CYCLE_CONFIG_FILE, encoding='utf-8') as fh:
+            saved = json.load(fh)
+        cycle_config['cycle_period_ms'] = int(saved.get('cycle_period_ms', DEFAULT_CYCLE_PERIOD_MS))
+        cycle_config['relay_retry_gap_ms'] = int(saved.get('relay_retry_gap_ms', DEFAULT_RELAY_RETRY_GAP_MS))
+        print(f"[CFG] زمان‌بندی سیکل قبلی بازیابی شد: {cycle_config}")
+    except Exception as exc:
+        print(f"[CFG] خواندن تنظیمات زمان‌بندی ناموفق: {exc}")
+
+
+def save_cycle_config():
+    try:
+        with open(CYCLE_CONFIG_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(cycle_config, fh)
+    except Exception as exc:
+        print(f"[CFG] ذخیره‌ی تنظیمات زمان‌بندی ناموفق: {exc}")
+
+
+def build_cfg_line():
+    return (f"CFG CYCLE_PERIOD_MS={cycle_config['cycle_period_ms']};"
+            f"RELAY_RETRY_GAP_MS={cycle_config['relay_retry_gap_ms']}")
+
+
+# =====================================================================
 #  تنظیمات پورت سریال ماندگار می‌شوند
 #  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
 #  می‌رفت و باید دوباره دستی انتخاب می‌شد.
@@ -718,6 +770,7 @@ def handle_serial_line(line):
     if line.startswith("SRV_HELLO"):
         # گیرنده تازه بوت/وصل شده؛ وضعیت آماده بودن و شناسه‌ی نشست را بده
         send_serial_line(f"SRV_READY {serial_session_id or make_session_id()}")
+        send_serial_line(build_cfg_line())  # زمان‌بندی جاری هم همراهش برود
         return True
     if line.startswith("SRV_PING"):
         send_serial_line(f"SRV_PONG {serial_session_id or ''}".strip())
@@ -761,6 +814,7 @@ def read_serial_worker():
                         serial_session_id = make_session_id()
                         last_ready_sent = time.time()
                         send_serial_line(f"SRV_READY {serial_session_id}")
+                        send_serial_line(build_cfg_line())  # زمان‌بندی جاری هم همراهش برود
                         print(f"[SERIAL] Connected to {active_serial_port} "
                               f"(session {serial_session_id})")
                     except Exception as e:
@@ -790,6 +844,7 @@ def read_serial_worker():
                     # معطلی می‌فهمد که سرور پشت پورت نشسته است
                     if time.time() - last_ready_sent >= SRV_READY_PERIOD:
                         send_serial_line(f"SRV_READY {serial_session_id}")
+                        send_serial_line(build_cfg_line())  # تضمین رسیدن حتی اگر ESP32 دیرتر وصل شده باشد
                         last_ready_sent = time.time()
                     time.sleep(0.01)
             else:
@@ -1464,6 +1519,55 @@ def close_serial_port():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/cycle_config')
+def get_cycle_config():
+    """مقادیر فعلی زمان‌بندی سیکل ESP32 (برای نمایش در فرم تنظیمات داشبورد)."""
+    return jsonify({
+        'cycle_period_ms': cycle_config['cycle_period_ms'],
+        'relay_retry_gap_ms': cycle_config['relay_retry_gap_ms'],
+        'min_cycle_period_ms': MIN_CYCLE_PERIOD_MS,
+        'max_cycle_period_ms': MAX_CYCLE_PERIOD_MS,
+        'min_relay_retry_gap_ms': MIN_RELAY_RETRY_GAP_MS,
+        'max_relay_retry_gap_ms': MAX_RELAY_RETRY_GAP_MS,
+        'serial_connected': bool(ser and ser.is_open),
+    })
+
+
+@app.route('/api/set_cycle_config', methods=['POST'])
+def set_cycle_config():
+    """
+    تنظیم از‌راه‌دور CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS.
+
+    مقدار معتبرسازی و در فایل محلی ذخیره می‌شود (تا بعد از ری‌استارت سرور
+    هم بماند)، سپس بلافاصله روی سریال به سمت ESP8266 فرستاده می‌شود. چون
+    این مسیر ACK ندارد، همین مقدار همراه هر ضربان SRV_READی بعدی (هر ۱۰
+    ثانیه) هم دوباره فرستاده می‌شود تا حتی اگر ESP32 لحظه‌ی تنظیم آنلاین
+    نبوده، به محض وصل‌شدن مقدار را بگیرد.
+    """
+    data = request.get_json(silent=True) or request.form
+    try:
+        cycle_ms = int(data.get('cycle_period_ms'))
+        gap_ms = int(data.get('relay_retry_gap_ms'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'مقادیر باید عدد صحیح (میلی‌ثانیه) باشند'}), 400
+
+    if not (MIN_CYCLE_PERIOD_MS <= cycle_ms <= MAX_CYCLE_PERIOD_MS):
+        return jsonify({'status': 'error',
+                        'message': f'CYCLE_PERIOD_MS باید بین {MIN_CYCLE_PERIOD_MS} و {MAX_CYCLE_PERIOD_MS} باشد'}), 400
+    if not (MIN_RELAY_RETRY_GAP_MS <= gap_ms <= MAX_RELAY_RETRY_GAP_MS):
+        return jsonify({'status': 'error',
+                        'message': f'RELAY_RETRY_GAP_MS باید بین {MIN_RELAY_RETRY_GAP_MS} و {MAX_RELAY_RETRY_GAP_MS} باشد'}), 400
+
+    cycle_config['cycle_period_ms'] = cycle_ms
+    cycle_config['relay_retry_gap_ms'] = gap_ms
+    save_cycle_config()
+
+    sent = send_serial_line(build_cfg_line())
+    print(f"[CFG] زمان‌بندی سیکل تنظیم شد: {cycle_config} (ارسال فوری روی سریال: {'موفق' if sent else 'پورت بسته/در صف ضربان بعدی'})")
+
+    return jsonify({'status': 'success', 'cycle_config': cycle_config, 'sent_immediately': sent})
+
+
 @app.route('/export_excel')
 def export_excel():
     target_date = request.args.get('date')
@@ -1618,6 +1722,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
 
     if start_serial:
         load_serial_config()      # آخرین پورت و باود انتخاب‌شده
+        load_cycle_config()       # آخرین زمان‌بندی سیکلِ تنظیم‌شده برای ESP32
         stop_event.clear()
         serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
         serial_thread.start()

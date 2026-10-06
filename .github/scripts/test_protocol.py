@@ -402,10 +402,12 @@ try:
           f"[app.py/داینامیک] رکورد تکراری هم ACK می‌گیرد (نتیجه={_ok_dup}، ارسالی={_sent})")
 
     # ۳) سلام و پینگ گیرنده با شناسه‌ی نشست فعلی
+    # SRV_HELLO حالا علاوه بر SRV_READY، خط CFG زمان‌بندی سیکل را هم
+    # همراه می‌فرستد (قابلیت تنظیم از‌راه‌دور CYCLE_PERIOD_MS/RELAY_RETRY_GAP_MS)
     _sent.clear()
     flask_app.handle_serial_line("SRV_HELLO")
-    check(_sent == ["SRV_READY STEST01"],
-          f"[app.py/داینامیک] SRV_HELLO باید «SRV_READY STEST01» بگیرد ({_sent})")
+    check(_sent[0] == "SRV_READY STEST01" and _sent[1].startswith("CFG CYCLE_PERIOD_MS="),
+          f"[app.py/داینامیک] SRV_HELLO باید «SRV_READY STEST01» + CFG بگیرد ({_sent})")
     _sent.clear()
     flask_app.handle_serial_line("SRV_PING")
     check(_sent == ["SRV_PONG STEST01"],

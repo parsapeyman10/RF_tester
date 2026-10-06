@@ -520,6 +520,18 @@ void handleServerLine(const char* line) {
   else if (strncmp(line, "SRV_PONG", 8) == 0) {
     lastSrvReadyMs = millis();
   }
+  else if (strncmp(line, "CFG", 3) == 0) {
+    // کانال عبوری ساده: هر خط «CFG ...» که از سرور می‌آید (مثلاً تنظیم
+    // از‌راه‌دورِ CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS) عیناً، بدون پردازش
+    // یا اعتبارسنجی محتوا، به ESP32 فوروارد می‌شود. ESP32 خودش قالب و
+    // بازه‌ی مجاز مقادیر را چک می‌کند؛ ESP8266 فقط لوله‌ی انتقال است.
+    if (isClientConnected && currentClient.connected()) {
+      currentClient.printf("%s\n", line);
+      ST_PRINTF("[LINK] پیکربندی به ESP32 فوروارد شد: %s\n", line);
+    } else {
+      ST_PRINTF("[LINK] ESP32 وصل نیست؛ CFG فعلاً رد شد (با SRV_READY بعدی دوباره امتحان می‌شود): %s\n", line);
+    }
+  }
   else {
     DBG_PRINTF("[LINK] خط ناشناخته از سرور: %s\n", line);
   }

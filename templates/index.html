@@ -253,6 +253,32 @@
                 <div id="serialStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
             </div>
         </div>
+
+        <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-purple-600 mt-6">
+            <h3 class="text-xl font-bold mb-2 flex items-center gap-3">
+                <span>⏱️</span> زمان‌بندی سیکل ESP32 (از‌راه‌دور)
+            </h3>
+            <p class="text-xs text-slate-500 mb-6">
+                این دو مقدار از طریق سرور، ESP8266 و در نهایت به ESP32 فرستاده می‌شود؛
+                نیازی به آپلود دوباره‌ی فرم‌ور نیست. چون این لینک ACK ندارد، مقدار جدید
+                با هر ضربان سرور (هر ۱۰ ثانیه) هم دوباره فرستاده می‌شود تا حتی اگر ESP32
+                لحظه‌ی تنظیم آنلاین نباشد، به‌محض وصل‌شدن اعمال شود.
+            </p>
+            <div class="space-y-6">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">فاصله‌ی بین سیکل‌ها — CYCLE_PERIOD_MS (میلی‌ثانیه):</label>
+                    <input type="number" id="cycleePeriodInput" min="5000" max="3600000" step="1000"
+                           class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="مثلاً 120000">
+                </div>
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">فاصله‌ی بین تلاش‌های رله — RELAY_RETRY_GAP_MS (میلی‌ثانیه):</label>
+                    <input type="number" id="relayRetryGapInput" min="200" max="60000" step="100"
+                           class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="مثلاً 2000">
+                </div>
+                <button id="applyCycleConfig" class="w-full bg-purple-600 hover:bg-purple-500 py-4 rounded-2xl font-bold transition-all shadow-lg">ارسال به ESP32</button>
+                <div id="cycleConfigStatus" class="mt-2 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
+            </div>
+        </div>
     </section>
 
     <section id="view-manual" class="view-section space-y-4">
@@ -476,6 +502,52 @@
     };
 
     document.getElementById('refreshSerialPorts').onclick = updateSerialUI;
+
+    // ================= زمان‌بندی سیکل ESP32 (از‌راه‌دور) =================
+    async function loadCycleConfig() {
+        try {
+            const res = await fetch('/api/cycle_config');
+            const d = await res.json();
+            const cycleEl = document.getElementById('cycleePeriodInput');
+            const gapEl = document.getElementById('relayRetryGapInput');
+            if (cycleEl && !cycleEl.value) cycleEl.value = d.cycle_period_ms;
+            if (gapEl && !gapEl.value) gapEl.value = d.relay_retry_gap_ms;
+        } catch (e) { console.error("Cycle Config Load Error:", e); }
+    }
+
+    const applyCycleBtn = document.getElementById('applyCycleConfig');
+    if (applyCycleBtn) {
+        applyCycleBtn.onclick = async () => {
+            const statusEl = document.getElementById('cycleConfigStatus');
+            const cycleMs = parseInt(document.getElementById('cycleePeriodInput').value);
+            const gapMs = parseInt(document.getElementById('relayRetryGapInput').value);
+            if (!cycleMs || !gapMs) {
+                if (statusEl) statusEl.textContent = 'لطفاً هر دو مقدار را به‌درستی وارد کنید.';
+                return;
+            }
+            try {
+                const res = await fetch('/api/set_cycle_config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({cycle_period_ms: cycleMs, relay_retry_gap_ms: gapMs})
+                });
+                const d = await res.json();
+                if (statusEl) {
+                    if (res.ok) {
+                        statusEl.textContent = d.sent_immediately
+                            ? '✅ ذخیره و فوراً روی سریال ارسال شد.'
+                            : '✅ ذخیره شد؛ پورت سریال فعلاً بسته است، با وصل‌شدن ارسال می‌شود.';
+                    } else {
+                        statusEl.textContent = '❌ ' + (d.message || 'خطای نامشخص');
+                    }
+                }
+            } catch (e) {
+                console.error("Cycle Config Save Error:", e);
+                if (statusEl) statusEl.textContent = '❌ ارتباط با سرور برقرار نشد.';
+            }
+        };
+    }
+    loadCycleConfig();
 
     // ================= آمار تجمعی BCM1 / BCM2 (باز و بسته، کار کرده/نکرده) =================
     async function updateBcmStats() {

@@ -1053,49 +1053,61 @@ def get_sensor_data():
 @app.route('/api/bcm_stats')
 def api_bcm_stats():
     try:
+        from sqlalchemy import func, or_
+
         # نکته‌ی مهم: رکوردهای قدیمی ممکن است با نام‌گذاری قدیمی
         # NBCM1..NBCM4 ذخیره شده باشند (قبل از مهاجرت به BCM1_OPEN...).
-        # کوئری خام LIKE روی nbcm_selected این رکوردها را نمی‌بیند و آمار
-        # ناقص/خالی نشان می‌دهد. برای همین از همان تابع مرکزیِ
-        # build_bcm_results استفاده می‌کنیم که نام‌های قدیمی را هم
-        # نرمال‌سازی می‌کند — دقیقاً همان منطقی که در تاریخچه و داشبورد
-        # زنده استفاده می‌شود.
-        rows = db.session.query(MasterReading.nbcm_selected).all()
-        total = len(rows)
+        # هر دو فرمت (جدید و قدیمی) با OR در یک کوئری شمرده می‌شوند تا
+        # هم درست باشد و هم روی جدول‌های بزرگ کند نشود (کل جدول به پایتون
+        # کشیده نمی‌شود، فقط COUNT در خود دیتابیس انجام می‌شود).
+        NEW_TO_LEGACY = {v: k for k, v in LEGACY_FIELD_MAP.items()}
 
-        counters = {
-            'BCM1': {'open': 0, 'close': 0, 'correct': 0},
-            'BCM2': {'open': 0, 'close': 0, 'correct': 0},
-        }
-        for (nbcm_selected,) in rows:
-            res = build_bcm_results(nbcm_selected)
-            for dev in DEVICES:
-                if res[dev]['open']:
-                    counters[dev]['open'] += 1
-                if res[dev]['close']:
-                    counters[dev]['close'] += 1
-                # عملکرد صحیح = AND باز و بسته با هم؛ یعنی فقط وقتی هر دو
-                # حرکت با موفقیت تأیید شده باشند، آن چرخه «کار کرده» است
-                if res[dev]['ok']:
-                    counters[dev]['correct'] += 1
+        def patterns_for(field_name):
+            pats = [field_name]
+            legacy = NEW_TO_LEGACY.get(field_name)
+            if legacy:
+                pats.append(legacy)
+            return pats
+
+        def count_match(*field_names):
+            """تعداد رکوردهایی که همه‌ی field_name ها حضور دارند (AND)؛
+            هر فیلد می‌تواند با نام جدید یا معادل قدیمی‌اش ذخیره شده باشد (OR)."""
+            q = db.session.query(func.count(MasterReading.id))
+            for name in field_names:
+                pats = patterns_for(name)
+                q = q.filter(or_(*[MasterReading.nbcm_selected.like(f"%{p}%") for p in pats]))
+            return q.scalar() or 0
+
+        total = db.session.query(func.count(MasterReading.id)).scalar() or 0
+
+        bcm1_open_ok = count_match("BCM1_OPEN")
+        bcm1_close_ok = count_match("BCM1_CLOSE")
+        bcm2_open_ok = count_match("BCM2_OPEN")
+        bcm2_close_ok = count_match("BCM2_CLOSE")
+
+        # عملکرد صحیح = AND باز و بسته با هم؛ یعنی فقط وقتی هر دو حرکت
+        # با موفقیت تأیید شده باشند، آن چرخه «کار کرده» حساب می‌شود
+        bcm1_correct_ok = count_match("BCM1_OPEN", "BCM1_CLOSE")
+        bcm2_correct_ok = count_match("BCM2_OPEN", "BCM2_CLOSE")
 
         def stat(ok):
             return {'ok': ok, 'fail': max(total - ok, 0)}
 
         return jsonify({
             'total': total,
-            'BCM1': {'open': stat(counters['BCM1']['open']),
-                     'close': stat(counters['BCM1']['close']),
-                     'correct': stat(counters['BCM1']['correct'])},
-            'BCM2': {'open': stat(counters['BCM2']['open']),
-                     'close': stat(counters['BCM2']['close']),
-                     'correct': stat(counters['BCM2']['correct'])},
+            'BCM1': {'open': stat(bcm1_open_ok), 'close': stat(bcm1_close_ok),
+                     'correct': stat(bcm1_correct_ok)},
+            'BCM2': {'open': stat(bcm2_open_ok), 'close': stat(bcm2_close_ok),
+                     'correct': stat(bcm2_correct_ok)},
         })
     except Exception as e:
         print(f"[API Error] bcm_stats: {e}")
         _empty = {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0},
                   'correct': {'ok': 0, 'fail': 0}}
-        return jsonify({'total': 0, 'BCM1': _empty, 'BCM2': dict(_empty)})
+        # خطای واقعی هم در پاسخ برگردانده می‌شود تا بدون نیاز به دسترسی به
+        # کنسول سرور هم بشود علت صفر ماندن شمارش را فهمید
+        return jsonify({'total': 0, 'BCM1': _empty, 'BCM2': dict(_empty),
+                        'error': str(e)})
 
 
 # در فایل app.py، این تابع را جایگزین تابع get_master_data کنید

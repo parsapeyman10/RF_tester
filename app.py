@@ -116,6 +116,16 @@ def build_bcm_results(stored_fields):
     return out
 
 
+def compute_cycle_ok(stored_fields):
+    """
+    ستون «Cycle»: آیا این سیکل داده را کامل دریافت کرد؟
+    یعنی AND هر چهار سیگنال: BCM1 (باز و بسته) AND BCM2 (باز و بسته).
+    فقط وقتی هر دو BCM به‌طور کامل OK باشند True است.
+    """
+    res = build_bcm_results(stored_fields)
+    return bool(res["BCM1"]["ok"] and res["BCM2"]["ok"])
+
+
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
@@ -167,6 +177,10 @@ class MasterReading(db.Model):
     date = db.Column(db.String(50), nullable=True) 
     timestamp = db.Column(db.DateTime, nullable=False, index=True) 
     formatted_log = db.Column(db.String(500), nullable=True)
+    # ستون «Cycle» — سیکلی که داده‌اش کامل دریافت شد: یعنی هم باز شدن و
+    # هم بسته شدن، در هر دو BCM (BCM1 و BCM2) با موفقیت تأیید شده باشد.
+    # True/False = AND چهار سیگنال (BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE)
+    cycle = db.Column(db.Boolean, nullable=True, default=False, index=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -469,7 +483,8 @@ def save_sensor_data(data_source, raw_line=None):
             num_value=num_int, nbcm_selected=nbcm_str,
             humidity=h_val, temp=t_val, time=i_time, date=i_date,
             timestamp=real_timestamp,  # زمان ثبت = ساعت سرور در لحظه‌ی ذخیره
-            formatted_log=log_str
+            formatted_log=log_str,
+            cycle=compute_cycle_ok(nbcm_str)
         )
         db.session.add(master_entry)
         try:
@@ -881,7 +896,8 @@ def upload_dat_page():
                         date=device_date_str,
                         # زمان ثبت = ساعت سرور در لحظه‌ی آپلود (نه RTC دستگاه)
                         timestamp=upload_time_server.replace(tzinfo=None),
-                        formatted_log=formatted_log
+                        formatted_log=formatted_log,
+                        cycle=compute_cycle_ok(nbcm_str)
                     ))
                     success_count += 1
             except Exception as e:
@@ -997,7 +1013,7 @@ def history():
 
     return render_template('history.html', readings=readings, label=label,
                            dates=available_dates, current_date=target_date,
-                           bcm_results=build_bcm_results)
+                           bcm_results=build_bcm_results, cycle_ok=compute_cycle_ok)
 
 @app.route('/submit_form', methods=['POST'])
 def submit_form():
@@ -1033,7 +1049,8 @@ def get_sensor_data():
                 'date': r.date,       # تاریخ دستگاه
                 'timestamp': r.timestamp, # زمان آپلود (صرفا جهت اطلاع)
                 'nbcm_statuses': nbcm_map,
-                'bcm_results': build_bcm_results(r.nbcm_selected)
+                'bcm_results': build_bcm_results(r.nbcm_selected),
+                'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected)
             })
             
         return jsonify(output)
@@ -1154,6 +1171,7 @@ def get_master_data():
             'timestamp': iso_timestamp,  # <--- این متغیر کلیدی است
             'nbcm_statuses': nbcm_map,
             'bcm_results': build_bcm_results(r.nbcm_selected),
+            'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
             'date': r.date
         })
 
@@ -1454,6 +1472,7 @@ def export_excel():
     cw.writerow(['ID', 'NUM',
                  'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
                  'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
+                 'Cycle',
                  'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
@@ -1463,6 +1482,7 @@ def export_excel():
     
     for r in recs:
         res = build_bcm_results(r.nbcm_selected)
+        cycle_val = r.cycle if r.cycle is not None else (res['BCM1']['ok'] and res['BCM2']['ok'])
         cw.writerow([
             r.id, r.num_value,
             'OK' if res['BCM1']['open'] else 'NOK',
@@ -1471,6 +1491,7 @@ def export_excel():
             'OK' if res['BCM2']['open'] else 'NOK',
             'OK' if res['BCM2']['close'] else 'NOK',
             'OK' if res['BCM2']['ok'] else 'NOK',
+            'OK' if cycle_val else 'NOK',
             r.temp, r.humidity, r.time, r.date, r.timestamp])
     
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report.csv"})
@@ -1544,6 +1565,36 @@ def _ensure_master_unique_index():
         return False
 
 
+def _ensure_master_cycle_column():
+    """
+    مهاجرتِ ستون «Cycle» روی دیتابیس‌های قدیمی‌تر.
+
+    db.create_all() فقط جدول‌های جدید را می‌سازد و ستون جدید را به جدول
+    از قبل موجود اضافه نمی‌کند؛ پس اگر دیتابیس قدیمی باشد، این تابع با
+    ALTER TABLE ستون cycle را اضافه می‌کند و مقدار آن را برای رکوردهای
+    قدیمی از روی nbcm_selected محاسبه و پر می‌کند (backfill).
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "cycle" in cols:
+                return True  # از قبل وجود دارد، کاری لازم نیست
+            conn.execute(text("ALTER TABLE master_reading ADD COLUMN cycle BOOLEAN DEFAULT 0"))
+        # Backfill: مقدار Cycle رکوردهای قدیمی را از روی nbcm_selected حساب کن
+        updated = 0
+        for row in MasterReading.query.all():
+            row.cycle = compute_cycle_ok(row.nbcm_selected)
+            updated += 1
+        db.session.commit()
+        print(f"[DB] ستون Cycle اضافه شد و برای {updated} رکورد قدیمی محاسبه شد.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون Cycle ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
 def bootstrap_server(recover_unsaved=True, start_serial=True):
     """
     راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
@@ -1556,6 +1607,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
     with app.app_context():
         db.create_all()
         _ensure_master_unique_index()
+        _ensure_master_cycle_column()
 
         # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
         if recover_unsaved and os.path.exists(UNSAVED_LOG):

@@ -479,15 +479,32 @@
 
     // ================= آمار تجمعی BCM1 / BCM2 (باز و بسته، کار کرده/نکرده) =================
     async function updateBcmStats() {
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        const setAll = (val) => {
+            ['BCM1', 'BCM2'].forEach(dev => {
+                ['open-ok', 'open-fail', 'close-ok', 'close-fail', 'correct-ok', 'correct-fail']
+                    .forEach(suffix => set(`bcm-${dev}-${suffix}`, val));
+            });
+        };
         try {
             const res = await fetch('/api/bcm_stats');
+            if (!res.ok) {
+                console.error("BCM Stats HTTP Error:", res.status, res.statusText);
+                setAll('ERR');
+                return;
+            }
             const data = await res.json();
+            if (data.error) {
+                // سرور خودش خطا را گزارش کرده (مثلاً استثنای دیتابیس)
+                console.error("BCM Stats Server Error:", data.error);
+                setAll('ERR');
+                return;
+            }
             ['BCM1', 'BCM2'].forEach(dev => {
                 const d = data[dev] || {};
                 const open = d.open || {ok: 0, fail: 0};
                 const close = d.close || {ok: 0, fail: 0};
                 const correct = d.correct || {ok: 0, fail: 0};
-                const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
                 set(`bcm-${dev}-open-ok`, open.ok);
                 set(`bcm-${dev}-open-fail`, open.fail);
                 set(`bcm-${dev}-close-ok`, close.ok);
@@ -495,8 +512,15 @@
                 set(`bcm-${dev}-correct-ok`, correct.ok);
                 set(`bcm-${dev}-correct-fail`, correct.fail);
             });
-        } catch (e) { console.error("BCM Stats Error:", e); }
+        } catch (e) {
+            // اگر /api/bcm_stats اصلاً پیدا نشود (مثلاً سرور با نسخه‌ی قدیمی‌تر
+            // اجرا شده) fetch/json همین‌جا خطا می‌دهد؛ به‌جای «--» ثابت، ERR
+            // نشان داده می‌شود تا معلوم شود مشکل شبکه/نسخه است نه نبود داده
+            console.error("BCM Stats Error (احتمالاً سرور به‌روزرسانی نشده):", e);
+            setAll('ERR');
+        }
     }
+
 
     setInterval(updateSerialUI, 10000);
     setInterval(updateLiveDashboard, 2000); // رفرش سریع‌تر برای نمای بهتر

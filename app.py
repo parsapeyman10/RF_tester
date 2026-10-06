@@ -1053,32 +1053,43 @@ def get_sensor_data():
 @app.route('/api/bcm_stats')
 def api_bcm_stats():
     try:
-        from sqlalchemy import func
+        from sqlalchemy import func, and_
 
         total = db.session.query(func.count(MasterReading.id)).scalar() or 0
 
-        def count_like(field_name):
-            return db.session.query(func.count(MasterReading.id)).filter(
-                MasterReading.nbcm_selected.like(f"%{field_name}%")).scalar() or 0
+        def count_like(*field_names):
+            """تعداد رکوردهایی که همه‌ی field_name ها در nbcm_selected حضور دارند (AND)"""
+            q = db.session.query(func.count(MasterReading.id))
+            for name in field_names:
+                q = q.filter(MasterReading.nbcm_selected.like(f"%{name}%"))
+            return q.scalar() or 0
 
         bcm1_open_ok = count_like("BCM1_OPEN")
         bcm1_close_ok = count_like("BCM1_CLOSE")
         bcm2_open_ok = count_like("BCM2_OPEN")
         bcm2_close_ok = count_like("BCM2_CLOSE")
 
+        # عملکرد صحیح = AND باز و بسته با هم؛ یعنی فقط وقتی هر دو حرکت
+        # با موفقیت تأیید شده باشند، آن چرخه «کار کرده» حساب می‌شود
+        bcm1_correct_ok = count_like("BCM1_OPEN", "BCM1_CLOSE")
+        bcm2_correct_ok = count_like("BCM2_OPEN", "BCM2_CLOSE")
+
         def stat(ok):
             return {'ok': ok, 'fail': max(total - ok, 0)}
 
         return jsonify({
             'total': total,
-            'BCM1': {'open': stat(bcm1_open_ok), 'close': stat(bcm1_close_ok)},
-            'BCM2': {'open': stat(bcm2_open_ok), 'close': stat(bcm2_close_ok)},
+            'BCM1': {'open': stat(bcm1_open_ok), 'close': stat(bcm1_close_ok),
+                     'correct': stat(bcm1_correct_ok)},
+            'BCM2': {'open': stat(bcm2_open_ok), 'close': stat(bcm2_close_ok),
+                     'correct': stat(bcm2_correct_ok)},
         })
     except Exception as e:
         print(f"[API Error] bcm_stats: {e}")
-        return jsonify({'total': 0,
-                        'BCM1': {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0}},
-                        'BCM2': {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0}}})
+        _empty = {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0},
+                  'correct': {'ok': 0, 'fail': 0}}
+        return jsonify({'total': 0, 'BCM1': _empty, 'BCM2': dict(_empty)})
+
 
 # در فایل app.py، این تابع را جایگزین تابع get_master_data کنید
 

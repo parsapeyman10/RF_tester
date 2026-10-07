@@ -101,7 +101,9 @@ const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای �
 // CYCLE_PERIOD_MS هم مثل RELAY_RETRY_GAP_MS از سرور قابل تغییر است؛ همان
 // الگو: پیش‌فرض + بازه‌ی مجاز + متغیر سراسری قابل‌تغییر که در NVS می‌ماند.
 const uint32_t DEFAULT_CYCLE_PERIOD_MS = 120000;  // ۲ دقیقه
-const uint32_t MIN_CYCLE_PERIOD_MS = 5000;        // حداقل مجاز (۵ ثانیه)
+// حداقل مجاز: مقادیر کمتر از این اصلاً قبول نمی‌شوند (نه کلمپ به این
+// عدد؛ کلاً رد می‌شوند و مقدار قبلی دست‌نخورده می‌ماند — به درخواست کاربر)
+const uint32_t MIN_CYCLE_PERIOD_MS = 35000;       // حداقل مجاز (۳۵ ثانیه)
 const uint32_t MAX_CYCLE_PERIOD_MS = 3600000;     // حداکثر مجاز (۱ ساعت)
 volatile uint32_t gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
 // فاصله‌ی هر بار «بیدار شدن» در حلقه‌ی انتظار بین سیکل‌ها (TaskRelayControl)
@@ -1333,8 +1335,16 @@ void processLinkLine(const char* line, bool windowActive) {
     }
 
     if (changed) {
-      // مقادیر خارج از بازه‌ی امن نادیده گرفته می‌شوند (کلمپ به نزدیک‌ترین حد مجاز)
-      if (newCycleMs < (long)MIN_CYCLE_PERIOD_MS) newCycleMs = MIN_CYCLE_PERIOD_MS;
+      // CYCLE_PERIOD_MS: اگر مقدار درخواستی کمتر از حداقل مجاز باشد، دیگر
+      // کلمپ به نزدیک‌ترین حد مجاز نمی‌شود — کلاً رد می‌شود و مقدار فعلی
+      // (gCyclePeriodMs) دست‌نخورده باقی می‌ماند (طبق درخواست صریح: زیر
+      // این آستانه اصلاً قبول نشود).
+      if (newCycleMs < (long)MIN_CYCLE_PERIOD_MS) {
+        DEBUG_PRINTF("[CFG] CYCLE_PERIOD_MS=%ld رد شد (کمتر از حداقل مجاز %u) -> "
+                     "مقدار قبلی (%u) حفظ شد\n",
+                     newCycleMs, (unsigned)MIN_CYCLE_PERIOD_MS, (unsigned)gCyclePeriodMs);
+        newCycleMs = (long)gCyclePeriodMs;
+      }
       if (newCycleMs > (long)MAX_CYCLE_PERIOD_MS) newCycleMs = MAX_CYCLE_PERIOD_MS;
       if (newGapMs < (long)MIN_RELAY_RETRY_GAP_MS) newGapMs = MIN_RELAY_RETRY_GAP_MS;
       if (newGapMs > (long)MAX_RELAY_RETRY_GAP_MS) newGapMs = MAX_RELAY_RETRY_GAP_MS;

@@ -156,7 +156,7 @@
                 </div>
             </div>
 
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-rose-500 flex flex-col justify-center min-h-[140px] px-3">
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-rose-500 flex flex-col justify-center min-h-[160px] px-3">
                 <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center block mb-1">آمار عملکرد BCM1 / BCM2</span>
                 <div class="flex items-center justify-center gap-3 text-[9px] text-slate-400 mb-2">
                     <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>کار کرده</span>
@@ -165,23 +165,23 @@
                 <div class="grid grid-cols-2 gap-2 px-1">
                     {% for dev, label in [('BCM1','BCM1'), ('BCM2','BCM2')] %}
                     <div class="bg-slate-900/60 rounded-lg px-2 py-2">
-                        <div class="text-[10px] text-slate-300 font-bold text-center mb-1">{{ label }}</div>
-                        <div class="flex items-center justify-between text-[9px] text-slate-400 font-mono">
+                        <div class="text-[11px] text-slate-300 font-bold text-center mb-1.5">{{ label }}</div>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-0.5">
                             <span>باز:</span>
-                            <span>
-                                <span id="bcm-{{ dev }}-open-ok" class="text-emerald-400 font-bold">--</span>/<span id="bcm-{{ dev }}-open-fail" class="text-red-400 font-bold">--</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-open-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-open-fail" class="text-red-400">--</span>
                             </span>
                         </div>
-                        <div class="flex items-center justify-between text-[9px] text-slate-400 font-mono">
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-0.5">
                             <span>بسته:</span>
-                            <span>
-                                <span id="bcm-{{ dev }}-close-ok" class="text-emerald-400 font-bold">--</span>/<span id="bcm-{{ dev }}-close-fail" class="text-red-400 font-bold">--</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-close-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-close-fail" class="text-red-400">--</span>
                             </span>
                         </div>
-                        <div class="flex items-center justify-between text-[9px] text-amber-300 font-mono border-t border-slate-700/60 mt-1 pt-1">
+                        <div class="flex items-center justify-between text-[10px] text-amber-300 font-mono border-t border-slate-700/60 mt-1 pt-1">
                             <span>عملکرد صحیح:</span>
-                            <span>
-                                <span id="bcm-{{ dev }}-correct-ok" class="text-emerald-400 font-bold">--</span>/<span id="bcm-{{ dev }}-correct-fail" class="text-red-400 font-bold">--</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-correct-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-correct-fail" class="text-red-400">--</span>
                             </span>
                         </div>
                     </div>

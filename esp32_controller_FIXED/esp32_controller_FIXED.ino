@@ -312,8 +312,13 @@ private:
 
 // =====================================================================
 //                         DATA STRUCTURE
-// ساختار دقیقاً مثل قبل است تا با پارسر ESP8266 و با
-// STRUCT_FORMAT = '<iff????iBBBBB' (۲۵ بایت) در app.py سازگار بماند.
+// ساختار قبلاً دقیقاً با STRUCT_FORMAT = '<iff????iBBBBB' (۲۵ بایت) در
+// app.py سازگار بود. یک فیلد جدید CycleAttempt در انتها اضافه شده است
+// (تعداد تلاش‌هایی که این سیکل طول کشید: ۱، ۲ یا ۳) که سایز را به ۲۶
+// بایت می‌رساند؛ app.py هم باید STRUCT_FORMAT='<iff????iBBBBBB' (۲۶
+// بایت) بخواند. فایل‌های .dat قدیمی (۲۵ بایتی، قبل از این تغییر) با
+// فرمت قدیمی هنوز قابل‌خواندن‌اند چون app.py بر اساس باقیمانده‌ی طول
+// فایل بر ۲۵ و ۲۶ فرمت را تشخیص می‌دهد.
 // =====================================================================
 #pragma pack(1)
 struct WifiData {
@@ -324,6 +329,9 @@ struct WifiData {
   bool BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
   int Year;
   uint8_t Month, Day, Hour, Minute, Second;
+  // تعداد تلاش‌هایی که runTestCycle() طول کشید تا هر دو BCM تایید شوند
+  // (یا بعد از ۳ تلاش ناموفق ناقص باقی بماند): مقدار ۱، ۲ یا ۳.
+  uint8_t CycleAttempt;
 };
 #pragma pack()
 
@@ -1609,12 +1617,18 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
  *
  * کل سیکل حداکثر ۳ بار تکرار می‌شود. اگر بعد از یک سیکل هر دو دستگاه هم باز
  * شدن و هم بسته شدن را تأیید کرده باشند، تکرار بعدی انجام نمی‌شود.
+ *
+ * outAttempt: شماره‌ی تلاشی که روی آن متوقف شد (۱ اگر بار اول موفق شد،
+ * ۲ اگر بار دوم، یا ۳ اگر حتی بعد از ۳ تلاش هم ناقص ماند). این همان
+ * مقداری است که در پروتکل به‌عنوان «cycle=» برای سرور فرستاده می‌شود.
  */
-static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
+static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttempt) {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
 
+  uint8_t usedAttempt = 1;
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
+    usedAttempt = attempt;
     relayPhaseText = "سیکل تست";
     DEBUG_PRINTF("\n[TEST] ===== سیکل %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
 
@@ -1658,6 +1672,7 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
     }
   }
 
+  if (outAttempt) *outAttempt = usedAttempt;
 }
 
 void TaskRelayControl(void *pv) {
@@ -1682,7 +1697,8 @@ void TaskRelayControl(void *pv) {
 
     // نتیجه‌ی تفکیکی: برای هر دستگاه، هم «باز شد» و هم «بسته شد»
     bool got[PHASE_COUNT][DEVICE_COUNT];
-    runTestCycle(got);
+    uint8_t cycleAttemptUsed = 1;
+    runTestCycle(got, &cycleAttemptUsed);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -1699,19 +1715,20 @@ void TaskRelayControl(void *pv) {
       globalSystemState.BCM1_CLOSE = got[PHASE_CLOSE][0];
       globalSystemState.BCM2_OPEN = got[PHASE_OPEN][1];
       globalSystemState.BCM2_CLOSE = got[PHASE_CLOSE][1];
+      globalSystemState.CycleAttempt = cycleAttemptUsed;
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
       xSemaphoreGive(xGlobalStateMutex);
 
       DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
-                   "T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
+                   "T=%.2f H=%.2f  cycle=%u  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
                    DEVICE_NAMES[0], snapshot.BCM1_OPEN ? "OK" : "NOK",
                                     snapshot.BCM1_CLOSE ? "OK" : "NOK",
                    DEVICE_NAMES[1], snapshot.BCM2_OPEN ? "OK" : "NOK",
                                     snapshot.BCM2_CLOSE ? "OK" : "NOK",
-                   snapshot.Temp, snapshot.Hum,
+                   snapshot.Temp, snapshot.Hum, (unsigned)snapshot.CycleAttempt,
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
 
@@ -2216,7 +2233,8 @@ void saveRecord(const WifiData &data) {
 void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
   snprintf(out, outSize,
            "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
-           "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+           "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
+           "cycle=%u",
            d.NUM,
            d.BCM1_OPEN ? "OK" : "NOK",
            d.BCM1_CLOSE ? "OK" : "NOK",
@@ -2224,7 +2242,8 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
            d.BCM2_CLOSE ? "OK" : "NOK",
            d.Temp, d.Hum,
            d.Year, d.Month, d.Day,
-           d.Hour, d.Minute, d.Second);
+           d.Hour, d.Minute, d.Second,
+           (unsigned)(d.CycleAttempt ? d.CycleAttempt : 1));
 }
 
 void sendRecord(WiFiClient &cl, const WifiData &d) {

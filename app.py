@@ -181,6 +181,12 @@ class MasterReading(db.Model):
     # هم بسته شدن، در هر دو BCM (BCM1 و BCM2) با موفقیت تأیید شده باشد.
     # True/False = AND چهار سیگنال (BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE)
     cycle = db.Column(db.Boolean, nullable=True, default=False, index=True)
+    # ستون «Attempts» (پروتکل: cycle=<1|2|3>) — این یک مفهوم کاملاً جدا از
+    # ستون Cycle بالاست: تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید
+    # تا هر دو BCM را تایید کند (یا بعد از ۳ تلاش ناقص بماند).
+    #   ۱ = بار اول موفق شد   ۲ = بار دوم موفق شد   ۳ = بعد از ۳ تلاش هم تمام شد
+    # می‌تواند None باشد (رکوردهای قدیمی/فریمورهای قدیمی که این فیلد را نمی‌فرستند)
+    cycle_attempt = db.Column(db.Integer, nullable=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -289,7 +295,7 @@ def insert_daily_rows(date_str, rows):
 UNSAVED_LOG = os.path.join(DATA_DIR, "unsaved_records.log")
 
 
-def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
+def record_to_line(num_value, fields, temp, humidity, date_str, time_str, cycle_attempt=None):
     """ساخت همان خط استاندارد پروژه از روی مقادیر یک رکورد"""
     # fields می‌تواند رشته‌ی «,»جداشده یا لیست باشد
     if isinstance(fields, (list, tuple, set)):
@@ -302,6 +308,8 @@ def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
     parts.append(f"Humidity={humidity}")
     parts.append(f"Date={date_str}")
     parts.append(f"Time={time_str}")
+    if cycle_attempt is not None:
+        parts.append(f"cycle={cycle_attempt}")
     return ",".join(parts)
 
 
@@ -455,6 +463,16 @@ def save_sensor_data(data_source, raw_line=None):
         i_time = data_source.get('time') or now_tehran.strftime('%H:%M:%S')
         i_date = data_source.get('date') or now_tehran.strftime('%Y-%m-%d')
 
+        # تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید (فیلد «cycle=»
+        # در پروتکل). اختیاری است؛ اگر نیامده بود None می‌ماند.
+        cyc_raw = data_source.get('cycle_attempt')
+        cycle_attempt_val = None
+        if cyc_raw not in (None, ""):
+            try:
+                cycle_attempt_val = max(1, min(3, int(cyc_raw)))
+            except (TypeError, ValueError):
+                cycle_attempt_val = None
+
         # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
         # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
         # «زمان ثبت» باید همان ساعت سرور (کامپیوتر) در لحظه‌ی ذخیره باشد.
@@ -469,7 +487,7 @@ def save_sensor_data(data_source, raw_line=None):
 
         # خط استاندارد برای بکاپ — از همین لحظه آماده است
         backup_line = raw_line or record_to_line(
-            num_int, nbcm_str, t_val, h_val, i_date, i_time)
+            num_int, nbcm_str, t_val, h_val, i_date, i_time, cycle_attempt_val)
 
         # --- جلوگیری از رکورد تکراری ---
         # منابع تکرار: اکوی سریال، ارسال مجدد ESP32 وقتی ACK گم می‌شود،
@@ -484,7 +502,8 @@ def save_sensor_data(data_source, raw_line=None):
             humidity=h_val, temp=t_val, time=i_time, date=i_date,
             timestamp=real_timestamp,  # زمان ثبت = ساعت سرور در لحظه‌ی ذخیره
             formatted_log=log_str,
-            cycle=compute_cycle_ok(nbcm_str)
+            cycle=compute_cycle_ok(nbcm_str),
+            cycle_attempt=cycle_attempt_val
         )
         db.session.add(master_entry)
         try:
@@ -669,6 +688,12 @@ def load_serial_config():
 # =====================================================================
 _FLOAT_RE = r"-?(?:\d+(?:\.\d+)?|nan|NaN|NAN|inf|Inf|INF)"
 
+#  فیلد انتهایی «,cycle=<1|2|3>» اختیاری است (رله‌ی ESP32 تعداد تلاش‌هایی
+#  که برای تایید هر دو BCM طول کشید را می‌فرستد). اختیاری گذاشته شده تا
+#  خط‌های فریمورهای قدیمی‌تر (قبل از این قابلیت) یا رکوردهای قدیمیِ
+#  stash‌شده در unsaved_records.log هم بدون خطا پارس شوند.
+_CYCLE_SUFFIX_RE = r"(?:,cycle=(?P<cyc>\d+))?"
+
 INDUSTRIAL_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
     r"BCM1_OPEN=(?P<f1>[A-Za-z0-9]+),BCM1_CLOSE=(?P<f2>[A-Za-z0-9]+),"
@@ -676,6 +701,7 @@ INDUSTRIAL_LINE_RE = re.compile(
     rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+    + _CYCLE_SUFFIX_RE
 )
 
 # فریمورهای قدیمی که هنوز NBCM1..4 می‌فرستند هم پذیرفته می‌شوند
@@ -686,6 +712,7 @@ LEGACY_LINE_RE = re.compile(
     rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+    + _CYCLE_SUFFIX_RE
 )
 
 TRUE_TOKENS = ("OK", "1", "TRUE", "YES")
@@ -707,6 +734,16 @@ def parse_industrial_line(line):
         time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
         # اعتبارسنجی واقعی تاریخ (مثلاً 2026-02-31 رد می‌شود)
         datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        # «cycle=» یعنی تعداد تلاش‌هایی که ESP32 برای تایید هر دو BCM طول
+        # کشید (۱/۲/۳). اختیاری است؛ اگر نیامده بود None می‌ماند (مثلاً
+        # فریمور قدیمی یا ورودی دستی از صفحه‌ی /paste).
+        cyc_raw = g.get("cyc")
+        cycle_attempt = None
+        if cyc_raw not in (None, ""):
+            try:
+                cycle_attempt = max(1, min(3, int(cyc_raw)))
+            except (TypeError, ValueError):
+                cycle_attempt = None
         return {
             'num_value': g["num"],
             'nbcm': nbcm,
@@ -714,6 +751,7 @@ def parse_industrial_line(line):
             'humidity': g["hum"],
             'date': date_str,
             'time': time_str,
+            'cycle_attempt': cycle_attempt,
         }
     except Exception as exc:
         print(f"[PARSE_ERR] {exc} :: {line[:120]}")
@@ -872,9 +910,27 @@ def upload_dat_page():
             return jsonify({'status': 'error', 'message': 'No files received'}), 400
         
         uploaded_files = request.files.getlist('folder_upload')
-        STRUCT_FORMAT = '<iff????iBBBBB'
-        EXPECTED_SIZE = 25
-        
+        # فرمت قدیمی (قبل از قابلیت cycle=): ۲۵ بایت، بدون تعداد تلاش
+        STRUCT_FORMAT_OLD = '<iff????iBBBBB'
+        EXPECTED_SIZE_OLD = struct.calcsize(STRUCT_FORMAT_OLD)   # 25
+        # فرمت جدید: یک بایت اضافه در انتها برای cycle_attempt (۱/۲/۳)
+        STRUCT_FORMAT_NEW = '<iff????iBBBBBB'
+        EXPECTED_SIZE_NEW = struct.calcsize(STRUCT_FORMAT_NEW)   # 26
+
+        def detect_record_format(data_len):
+            """
+            فایل‌های .dat قبل از این آپدیت ۲۵ بایت/رکورد بودند؛ از این به بعد
+            ۲۶ بایت/رکورد (با cycle_attempt اضافه) خواهند بود. چون نمی‌توان
+            مطمئن بود فایل آپلودی با کدام فریمور ساخته شده، اندازه‌ای که طول
+            فایل را دقیقاً (بدون باقی‌مانده) می‌پوشاند انتخاب می‌شود —
+            فرمت جدید در اولویت است.
+            """
+            if data_len % EXPECTED_SIZE_NEW == 0:
+                return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW
+            if data_len % EXPECTED_SIZE_OLD == 0:
+                return STRUCT_FORMAT_OLD, EXPECTED_SIZE_OLD
+            return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
+
         master_buffer = []
         
         success_count = 0      # رکوردهای سالمِ جدید که برای ذخیره آماده شدند
@@ -891,6 +947,8 @@ def upload_dat_page():
             
             try:
                 file_bytes = file.read()
+                STRUCT_FORMAT, EXPECTED_SIZE = detect_record_format(len(file_bytes))
+                has_cycle_attempt = (EXPECTED_SIZE == EXPECTED_SIZE_NEW)
                 # اگر انتهای فایل خراب/ناقص بود، رکوردهای «کامل» داخلش
                 # نجات داده می‌شوند — قبلاً کل فایل دور ریخته می‌شد.
                 usable = (len(file_bytes) // EXPECTED_SIZE) * EXPECTED_SIZE
@@ -937,6 +995,14 @@ def upload_dat_page():
 
                     formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
 
+                    # تعداد تلاش (cycle_attempt): فقط فایل‌های فرمت جدید (۲۶ بایت)
+                    # این بایت آخر را دارند؛ فایل‌های قدیمی None می‌مانند
+                    cyc_val = None
+                    if has_cycle_attempt:
+                        cyc_raw = data[13]
+                        if cyc_raw:
+                            cyc_val = max(1, min(3, int(cyc_raw)))
+
                     # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
                     if master_exists(num_val, device_date_str, device_time_str):
                         skipped_count += 1
@@ -952,7 +1018,8 @@ def upload_dat_page():
                         # زمان ثبت = ساعت سرور در لحظه‌ی آپلود (نه RTC دستگاه)
                         timestamp=upload_time_server.replace(tzinfo=None),
                         formatted_log=formatted_log,
-                        cycle=compute_cycle_ok(nbcm_str)
+                        cycle=compute_cycle_ok(nbcm_str),
+                        cycle_attempt=cyc_val
                     ))
                     success_count += 1
             except Exception as e:
@@ -1105,7 +1172,8 @@ def get_sensor_data():
                 'timestamp': r.timestamp, # زمان آپلود (صرفا جهت اطلاع)
                 'nbcm_statuses': nbcm_map,
                 'bcm_results': build_bcm_results(r.nbcm_selected),
-                'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected)
+                'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
+                'cycle_attempt': r.cycle_attempt
             })
             
         return jsonify(output)
@@ -1227,6 +1295,7 @@ def get_master_data():
             'nbcm_statuses': nbcm_map,
             'bcm_results': build_bcm_results(r.nbcm_selected),
             'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
+            'cycle_attempt': r.cycle_attempt,
             'date': r.date
         })
 
@@ -1402,6 +1471,16 @@ def import_csv():
                 if val in TRUE_TOKENS:
                     fields.append(name)
 
+            # ستون «Attempts»/«CYCLE_ATTEMPT» اختیاری است (خروجی اکسل جدید آن
+            # را دارد؛ فایل‌های قدیمی‌تر ندارند و None می‌ماند)
+            cyc_raw = pick(row, 'ATTEMPTS', 'CYCLE_ATTEMPT')
+            cyc_val = None
+            if cyc_raw:
+                try:
+                    cyc_val = max(1, min(3, int(float(cyc_raw))))
+                except (TypeError, ValueError):
+                    cyc_val = None
+
             payload = {
                 'num_value': num,
                 'nbcm': fields,
@@ -1409,11 +1488,12 @@ def import_csv():
                 'humidity': pick(row, 'HUMIDITY', 'HUM') or '0',
                 'date': date_s,
                 'time': time_s,
+                'cycle_attempt': cyc_val,
             }
             # خط استاندارد برای بکاپ‌گیری در صورت شکست ذخیره
             raw_line = record_to_line(safe_int(num), fields,
                                       payload['temp'], payload['humidity'],
-                                      date_s, time_s)
+                                      date_s, time_s, cyc_val)
 
             if master_exists(safe_int(num), date_s, time_s):
                 duplicates += 1
@@ -1576,7 +1656,7 @@ def export_excel():
     cw.writerow(['ID', 'NUM',
                  'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
                  'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
-                 'Cycle',
+                 'Cycle', 'Attempts',
                  'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
@@ -1596,6 +1676,7 @@ def export_excel():
             'OK' if res['BCM2']['close'] else 'NOK',
             'OK' if res['BCM2']['ok'] else 'NOK',
             'OK' if cycle_val else 'NOK',
+            r.cycle_attempt if r.cycle_attempt is not None else '',
             r.temp, r.humidity, r.time, r.date, r.timestamp])
     
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report.csv"})
@@ -1699,6 +1780,29 @@ def _ensure_master_cycle_column():
         return False
 
 
+def _ensure_master_attempt_column():
+    """
+    مهاجرتِ ستون «cycle_attempt» (تعداد تلاش ۱/۲/۳) روی دیتابیس‌های قدیمی‌تر.
+
+    برخلاف ستون Cycle، این مقدار از روی داده‌ی قدیمی قابل بازسازی نیست
+    (چون فریمورهای قبلی اصلاً این عدد را نمی‌فرستادند)؛ پس رکوردهای قدیمی
+    با NULL باقی می‌مانند و در UI به‌صورت «—» نمایش داده می‌شوند.
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "cycle_attempt" in cols:
+                return True  # از قبل وجود دارد، کاری لازم نیست
+            conn.execute(text("ALTER TABLE master_reading ADD COLUMN cycle_attempt INTEGER"))
+        print("[DB] ستون cycle_attempt (تعداد تلاش) اضافه شد.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون cycle_attempt ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
 def bootstrap_server(recover_unsaved=True, start_serial=True):
     """
     راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
@@ -1712,6 +1816,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
         db.create_all()
         _ensure_master_unique_index()
         _ensure_master_cycle_column()
+        _ensure_master_attempt_column()
 
         # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
         if recover_unsaved and os.path.exists(UNSAVED_LOG):

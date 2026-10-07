@@ -204,6 +204,10 @@
             </div>
 
             <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
+                <div class="flex items-center justify-center gap-2 mb-2">
+                    <span class="text-slate-400 text-[9px] font-bold uppercase tracking-widest">تعداد تلاش این سیکل:</span>
+                    <span id="live-cycle-attempt" class="text-sm font-black font-mono text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-amber-500/20">--/3</span>
+                </div>
                 <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">سطح منطقی (۱ / ۰)</span>
                 <div class="grid grid-cols-2 gap-2 px-1">
                     {% for key, fa in [('BCM1_OPEN','BCM1 باز'), ('BCM1_CLOSE','BCM1 بسته'),
@@ -473,6 +477,21 @@
                 el.className = 'text-2xl font-black leading-none transition-all duration-300 '
                     + (one ? 'text-emerald-400 drop-shadow-[0_0_8px_#22c55e]' : 'text-red-400');
             });
+
+            // تعداد تلاش‌هایی که این سیکل طول کشید (۱، ۲ یا ۳) — فیلد cycle=
+            const attEl = document.getElementById('live-cycle-attempt');
+            if (attEl) {
+                const att = last.cycle_attempt;
+                if (att === null || att === undefined) {
+                    attEl.textContent = '--/3';
+                    attEl.className = 'text-sm font-black font-mono text-slate-500 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-slate-700';
+                } else {
+                    attEl.textContent = att + '/3';
+                    const color = att >= 3 ? 'text-red-400 border-red-500/30'
+                                : (att === 2 ? 'text-amber-300 border-amber-500/30' : 'text-emerald-400 border-emerald-500/30');
+                    attEl.className = 'text-sm font-black font-mono bg-slate-900/60 px-2 py-0.5 rounded-lg border ' + color;
+                }
+            }
         } catch (e) { console.error("Dashboard Sync Error:", e); }
     }
 

@@ -26,6 +26,10 @@ ESP8266_INO = os.path.join(ROOT, "esp8266_receiver_FIXED", "esp8266_receiver_FIX
 KEYS = ["NUM", "BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE",
         "Temp", "Humidity", "Date", "Time"]
 
+# فیلد «cycle=» (تعداد تلاش ۱/۲/۳ که ESP32 برای این سیکل طول کشید) باید در
+# هر سه لایه حضور داشته باشد: snprintf فرستنده، sscanf/printf گیرنده
+KEY_CYCLE = "cycle="
+
 failures = []
 warnings = []
 
@@ -54,13 +58,17 @@ app_src = read(os.path.join(ROOT, 'app.py'))
 for blob, name in ((esp32, "ESP32 snprintf"), (esp8266, "ESP8266")):
     for key in KEYS:
         check(key + "=" in blob, f"[{name}] کلید {key}= در فرمت پیدا نشد")
+    check(KEY_CYCLE in blob, f"[{name}] فیلد {KEY_CYCLE} (تعداد تلاش سیکل) در فرمت پیدا نشد")
+check(KEY_CYCLE in app_src, f"[app.py] فیلد {KEY_CYCLE} در رجکس/پارسر پیدا نشد")
 
 # ------------------------------------------------- 2) تعداد فیلدهای sscanf
-m = re.search(r"itemsParsed\s*==\s*(\d+)", esp8266)
-check(m is not None, "[ESP8266] شرط تعداد فیلدهای sscanf پیدا نشد")
-if m:
-    check(int(m.group(1)) == 13,
-          f"[ESP8266] sscanf باید دقیقاً 13 فیلد بدهد ولی {m.group(1)} چک شده است")
+# فیلد cycle= اختیاری است (سازگاری عقب‌رو با فریمورهای قدیمی‌تر)، پس
+# sscanf باید هم با ۱۳ فیلد (بدون cycle=) و هم با ۱۴ فیلد (با cycle=)
+# معتبر شمرده شود
+_m_all = re.findall(r"itemsParsed\s*==\s*(\d+)", esp8266)
+check(bool(_m_all), "[ESP8266] شرط تعداد فیلدهای sscanf پیدا نشد")
+check(set(_m_all) == {"13", "14"},
+      f"[ESP8266] sscanf باید هم ۱۳ (بدون cycle=) و هم ۱۴ (با cycle=) را بپذیرد؛ یافت‌شده: {_m_all}")
 
 # ------------------------------------ 3) پارس واقعی خط توسط سرور Flask
 # دیتابیس تست: قبل از import جداسازی می‌شود تا رکوردهای تستِ داینامیک
@@ -100,15 +108,27 @@ check(flask_app.parse_industrial_line("[LOG]: ID:42 | T:23") is None,
       "خط بدون NUM= نباید پارس شود")
 
 # ------------------------------------------- 4) اندازه‌ی struct فایل .dat
-# ESP32: #pragma pack(1) struct { int; float; float; 4x bool; int; 5x uint8 }
-expected_size = struct.calcsize("<iff????iBBBBB")
-check(expected_size == 25, f"چیدمان struct پایتون 25 بایت نیست: {expected_size}")
+# ESP32: #pragma pack(1) struct { int; float; float; 4x bool; int; 5x uint8; 1x uint8 (CycleAttempt) }
+# فرمت قدیمی (قبل از cycle=) ۲۵ بایت بود؛ فرمت جدید با CycleAttempt ۲۶ بایت است.
+# app.py باید هر دو را تشخیص بدهد تا فایل‌های .dat قدیمی هم قابل آپلود بمانند.
+expected_size_old = struct.calcsize("<iff????iBBBBB")
+expected_size_new = struct.calcsize("<iff????iBBBBBB")
+check(expected_size_old == 25, f"چیدمان struct قدیمی پایتون 25 بایت نیست: {expected_size_old}")
+check(expected_size_new == 26, f"چیدمان struct جدید پایتون 26 بایت نیست: {expected_size_new}")
 
-m = re.search(r"EXPECTED_SIZE\s*=\s*(\d+)", read(os.path.join(ROOT, "app.py")))
-check(m is not None, "EXPECTED_SIZE در app.py پیدا نشد")
-if m:
-    check(int(m.group(1)) == expected_size,
-          f"EXPECTED_SIZE={m.group(1)} با struct پک‌شده‌ی ESP32 ({expected_size}) نمی‌خواند")
+check("uint8_t CycleAttempt;" in esp32,
+      "[ESP32] فیلد CycleAttempt به struct WifiData اضافه شده")
+
+m_old = re.search(r"STRUCT_FORMAT_OLD\s*=\s*'([^']+)'", app_src)
+m_new = re.search(r"STRUCT_FORMAT_NEW\s*=\s*'([^']+)'", app_src)
+check(m_old is not None, "STRUCT_FORMAT_OLD در app.py پیدا نشد")
+check(m_new is not None, "STRUCT_FORMAT_NEW در app.py پیدا نشد")
+if m_old:
+    check(struct.calcsize(m_old.group(1)) == expected_size_old,
+          f"STRUCT_FORMAT_OLD='{m_old.group(1)}' با فرمت قدیمی ESP32 ({expected_size_old} بایت) نمی‌خواند")
+if m_new:
+    check(struct.calcsize(m_new.group(1)) == expected_size_new,
+          f"STRUCT_FORMAT_NEW='{m_new.group(1)}' با فرمت جدید ESP32 ({expected_size_new} بایت) نمی‌خواند")
 check("#pragma pack(1)" in esp32, "[ESP32] struct باید با pragma pack(1) پک شده باشد")
 
 # ------------------------- 5) ساختار فریمور: فازها و مانیتورینگ
@@ -400,6 +420,18 @@ try:
     _ok_dup = flask_app.handle_serial_line(_rec)
     check(_ok_dup is True and _sent == ["ACK 99001"],
           f"[app.py/داینامیک] رکورد تکراری هم ACK می‌گیرد (نتیجه={_ok_dup}، ارسالی={_sent})")
+
+    # ۲ب) رکورد با فیلد cycle= (تعداد تلاش): باید درست پارس و در DB ذخیره شود
+    _rec_cyc = ("NUM=99005,BCM1_OPEN=NOK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+                "Temp=22.10,Humidity=48.30,Date=2026-09-30,Time=10:15:00,cycle=2")
+    _sent.clear()
+    _ok_cyc = flask_app.handle_serial_line(_rec_cyc)
+    check(_ok_cyc is True and _sent == ["ACK 99005"],
+          f"[app.py/داینامیک] رکورد با cycle= هم ACK می‌گیرد (نتیجه={_ok_cyc}، ارسالی={_sent})")
+    with flask_app.app.app_context():
+        _row = flask_app.MasterReading.query.filter_by(num_value=99005).first()
+    check(_row is not None and _row.cycle_attempt == 2,
+          f"[app.py/داینامیک] cycle_attempt=2 درست در دیتابیس ذخیره شد (ردیف={_row.cycle_attempt if _row else None})")
 
     # ۳) سلام و پینگ گیرنده با شناسه‌ی نشست فعلی
     # SRV_HELLO حالا علاوه بر SRV_READY، خط CFG زمان‌بندی سیکل را هم

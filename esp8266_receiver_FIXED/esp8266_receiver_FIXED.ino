@@ -91,6 +91,9 @@ struct WifiData {
     bool     BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
     uint16_t Year;
     uint8_t  Month, Day, Hour, Minute, Second;
+    // تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید (۱، ۲ یا ۳)؛
+    // از فیلد «cycle=» خط دریافتی می‌آید و عیناً فوروارد می‌شود
+    uint8_t  CycleAttempt;
 };
 
 WifiData WData;
@@ -440,15 +443,17 @@ bool parseData(char* inputBuffer) {
   char bcm1[10], bcm2[10], bcm3[10], bcm4[10];
   char tStr[15], hStr[15];
   int num, yr, mon, day, hr, min, sec;
+  int cyc = 1;   // اگر ESP32 قدیمی بدون فیلد cycle= باشد، پیش‌فرض ۱
 
-  // تطابق کامل با فرمت snprintf ارسالی شما
+  // تطابق کامل با فرمت snprintf ارسالی شما (فیلد cycle= در انتها اضافه شده)
   int itemsParsed = sscanf(inputBuffer, 
     "NUM=%d,BCM1_OPEN=%9[^,],BCM1_CLOSE=%9[^,],BCM2_OPEN=%9[^,],BCM2_CLOSE=%9[^,],"
-    "Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d",
-    &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec
+    "Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d,cycle=%d",
+    &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec, &cyc
   );
 
-  if (itemsParsed == 13) {
+  // ۱۳ یعنی فیلد cycle= نیامده (فریمور قدیمی‌تر) — باز هم رد نمی‌شود
+  if (itemsParsed == 13 || itemsParsed == 14) {
     WData.NUM = num;
     WData.BCM1_OPEN  = strToBool(bcm1);
     WData.BCM1_CLOSE = strToBool(bcm2);
@@ -458,6 +463,9 @@ bool parseData(char* inputBuffer) {
     WData.Hum = atof(hStr);
     WData.Year = yr; WData.Month = mon; WData.Day = day;
     WData.Hour = hr; WData.Minute = min; WData.Second = sec;
+    if (cyc < 1) cyc = 1;
+    if (cyc > 3) cyc = 3;
+    WData.CycleAttempt = (uint8_t)cyc;
     return true;
   }
   return false;
@@ -475,7 +483,8 @@ bool parseData(char* inputBuffer) {
 void sendDataToComputer() {
   Serial.printf(
     "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
-    "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d\n",
+    "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
+    "cycle=%u\n",
     WData.NUM,
     WData.BCM1_OPEN ? "OK" : "NOK",
     WData.BCM1_CLOSE ? "OK" : "NOK",
@@ -483,7 +492,8 @@ void sendDataToComputer() {
     WData.BCM2_CLOSE ? "OK" : "NOK",
     WData.Temp, WData.Hum,
     WData.Year, WData.Month, WData.Day,
-    WData.Hour, WData.Minute, WData.Second
+    WData.Hour, WData.Minute, WData.Second,
+    (unsigned)WData.CycleAttempt
   );
 }
 

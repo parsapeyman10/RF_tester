@@ -104,6 +104,10 @@ const uint32_t DEFAULT_CYCLE_PERIOD_MS = 120000;  // ۲ دقیقه
 const uint32_t MIN_CYCLE_PERIOD_MS = 5000;        // حداقل مجاز (۵ ثانیه)
 const uint32_t MAX_CYCLE_PERIOD_MS = 3600000;     // حداکثر مجاز (۱ ساعت)
 volatile uint32_t gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
+// فاصله‌ی هر بار «بیدار شدن» در حلقه‌ی انتظار بین سیکل‌ها (TaskRelayControl)
+// برای چک کردن اینکه آیا gCyclePeriodMs از سرور عوض شده یا نه. هرچه کوچک‌تر،
+// واکنش به تغییر زمان سریع‌تر است؛ ۲۰۰ میلی‌ثانیه برای این منظور کافی است.
+const uint32_t CYCLE_WAIT_POLL_MS = 200;
 
 // --- شبکه ---
 const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت کامپیوتر)
@@ -1676,10 +1680,6 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttemp
 }
 
 void TaskRelayControl(void *pv) {
-  // period دیگر یک‌بار در ابتدای تسک ثابت نمی‌شود، چون gCyclePeriodMs ممکن
-  // است در حین اجرا از سرور تغییر کند؛ هر دور از روی مقدار تازه حساب می‌شود.
-  TickType_t lastWake = xTaskGetTickCount();
-
   xEventGroupWaitBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE, pdFALSE, pdTRUE, portMAX_DELAY);
 
   // در حالت «نمایش دیتا» اصلاً نباید رله‌ای زده شود
@@ -1749,8 +1749,40 @@ void TaskRelayControl(void *pv) {
 
     xEventGroupSetBits(xSystemEvents, BIT_WIFI_PERMIT);
     relayPhaseText = "انتظار تا سیکل بعد";
-    TickType_t period = pdMS_TO_TICKS(gCyclePeriodMs);  // ممکن است از سرور عوض شده باشد
-    vTaskDelayUntil(&lastWake, period);
+
+    // ---- انتظار تا سیکل بعد: یک CYCLE_PERIOD_MS کامل ----
+    // این شمارش همیشه از همین لحظه (پایان واقعی سیکل فعلی، چه با ۱، چه با
+    // ۲ و چه بعد از هر ۳ تلاش تمام شده باشد) از صفر شروع می‌شود؛ قبلاً با
+    // vTaskDelayUntil روی یک برنامه‌ی زمانی تجمعی حساب می‌شد که دو مشکل
+    // داشت:
+    //   ۱) اگر اجرای خودِ سیکل (مخصوصاً بعد از ۳ تلاش با چند Retry Gap)
+    //      بیشتر از CYCLE_PERIOD_MS طول می‌کشید، vTaskDelayUntil اصلاً صبر
+    //      نمی‌کرد و سیکل بعدی بی‌درنگ شروع می‌شد.
+    //   ۲) اگر CYCLE_PERIOD_MS حین همین انتظار از سرور تغییر می‌کرد، مقدار
+    //      جدید فقط در دور بعدی اعمال می‌شد؛ انتظار جاری با مقدار قدیمی تا
+    //      انتهایش ادامه پیدا می‌کرد.
+    // حلقه‌ی زیر با گام‌های کوچک (CYCLE_WAIT_POLL_MS) بیدار می‌شود، هر بار
+    // تازه‌ترین gCyclePeriodMs را می‌خواند؛ اگر عوض شده باشد، شمارش را از
+    // صفر و با مقدار تازه از نو شروع می‌کند (نه ادامه‌ی مقدار قبلی).
+    {
+      uint32_t waitStart = millis();
+      uint32_t waitTarget = gCyclePeriodMs;
+      for (;;) {
+        uint32_t nowPeriod = gCyclePeriodMs;  // ممکن است همین الان از سرور تغییر کرده باشد
+        if (nowPeriod != waitTarget) {
+          DEBUG_PRINTF("[CYCLE] CYCLE_PERIOD_MS حین انتظار از %u به %u تغییر کرد -> "
+                       "شمارش از صفر با مقدار جدید\n",
+                       (unsigned)waitTarget, (unsigned)nowPeriod);
+          waitTarget = nowPeriod;
+          waitStart = millis();
+        }
+        uint32_t elapsed = millis() - waitStart;
+        if (elapsed >= waitTarget) break;
+        uint32_t remaining = waitTarget - elapsed;
+        uint32_t step = (remaining < CYCLE_WAIT_POLL_MS) ? remaining : CYCLE_WAIT_POLL_MS;
+        vTaskDelay(pdMS_TO_TICKS(step));
+      }
+    }
   }
 }
 

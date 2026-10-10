@@ -226,20 +226,22 @@
                     </div>
                     {% endfor %}
                 </div>
-                <div class="grid grid-cols-2 gap-2 px-1 mt-2 pt-2 border-t border-slate-700/60">
-                    <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center justify-center">
-                        <span class="text-[9px] text-slate-400 font-mono mb-1">Indicator <span class="text-amber-400/80">(BCM2)</span></span>
-                        <span id="indicator-led" class="w-4 h-4 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
-                        <span id="indicator-led-txt" class="text-[9px] text-slate-600 font-bold mt-1">—</span>
-                    </div>
-                    <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center justify-center">
-                        <span class="text-[9px] text-slate-400 font-mono mb-1">Buzzer <span class="text-amber-400/80">(BCM2)</span></span>
-                        <svg id="buzzer-pwm" width="44" height="18" viewBox="0 0 44 18">
-                            <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
-                        </svg>
-                        <span id="buzzer-pwm-txt" class="text-[9px] text-slate-600 font-bold mt-1">—</span>
-                    </div>
-                </div>
+            </div>
+        </div>
+
+        <div class="glass-card p-3 rounded-2xl border-t-4 border-amber-500 flex items-center justify-center gap-6 mt-4">
+            <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">سیگنال‌های BCM2:</span>
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] text-slate-400 font-mono">Indicator</span>
+                <span id="indicator-led" class="w-3.5 h-3.5 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
+                <span id="indicator-led-txt" class="text-[10px] text-slate-600 font-bold">—</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] text-slate-400 font-mono">Buzzer</span>
+                <svg id="buzzer-pwm" width="40" height="16" viewBox="0 0 44 18">
+                    <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
+                </svg>
+                <span id="buzzer-pwm-txt" class="text-[10px] text-slate-600 font-bold">—</span>
             </div>
         </div>
 
@@ -312,14 +314,16 @@
             <p class="text-xs text-slate-500 mb-6">
                 این دو سیگنال، دو فانکشنِ جداگانه‌ی مربوط به BCM2 هستند (نه BCM1):
                 ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
-                هر رکورد می‌فرستد — این تنظیم در فرم‌ور سوییچی ندارد. این تیک کاملاً
-                سمت سرور است: وقتی خاموش باشد (پیش‌فرض)، این دو مقدار فقط دریافت و
-                دور ریخته می‌شوند و دیتابیس دقیقاً مثل الان باقی می‌ماند؛ وقتی روشن
-                شود، از همان لحظه در دیتابیس ذخیره می‌شوند.
+                هر رکورد می‌فرستد، ESP8266 همیشه آن‌ها را به سرور می‌رساند و سرور
+                همیشه این دو مقدار را در دیتابیس ذخیره می‌کند — این تیک کاری به
+                ذخیره‌سازی ندارد و فقط نمایش را کنترل می‌کند: وقتی خاموش باشد
+                (پیش‌فرض)، صفحه‌ی تاریخچه دقیقاً همان فرمت قبلی را نشان می‌دهد
+                (بدون دو ستون Indicator/Buzzer)؛ وقتی روشن شود، همان دو ستون
+                اضافه در تاریخچه نمایش داده می‌شوند.
             </p>
             <label class="flex items-center gap-3 p-4 bg-slate-900/50 rounded-xl border border-slate-700 cursor-pointer select-none">
                 <input type="checkbox" id="saveIndicatorBuzzerToggle" class="w-5 h-5 accent-amber-500">
-                <span class="text-sm">ذخیره‌ی Indicator و Buzzer (BCM2) در دیتابیس</span>
+                <span class="text-sm">نمایش ستون‌های Indicator و Buzzer (BCM2) در تاریخچه</span>
             </label>
             <div id="extraSignalsStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
         </div>
@@ -685,11 +689,11 @@
                     extraSignalsToggle.checked = serverVal;
                     if (statusEl) {
                         if (d.persisted === false) {
-                            statusEl.textContent = '⚠️ فقط برای همین اجرای سرور فعال شد؛ روی دیسک ذخیره نشد (دسترسی نوشتن کنار برنامه را بررسی کنید).';
+                            statusEl.textContent = '⚠️ این تنظیم فقط برای همین اجرای سرور فعال شد؛ روی دیسک ذخیره نشد (دسترسی نوشتن کنار برنامه را بررسی کنید).';
                         } else {
                             statusEl.textContent = serverVal
-                                ? '✅ از این پس در دیتابیس ذخیره می‌شوند.'
-                                : '✅ ذخیره‌سازی خاموش شد؛ دیتابیس تغییری نمی‌کند.';
+                                ? '✅ از این پس دو ستون Indicator/Buzzer در تاریخچه نمایش داده می‌شوند.'
+                                : '✅ نمایش خاموش شد؛ تاریخچه به فرمت قبلی برمی‌گردد (داده‌ها در دیتابیس دست‌نخورده باقی می‌مانند).';
                         }
                     }
                 } else {

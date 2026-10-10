@@ -153,8 +153,10 @@
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">زمان ثبت (TimeStamp)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Cycle</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Attempts</th>
+                            {% if show_indicator_buzzer %}
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Indicator <span class="normal-case text-slate-600">(BCM2)</span></th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Buzzer <span class="normal-case text-slate-600">(BCM2)</span></th>
+                            {% endif %}
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800">
@@ -228,6 +230,7 @@
                                 {% endif %}
                             </td>
 
+                            {% if show_indicator_buzzer %}
                             <td class="p-5 text-center">
                                 {% set ind = r.indicator if (r.indicator is defined and r.indicator is not none) else none %}
                                 {% if ind is none %}
@@ -265,12 +268,13 @@
                                 </div>
                                 {% endif %}
                             </td>
+                            {% endif %}
                         </tr>
                         {% endfor %}
                         
                         {% if not readings %}
                         <tr>
-                            <td colspan="11" class="p-24 text-center">
+                            <td colspan="{{ 11 if show_indicator_buzzer else 9 }}" class="p-24 text-center">
                                 <div class="flex flex-col items-center opacity-30">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-20 w-20 mb-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />

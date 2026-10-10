@@ -455,8 +455,11 @@ try:
     check(_row is not None and _row.cycle_attempt == 2,
           f"[app.py/داینامیک] cycle_attempt=2 درست در دیتابیس ذخیره شد (ردیف={_row.cycle_attempt if _row else None})")
 
-    # ۲پ) Indicator=/Buzzer=: باید همیشه پارس شوند، ولی فقط وقتی تیک
-    # تنظیمات «ذخیره‌ی Indicator/Buzzer» روشن است در دیتابیس نوشته شوند
+    # ۲پ) Indicator=/Buzzer=: باید همیشه پارس و همیشه در دیتابیس ذخیره شوند
+    # (ESP32 همیشه می‌فرستد و ESP8266 همیشه رله می‌کند — داده‌ای که از
+    # سخت‌افزار می‌رسد دور ریخته نمی‌شود). تیک تنظیماتِ «ذخیره‌ی
+    # Indicator/Buzzer» فقط نمایش این دو ستون در صفحه‌ی تاریخچه را کنترل
+    # می‌کند، نه ذخیره‌سازی را.
     _rec_ind = ("NUM=99006,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
                 "Temp=21.00,Humidity=40.00,Date=2026-09-30,Time=10:16:00,"
                 "cycle=1,Indicator=OK,Buzzer=NOK")
@@ -467,16 +470,17 @@ try:
 
     _orig_extra_cfg = dict(flask_app.extra_signals_config)
     try:
-        # تیک خاموش (پیش‌فرض): باید discard شود (None در دیتابیس بماند)
+        # تیک خاموش (پیش‌فرض نمایش): باز هم باید در دیتابیس ذخیره شود —
+        # تیک فقط نمایشِ ستون‌ها در تاریخچه را کنترل می‌کند، نه ذخیره‌سازی
         flask_app.extra_signals_config['save_indicator_buzzer'] = False
         _sent.clear()
         flask_app.handle_serial_line(_rec_ind)
         with flask_app.app.app_context():
             _row_off = flask_app.MasterReading.query.filter_by(num_value=99006).first()
-        check(_row_off is not None and _row_off.indicator is None and _row_off.buzzer is None,
-              f"[app.py/داینامیک] تیک خاموش -> Indicator/Buzzer در DB ذخیره نشدند (indicator={_row_off.indicator if _row_off else '?'}, buzzer={_row_off.buzzer if _row_off else '?'})")
+        check(_row_off is not None and _row_off.indicator is True and _row_off.buzzer is False,
+              f"[app.py/داینامیک] تیک خاموش -> Indicator/Buzzer باز هم در DB ذخیره شدند (indicator={_row_off.indicator if _row_off else '?'}, buzzer={_row_off.buzzer if _row_off else '?'})")
 
-        # تیک روشن: باید در دیتابیس نوشته شود
+        # تیک روشن: باید باز هم در دیتابیس نوشته شود (رفتار ذخیره‌سازی ثابت است)
         flask_app.extra_signals_config['save_indicator_buzzer'] = True
         _rec_ind2 = _rec_ind.replace("NUM=99006", "NUM=99007")
         _sent.clear()
@@ -484,9 +488,10 @@ try:
         with flask_app.app.app_context():
             _row_on = flask_app.MasterReading.query.filter_by(num_value=99007).first()
         check(_row_on is not None and _row_on.indicator is True and _row_on.buzzer is False,
-              f"[app.py/داینامیک] تیک روشن -> Indicator/Buzzer در DB ذخیره شدند (indicator={_row_on.indicator if _row_on else '?'}, buzzer={_row_on.buzzer if _row_on else '?'})")
+              f"[app.py/داینامیک] تیک روشن -> Indicator/Buzzer هم در DB ذخیره شدند (indicator={_row_on.indicator if _row_on else '?'}, buzzer={_row_on.buzzer if _row_on else '?'})")
     finally:
         flask_app.extra_signals_config.update(_orig_extra_cfg)
+
 
     # ۲ت) سازگاری عقب‌رو: خط بدون Indicator=/Buzzer= (فریمور قبلی) هم باید
     # بدون خطا پارس و ذخیره شود (indicator/buzzer باید None بمانند)

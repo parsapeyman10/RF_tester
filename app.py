@@ -481,20 +481,22 @@ def save_sensor_data(data_source, raw_line=None):
             except (TypeError, ValueError):
                 cycle_attempt_val = None
 
-        # دو سیگنال دیجیتال اضافی (Indicator=GPIO34, Buzzer=GPIO35). ESP32
-        # همیشه این دو را می‌فرستد؛ اما فقط اگر تیک تنظیمات «ذخیره‌ی
-        # Indicator/Buzzer» روشن باشد در دیتابیس نوشته می‌شوند — در غیر
-        # این‌صورت همین‌جا discard می‌شوند تا شِمای/رفتار فعلی دیتابیس برای
-        # کاربرانی که این تیک را نمی‌خواهند، دست‌نخورده بماند.
+        # دو سیگنال دیجیتال اضافی (Indicator=GPIO34, Buzzer=GPIO35) — دو
+        # فانکشنِ مربوط به BCM2. ESP32 همیشه این دو را می‌فرستد و ESP8266
+        # همیشه آن‌ها را به سرور می‌رساند؛ پس همیشه در دیتابیس هم ذخیره
+        # می‌شوند (داده‌ای که از سخت‌افزار می‌رسد دور ریخته نمی‌شود). تیک
+        # تنظیماتِ «ذخیره‌ی Indicator/Buzzer» فقط تصمیم می‌گیرد این دو
+        # ستون در صفحه‌ی تاریخچه نمایش داده شوند یا نه — کاملاً یک تنظیمِ
+        # نمایشی سمت سرور است، نه تصمیم‌گیری درباره‌ی ذخیره‌سازی.
         indicator_val = None
         buzzer_val = None
-        if extra_signals_config.get('save_indicator_buzzer'):
-            ind_raw = data_source.get('indicator')
-            buz_raw = data_source.get('buzzer')
-            if isinstance(ind_raw, bool):
-                indicator_val = ind_raw
-            if isinstance(buz_raw, bool):
-                buzzer_val = buz_raw
+        ind_raw = data_source.get('indicator')
+        buz_raw = data_source.get('buzzer')
+        if isinstance(ind_raw, bool):
+            indicator_val = ind_raw
+        if isinstance(buz_raw, bool):
+            buzzer_val = buz_raw
+
 
         # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
         # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
@@ -1095,12 +1097,13 @@ def upload_dat_page():
                             cyc_val = max(1, min(3, int(cyc_raw)))
 
                     # Indicator (GPIO34) / Buzzer (GPIO35): فقط فایل‌های فرمت
-                    # فعلی (۲۸ بایتی) این دو بولی آخر را دارند. ذخیره در
-                    # دیتابیس هم مثل مسیر سریال، فقط اگر تیک تنظیمات روشن
-                    # باشد انجام می‌شود؛ در غیر این‌صورت discard می‌شود.
+                    # فعلی (۲۸ بایتی) این دو بولی آخر را دارند. مثل مسیر
+                    # سریال، همیشه در دیتابیس ذخیره می‌شوند (داده‌ای که از
+                    # سخت‌افزار می‌رسد دور ریخته نمی‌شود)؛ تیک تنظیمات فقط
+                    # نمایش این دو ستون در تاریخچه را کنترل می‌کند.
                     indicator_val = None
                     buzzer_val = None
-                    if has_extra_signals and extra_signals_config.get('save_indicator_buzzer'):
+                    if has_extra_signals:
                         indicator_val = bool(data[14])
                         buzzer_val = bool(data[15])
 
@@ -1238,7 +1241,8 @@ def history():
 
     return render_template('history.html', readings=readings, label=label,
                            dates=available_dates, current_date=target_date,
-                           bcm_results=build_bcm_results, cycle_ok=compute_cycle_ok)
+                           bcm_results=build_bcm_results, cycle_ok=compute_cycle_ok,
+                           show_indicator_buzzer=bool(extra_signals_config.get('save_indicator_buzzer')))
 
 @app.route('/submit_form', methods=['POST'])
 def submit_form():
@@ -1827,8 +1831,8 @@ def export_excel():
     for r in recs:
         res = build_bcm_results(r.nbcm_selected)
         cycle_val = r.cycle if r.cycle is not None else (res['BCM1']['ok'] and res['BCM2']['ok'])
-        # Indicator/Buzzer فقط وقتی تیک تنظیمات روشن بوده مقدار دارند؛
-        # در غیر این‌صورت None هستند و به‌صورت سلول خالی نوشته می‌شوند.
+        # Indicator/Buzzer همیشه ذخیره می‌شوند؛ فقط رکوردهای خیلی قدیمی
+        # (قبل از اضافه شدن این دو سیگنال) مقدار None خواهند داشت.
         indicator_cell = '' if r.indicator is None else ('OK' if r.indicator else 'NOK')
         buzzer_cell = '' if r.buzzer is None else ('OK' if r.buzzer else 'NOK')
         cw.writerow([

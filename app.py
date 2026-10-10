@@ -699,11 +699,17 @@ def load_extra_signals_config():
 
 
 def save_extra_signals_config():
+    """تلاش برای نوشتن تنظیمات روی دیسک. True/False برمی‌گرداند تا
+    endpoint بتواند به کاربر خبر بدهد که آیا تنظیم فقط برای همین اجرای
+    سرور فعال شد یا واقعاً روی دیسک هم ماندگار گشت (مثلاً اگر پوشه‌ی
+    کنار exe قابل‌نوشتن نباشد، حداقل در حافظه درست باقی می‌ماند)."""
     try:
         with open(EXTRA_SIGNALS_CONFIG_FILE, 'w', encoding='utf-8') as fh:
             json.dump(extra_signals_config, fh)
+        return True
     except Exception as exc:
         print(f"[CFG] ذخیره‌ی تنظیمات Indicator/Buzzer ناموفق: {exc}")
+        return False
 
 
 # =====================================================================
@@ -1762,9 +1768,14 @@ def set_cycle_config():
 @app.route('/api/extra_signals_config')
 def get_extra_signals_config():
     """وضعیت فعلی تیک «ذخیره‌ی Indicator/Buzzer در دیتابیس» (برای فرم تنظیمات داشبورد)."""
-    return jsonify({
+    resp = jsonify({
         'save_indicator_buzzer': extra_signals_config['save_indicator_buzzer'],
     })
+    # تا هیچ مرورگر/پراکسی‌ای این پاسخ را کش نکند و همیشه تازه‌ترین وضعیتِ
+    # واقعیِ سرور خوانده شود (جلوگیری از هر گونه «پرش» ظاهریِ تیک به دلیل
+    # داده‌ی کهنه‌ی کش‌شده).
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
 
 
 @app.route('/api/set_extra_signals_config', methods=['POST'])
@@ -1784,10 +1795,17 @@ def set_extra_signals_config():
         enabled = str(raw).strip().lower() in ('1', 'true', 'on', 'yes')
 
     extra_signals_config['save_indicator_buzzer'] = enabled
-    save_extra_signals_config()
-    print(f"[CFG] ذخیره‌ی Indicator/Buzzer در دیتابیس: {'فعال' if enabled else 'غیرفعال'}")
+    persisted = save_extra_signals_config()
+    print(f"[CFG] ذخیره‌ی Indicator/Buzzer در دیتابیس: {'فعال' if enabled else 'غیرفعال'}"
+          f"{' (⚠️ روی دیسک ذخیره نشد)' if not persisted else ''}")
 
-    return jsonify({'status': 'success', 'extra_signals_config': extra_signals_config})
+    resp = jsonify({
+        'status': 'success',
+        'extra_signals_config': extra_signals_config,
+        'persisted': persisted,
+    })
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
 
 
 @app.route('/export_excel')

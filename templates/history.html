@@ -148,6 +148,8 @@
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">زمان ثبت (TimeStamp)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Cycle</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Attempts</th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Indicator</th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Buzzer</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800">
@@ -214,12 +216,34 @@
                                 <span class="text-slate-600 text-xs">—</span>
                                 {% endif %}
                             </td>
+
+                            <td class="p-5 text-center">
+                                {% set ind = r.indicator if (r.indicator is defined and r.indicator is not none) else none %}
+                                {% if ind is none %}
+                                <span class="text-slate-600 text-xs">—</span>
+                                {% elif ind %}
+                                <span class="bg-green-500/10 text-green-400 px-3 py-1 rounded-lg font-bold border border-green-500/20 text-xs">OK</span>
+                                {% else %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/20 text-xs">NOK</span>
+                                {% endif %}
+                            </td>
+
+                            <td class="p-5 text-center">
+                                {% set buz = r.buzzer if (r.buzzer is defined and r.buzzer is not none) else none %}
+                                {% if buz is none %}
+                                <span class="text-slate-600 text-xs">—</span>
+                                {% elif buz %}
+                                <span class="bg-green-500/10 text-green-400 px-3 py-1 rounded-lg font-bold border border-green-500/20 text-xs">OK</span>
+                                {% else %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/20 text-xs">NOK</span>
+                                {% endif %}
+                            </td>
                         </tr>
                         {% endfor %}
                         
                         {% if not readings %}
                         <tr>
-                            <td colspan="9" class="p-24 text-center">
+                            <td colspan="11" class="p-24 text-center">
                                 <div class="flex flex-col items-center opacity-30">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-20 w-20 mb-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />

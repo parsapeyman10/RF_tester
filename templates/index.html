@@ -283,6 +283,24 @@
                 <div id="cycleConfigStatus" class="mt-2 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
             </div>
         </div>
+
+        <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-amber-500 mt-6">
+            <h3 class="text-xl font-bold mb-2 flex items-center gap-3">
+                <span>🔔</span> سیگنال‌های Indicator / Buzzer
+            </h3>
+            <p class="text-xs text-slate-500 mb-6">
+                ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
+                هر رکورد می‌فرستد — این تنظیم در فرم‌ور سوییچی ندارد. این تیک کاملاً
+                سمت سرور است: وقتی خاموش باشد (پیش‌فرض)، این دو مقدار فقط دریافت و
+                دور ریخته می‌شوند و دیتابیس دقیقاً مثل الان باقی می‌ماند؛ وقتی روشن
+                شود، از همان لحظه در دیتابیس ذخیره می‌شوند.
+            </p>
+            <label class="flex items-center gap-3 p-4 bg-slate-900/50 rounded-xl border border-slate-700 cursor-pointer select-none">
+                <input type="checkbox" id="saveIndicatorBuzzerToggle" class="w-5 h-5 accent-amber-500">
+                <span class="text-sm">ذخیره‌ی Indicator و Buzzer در دیتابیس</span>
+            </label>
+            <div id="extraSignalsStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
+        </div>
     </section>
 
     <section id="view-manual" class="view-section space-y-4">
@@ -567,6 +585,42 @@
         };
     }
     loadCycleConfig();
+
+    // ================= تیک «ذخیره‌ی Indicator/Buzzer در دیتابیس» =================
+    async function loadExtraSignalsConfig() {
+        try {
+            const res = await fetch('/api/extra_signals_config');
+            const d = await res.json();
+            const toggle = document.getElementById('saveIndicatorBuzzerToggle');
+            if (toggle) toggle.checked = !!d.save_indicator_buzzer;
+        } catch (e) { console.error("Extra Signals Config Load Error:", e); }
+    }
+
+    const extraSignalsToggle = document.getElementById('saveIndicatorBuzzerToggle');
+    if (extraSignalsToggle) {
+        extraSignalsToggle.onchange = async () => {
+            const statusEl = document.getElementById('extraSignalsStatus');
+            const enabled = extraSignalsToggle.checked;
+            try {
+                const res = await fetch('/api/set_extra_signals_config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({save_indicator_buzzer: enabled})
+                });
+                const d = await res.json();
+                if (statusEl) {
+                    statusEl.textContent = res.ok
+                        ? (enabled ? '✅ از این پس در دیتابیس ذخیره می‌شوند.' : '✅ ذخیره‌سازی خاموش شد؛ دیتابیس تغییری نمی‌کند.')
+                        : '❌ ' + (d.message || 'خطای نامشخص');
+                }
+            } catch (e) {
+                console.error("Extra Signals Config Save Error:", e);
+                if (statusEl) statusEl.textContent = '❌ ارتباط با سرور برقرار نشد.';
+                extraSignalsToggle.checked = !enabled;  // بازگردانی وضعیت قبلی
+            }
+        };
+    }
+    loadExtraSignalsConfig();
 
     // ================= آمار تجمعی BCM1 / BCM2 (باز و بسته، کار کرده/نکرده) =================
     async function updateBcmStats() {

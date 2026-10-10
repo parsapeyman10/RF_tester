@@ -79,6 +79,27 @@ const uint8_t FEEDBACK_PINS[PHASE_COUNT][DEVICE_COUNT] = {
 // اگر false شود، دیدن یکی از دو فاز کافی است.
 const bool REQUIRE_BOTH_FEEDBACKS = true;
 
+// -----------------------------------------------------------------------------
+//  دو سیگنال دیجیتال اضافی (همیشه خوانده و فرستاده می‌شوند، بدون سوییچ
+//  سمت فرم‌ور؛ تصمیم «ذخیره در دیتابیس یا نه» کاملاً سمت سرور است):
+//    GPIO34 = Indicator : سیگنال سطح (high-side)، دقیقاً مثل ۴ سیگنال
+//                         BCM بالا با همان الگوریتم debounce خوانده می‌شود.
+//    GPIO35 = Buzzer    : پالس مربعی تأییدیه‌ی بازر (۵۰۰هرتز..۴کیلوهرتز)؛
+//                         چون فرکانسش بسیار بالاتر از پولینگ ۱۰ میلی‌ثانیه‌ای
+//                         TaskDigitalRead است، با وقفه‌ی سخت‌افزاری (CHANGE)
+//                         لبه‌شماری می‌شود.
+//  هر دو پایه روی ESP32 «ورودی‌خالص» هستند (بدون پول‌آپ/پول‌داون داخلی)؛
+//  مقاومت pull مناسب باید روی سخت‌افزار بیرونی تعبیه شده باشد.
+// -----------------------------------------------------------------------------
+const uint8_t PIN_INDICATOR = 34;
+const uint8_t PIN_BUZZER = 35;
+// حداقل تعداد لبه (rising+falling) طی یک پنجره‌ی مانیتورینگ (FEEDBACK_WINDOW_MS)
+// که برای تایید «بازر فعال بود» لازم است. در پایین‌ترین فرکانس مجاز (۵۰۰هرتز)
+// طی ۳ ثانیه، حدوداً ۳۰۰۰ لبه انتظار می‌رود؛ آستانه را خیلی پایین‌تر از این
+// می‌گذاریم تا حتی یک فعال‌سازی کوتاه (کسری از پنجره) هم به اندازه‌ی کافی
+// نویز را از سیگنال واقعی تفکیک کند.
+const uint32_t BUZZER_EDGE_THRESHOLD = 10;
+
 // --- زمان‌بندی تست هر رله ---
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
 // RELAY_RETRY_GAP_MS از سرور قابل تغییر است (دستور CFG از طریق ESP8266)؛
@@ -319,12 +340,12 @@ private:
 // =====================================================================
 //                         DATA STRUCTURE
 // ساختار قبلاً دقیقاً با STRUCT_FORMAT = '<iff????iBBBBB' (۲۵ بایت) در
-// app.py سازگار بود. یک فیلد جدید CycleAttempt در انتها اضافه شده است
-// (تعداد تلاش‌هایی که این سیکل طول کشید: ۱، ۲ یا ۳) که سایز را به ۲۶
-// بایت می‌رساند؛ app.py هم باید STRUCT_FORMAT='<iff????iBBBBBB' (۲۶
-// بایت) بخواند. فایل‌های .dat قدیمی (۲۵ بایتی، قبل از این تغییر) با
-// فرمت قدیمی هنوز قابل‌خواندن‌اند چون app.py بر اساس باقیمانده‌ی طول
-// فایل بر ۲۵ و ۲۶ فرمت را تشخیص می‌دهد.
+// app.py سازگار بود. یک فیلد CycleAttempt به آن اضافه شد (۲۶ بایت)، و
+// حالا دو فیلد بولی جدید Indicator و Buzzer هم به انتها اضافه شده‌اند
+// (سایز نهایی ۲۸ بایت): app.py باید STRUCT_FORMAT_V3='<iff????iBBBBBB??'
+// (۲۸ بایت) بخواند. فایل‌های .dat قدیمی‌تر (۲۵ یا ۲۶ بایتی) هنوز
+// قابل‌خواندن‌اند چون app.py بر اساس باقیمانده‌ی طول فایل بر ۲۵/۲۶/۲۸
+// فرمت را تشخیص می‌دهد.
 // =====================================================================
 #pragma pack(1)
 struct WifiData {
@@ -338,8 +359,19 @@ struct WifiData {
   // تعداد تلاش‌هایی که runTestCycle() طول کشید تا هر دو BCM تایید شوند
   // (یا بعد از ۳ تلاش ناموفق ناقص باقی بماند): مقدار ۱، ۲ یا ۳.
   uint8_t CycleAttempt;
+  // GPIO34 (Indicator, سیگنال high-side): مثل ۴ سیگنال BCM در همان
+  // پنجره‌ی مانیتورینگِ هر فاز خوانده و debounce می‌شود (PULSE_CONFIRM_MS)،
+  // و مثل got[][] در کل سیکل (همه‌ی تلاش‌ها) تجمعی باقی می‌ماند.
+  bool Indicator;
+  // GPIO35 (Buzzer, پالس مربعی ۵۰۰Hz..4kHz): چون فرکانسش خیلی بالاتر از
+  // پولینگ ۱۰ میلی‌ثانیه‌ای TaskDigitalRead است، با وقفه‌ی سخت‌افزاری
+  // (attachInterrupt) شمارش لبه می‌شود؛ اگر طی یک پنجره‌ی مانیتورینگ به
+  // اندازه‌ی کافی لبه دیده شود (BUZZER_EDGE_THRESHOLD)، همان پنجره تایید
+  // می‌شود؛ مثل Indicator در کل سیکل تجمعی باقی می‌ماند.
+  bool Buzzer;
 };
 #pragma pack()
+
 
 enum WiFiOperationMode {
   MODE_CLIENT_UPLOAD = 0,  // حالت نرمال: اتصال به گیرنده و آپلود
@@ -408,6 +440,22 @@ volatile WifiData globalSystemState;
 
 // نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ:  fbSeen[فاز][دستگاه]
 volatile bool fbSeen[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
+
+// نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ برای Indicator (GPIO34)؛ توسط
+// TaskDigitalRead با همان الگوریتم debounce چهار سیگنال BCM پر می‌شود.
+volatile bool fbIndicatorSeen = false;
+
+// شمارنده‌ی لبه‌های Buzzer (GPIO35) طی پنجره‌ی مانیتورینگِ جاری؛ توسط
+// وقفه‌ی سخت‌افزاری onBuzzerEdge() افزایش می‌یابد، در ابتدای هر پنجره
+// (beginFeedbackWindow) صفر می‌شود.
+volatile uint32_t buzzerEdgeCount = 0;
+
+// وقفه‌ی GPIO35: چون پریود پالس بازر می‌تواند تا ۲۵۰ میکروثانیه (۴کیلوهرتز)
+// کوتاه باشد، پولینگ ۱۰ میلی‌ثانیه‌ایِ TaskDigitalRead قادر به دیدن آن
+// نیست؛ به همین دلیل لبه‌شماری با وقفه‌ی سخت‌افزاری CHANGE انجام می‌شود.
+void IRAM_ATTR onBuzzerEdge() {
+  buzzerEdgeCount++;
+}
 
 // پرچم‌های پورتال تنظیم ساعت
 volatile bool portalTimeSet = false;
@@ -558,6 +606,13 @@ void setup() {
       pinMode(FEEDBACK_PINS[p][d], INPUT_PULLDOWN);
     }
   }
+
+  // GPIO34/35 روی ESP32 «ورودی‌خالص» هستند و پول‌آپ/پول‌داون داخلی ندارند؛
+  // برخلاف FEEDBACK_PINS بالا با INPUT ساده تنظیم می‌شوند (مقاومت pull باید
+  // بیرونی/روی سخت‌افزار باشد).
+  pinMode(PIN_INDICATOR, INPUT);
+  pinMode(PIN_BUZZER, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUZZER), onBuzzerEdge, CHANGE);
 
   xEventGroupSetBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE);
 
@@ -1564,6 +1619,8 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 static void beginFeedbackWindow() {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) fbSeen[p][d] = false;
+  fbIndicatorSeen = false;
+  buzzerEdgeCount = 0;  // شمارش لبه‌ی بازر برای همین پنجره از صفر شروع می‌شود
 
   // باگ: اگر بیت STOP از پنجره‌ی قبلی باقی مانده باشد، تسک خواندن به‌محض
   // شروع، پنجره را می‌بندد و هیچ پالسی دیده نمی‌شود (همه‌چیز NOK می‌شود).
@@ -1582,13 +1639,14 @@ static void endFeedbackWindow() {
  * نتیجه در got[phase][device] جمع می‌شود (تجمعی است و پاک نمی‌شود).
  */
 static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT],
+                     bool *gotIndicator = nullptr, bool *gotBuzzer = nullptr,
                      uint32_t *triggeredAtMs = nullptr) {
   uint8_t pin = RELAY_PINS[phase];
 
   digitalWrite(pin, HIGH);                          // 1) تحریک رله
   if (triggeredAtMs) *triggeredAtMs = millis();     // لحظه‌ی دقیق تریگ
   vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //    پایدار شدن کنتاکت
-  beginFeedbackWindow();                            // 2) مانیتورینگ فعال
+  beginFeedbackWindow();                            // 2) مانیتورینگ فعال (fbSeen/Indicator/Buzzer صفر می‌شوند)
   vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3) زمان مجاز
   endFeedbackWindow();                              // 4) مانیتورینگ غیرفعال
   digitalWrite(pin, LOW);                           // 5) قطع رله
@@ -1596,6 +1654,12 @@ static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT],
   for (int d = 0; d < DEVICE_COUNT; d++) {
     if (fbSeen[phase][d]) got[phase][d] = true;
   }
+
+  // Indicator (GPIO34) و Buzzer (GPIO35): دقیقاً در همین پنجره‌ی مانیتورینگ
+  // (هر دو فاز OPEN و CLOSE، هر تلاش) سنجیده می‌شوند و مثل got[][] در کل
+  // سیکل تجمعی باقی می‌مانند (هیچ‌وقت در طول سیکل به false برنمی‌گردند).
+  if (fbIndicatorSeen && gotIndicator) *gotIndicator = true;
+  if (buzzerEdgeCount >= BUZZER_EDGE_THRESHOLD && gotBuzzer) *gotBuzzer = true;
 
   DEBUG_PRINTF("[PHASE %s] %s:%s  %s:%s\n",
                PHASE_NAMES[phase],
@@ -1635,10 +1699,16 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
  * outAttempt: شماره‌ی تلاشی که روی آن متوقف شد (۱ اگر بار اول موفق شد،
  * ۲ اگر بار دوم، یا ۳ اگر حتی بعد از ۳ تلاش هم ناقص ماند). این همان
  * مقداری است که در پروتکل به‌عنوان «cycle=» برای سرور فرستاده می‌شود.
+ *
+ * outIndicator/outBuzzer: نتیجه‌ی تجمعی GPIO34/GPIO35 طی کل سیکل (همه‌ی
+ * فازها و همه‌ی تلاش‌ها)؛ دقیقاً مثل got[][] هرگز در طول سیکل ریست نمی‌شوند.
  */
-static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttempt) {
+static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttempt,
+                          bool *outIndicator = nullptr, bool *outBuzzer = nullptr) {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
+  bool gotIndicator = false;
+  bool gotBuzzer = false;
 
   uint8_t usedAttempt = 1;
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
@@ -1649,7 +1719,7 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttemp
     // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
     for (int phase = 0; phase < PHASE_COUNT; phase++) {
       uint32_t triggeredAt = 0;
-      runPhase(phase, got, &triggeredAt);
+      runPhase(phase, got, &gotIndicator, &gotBuzzer, &triggeredAt);
 
       // فاصله فقط بین دو فاز معنی دارد، نه بعد از فاز آخر
       if (phase < PHASE_COUNT - 1) {
@@ -1687,6 +1757,8 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttemp
   }
 
   if (outAttempt) *outAttempt = usedAttempt;
+  if (outIndicator) *outIndicator = gotIndicator;
+  if (outBuzzer) *outBuzzer = gotBuzzer;
 }
 
 void TaskRelayControl(void *pv) {
@@ -1716,7 +1788,9 @@ void TaskRelayControl(void *pv) {
     // نتیجه‌ی تفکیکی: برای هر دستگاه، هم «باز شد» و هم «بسته شد»
     bool got[PHASE_COUNT][DEVICE_COUNT];
     uint8_t cycleAttemptUsed = 1;
-    runTestCycle(got, &cycleAttemptUsed);
+    bool indicatorOk = false;
+    bool buzzerOk = false;
+    runTestCycle(got, &cycleAttemptUsed, &indicatorOk, &buzzerOk);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -1734,6 +1808,8 @@ void TaskRelayControl(void *pv) {
       globalSystemState.BCM2_OPEN = got[PHASE_OPEN][1];
       globalSystemState.BCM2_CLOSE = got[PHASE_CLOSE][1];
       globalSystemState.CycleAttempt = cycleAttemptUsed;
+      globalSystemState.Indicator = indicatorOk;
+      globalSystemState.Buzzer = buzzerOk;
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
@@ -1796,12 +1872,17 @@ void TaskRelayControl(void *pv) {
 //        TASK: خواندن فیدبک‌های دیجیتال در طول پنجره‌ی مانیتورینگ
 // =====================================================================
 void TaskDigitalRead(void *pv) {
-  // هر چهار پین فیدبک هم‌زمان مانیتور می‌شوند (هر دو BCM در آنِ واحد)
-  const int pinCount = PHASE_COUNT * DEVICE_COUNT;
-  uint8_t pins[PHASE_COUNT * DEVICE_COUNT];
+  // هر چهار پین فیدبک هم‌زمان مانیتور می‌شوند (هر دو BCM در آنِ واحد)، به‌علاوه
+  // یک پین پنجم: PIN_INDICATOR (GPIO34)، که دقیقاً با همان الگوریتم debounce
+  // (PULSE_CONFIRM_MS) خوانده می‌شود — آخرین اندیس آرایه‌ی pins[].
+  const int FB_PIN_COUNT = PHASE_COUNT * DEVICE_COUNT;
+  const int pinCount = FB_PIN_COUNT + 1;  // +1 برای Indicator
+  const int INDICATOR_IDX = FB_PIN_COUNT;
+  uint8_t pins[FB_PIN_COUNT + 1];
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++)
       pins[p * DEVICE_COUNT + d] = FEEDBACK_PINS[p][d];
+  pins[INDICATOR_IDX] = PIN_INDICATOR;
 
   bool lastState[8];
   uint32_t highSince[8];
@@ -1843,6 +1924,7 @@ void TaskDigitalRead(void *pv) {
     for (int p = 0; p < PHASE_COUNT; p++)
       for (int d = 0; d < DEVICE_COUNT; d++)
         if (confirmed[p * DEVICE_COUNT + d]) fbSeen[p][d] = true;
+    if (confirmed[INDICATOR_IDX]) fbIndicatorSeen = true;
 
     xEventGroupSetBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE);
   }
@@ -2272,7 +2354,7 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
   snprintf(out, outSize,
            "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
            "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
-           "cycle=%u",
+           "cycle=%u,Indicator=%s,Buzzer=%s",
            d.NUM,
            d.BCM1_OPEN ? "OK" : "NOK",
            d.BCM1_CLOSE ? "OK" : "NOK",
@@ -2281,7 +2363,9 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
            d.Temp, d.Hum,
            d.Year, d.Month, d.Day,
            d.Hour, d.Minute, d.Second,
-           (unsigned)(d.CycleAttempt ? d.CycleAttempt : 1));
+           (unsigned)(d.CycleAttempt ? d.CycleAttempt : 1),
+           d.Indicator ? "OK" : "NOK",
+           d.Buzzer ? "OK" : "NOK");
 }
 
 void sendRecord(WiFiClient &cl, const WifiData &d) {

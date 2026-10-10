@@ -187,6 +187,14 @@ class MasterReading(db.Model):
     #   ۱ = بار اول موفق شد   ۲ = بار دوم موفق شد   ۳ = بعد از ۳ تلاش هم تمام شد
     # می‌تواند None باشد (رکوردهای قدیمی/فریمورهای قدیمی که این فیلد را نمی‌فرستند)
     cycle_attempt = db.Column(db.Integer, nullable=True)
+    # دو سیگنال دیجیتال اضافی (GPIO34=Indicator بر پایه‌ی سطح، GPIO35=Buzzer
+    # بر پایه‌ی شمارش لبه‌ی پالس مربعی). ESP32 همیشه این دو را می‌خواند و
+    # می‌فرستد؛ اما سمت سرور فقط وقتی تیک تنظیمات «ذخیره‌ی Indicator/Buzzer»
+    # روشن باشد در این دو ستون نوشته می‌شوند؛ در غیر این‌صورت مقدار پارس
+    # می‌شود ولی در دیتابیس ذخیره نمی‌گردد (None می‌ماند) تا رفتار/شِمای
+    # فعلی دیتابیس دست‌نخورده باقی بماند.
+    indicator = db.Column(db.Boolean, nullable=True)
+    buzzer = db.Column(db.Boolean, nullable=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -473,6 +481,21 @@ def save_sensor_data(data_source, raw_line=None):
             except (TypeError, ValueError):
                 cycle_attempt_val = None
 
+        # دو سیگنال دیجیتال اضافی (Indicator=GPIO34, Buzzer=GPIO35). ESP32
+        # همیشه این دو را می‌فرستد؛ اما فقط اگر تیک تنظیمات «ذخیره‌ی
+        # Indicator/Buzzer» روشن باشد در دیتابیس نوشته می‌شوند — در غیر
+        # این‌صورت همین‌جا discard می‌شوند تا شِمای/رفتار فعلی دیتابیس برای
+        # کاربرانی که این تیک را نمی‌خواهند، دست‌نخورده بماند.
+        indicator_val = None
+        buzzer_val = None
+        if extra_signals_config.get('save_indicator_buzzer'):
+            ind_raw = data_source.get('indicator')
+            buz_raw = data_source.get('buzzer')
+            if isinstance(ind_raw, bool):
+                indicator_val = ind_raw
+            if isinstance(buz_raw, bool):
+                buzzer_val = buz_raw
+
         # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
         # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
         # «زمان ثبت» باید همان ساعت سرور (کامپیوتر) در لحظه‌ی ذخیره باشد.
@@ -503,7 +526,9 @@ def save_sensor_data(data_source, raw_line=None):
             timestamp=real_timestamp,  # زمان ثبت = ساعت سرور در لحظه‌ی ذخیره
             formatted_log=log_str,
             cycle=compute_cycle_ok(nbcm_str),
-            cycle_attempt=cycle_attempt_val
+            cycle_attempt=cycle_attempt_val,
+            indicator=indicator_val,
+            buzzer=buzzer_val
         )
         db.session.add(master_entry)
         try:
@@ -645,6 +670,43 @@ def build_cfg_line():
 
 
 # =====================================================================
+#  تیک تنظیماتِ «ذخیره‌ی Indicator/Buzzer در دیتابیس»
+#
+#  ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
+#  هر رکورد می‌فرستد (هیچ سوییچی سمت فرم‌ور نیست). این تنظیم کاملاً
+#  سمت سرور است: وقتی خاموش باشد (پیش‌فرض)، این دو فیلد پارس می‌شوند ولی
+#  در دیتابیس نوشته نمی‌شوند (رفتار/شِمای فعلی دست‌نخورده می‌ماند)؛ وقتی
+#  روشن شود، از همان لحظه به بعد در دو ستون indicator/buzzer ذخیره می‌شوند.
+# =====================================================================
+EXTRA_SIGNALS_CONFIG_FILE = os.path.join(DATA_DIR, 'extra_signals_config.json')
+
+extra_signals_config = {
+    'save_indicator_buzzer': False,
+}
+
+
+def load_extra_signals_config():
+    global extra_signals_config
+    if not os.path.exists(EXTRA_SIGNALS_CONFIG_FILE):
+        return
+    try:
+        with open(EXTRA_SIGNALS_CONFIG_FILE, encoding='utf-8') as fh:
+            saved = json.load(fh)
+        extra_signals_config['save_indicator_buzzer'] = bool(saved.get('save_indicator_buzzer', False))
+        print(f"[CFG] تنظیمات Indicator/Buzzer قبلی بازیابی شد: {extra_signals_config}")
+    except Exception as exc:
+        print(f"[CFG] خواندن تنظیمات Indicator/Buzzer ناموفق: {exc}")
+
+
+def save_extra_signals_config():
+    try:
+        with open(EXTRA_SIGNALS_CONFIG_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(extra_signals_config, fh)
+    except Exception as exc:
+        print(f"[CFG] ذخیره‌ی تنظیمات Indicator/Buzzer ناموفق: {exc}")
+
+
+# =====================================================================
 #  تنظیمات پورت سریال ماندگار می‌شوند
 #  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
 #  می‌رفت و باید دوباره دستی انتخاب می‌شد.
@@ -688,11 +750,17 @@ def load_serial_config():
 # =====================================================================
 _FLOAT_RE = r"-?(?:\d+(?:\.\d+)?|nan|NaN|NAN|inf|Inf|INF)"
 
-#  فیلد انتهایی «,cycle=<1|2|3>» اختیاری است (رله‌ی ESP32 تعداد تلاش‌هایی
-#  که برای تایید هر دو BCM طول کشید را می‌فرستد). اختیاری گذاشته شده تا
-#  خط‌های فریمورهای قدیمی‌تر (قبل از این قابلیت) یا رکوردهای قدیمیِ
-#  stash‌شده در unsaved_records.log هم بدون خطا پارس شوند.
-_CYCLE_SUFFIX_RE = r"(?:,cycle=(?P<cyc>\d+))?"
+#  فیلد انتهایی «,cycle=<1|2|3>[,Indicator=OK/NOK,Buzzer=OK/NOK]» اختیاری
+#  است. cycle به‌تنهایی اختیاری گذاشته شده تا خط‌های فریمورهای قدیمی‌تر
+#  (قبل از این قابلیت) یا رکوردهای قدیمیِ stash‌شده در unsaved_records.log
+#  هم بدون خطا پارس شوند. Indicator/Buzzer (GPIO34/GPIO35) فیلدهای جدیدتری
+#  هستند که فقط همراه با cycle= می‌آیند (فریمورهایی که cycle دارند ولی این
+#  دو را ندارند هم هنوز معتبر پارس می‌شوند — سازگاری رو به عقب).
+_CYCLE_SUFFIX_RE = (
+    r"(?:,cycle=(?P<cyc>\d+)"
+    r"(?:,Indicator=(?P<ind>[A-Za-z0-9]+),Buzzer=(?P<buz>[A-Za-z0-9]+))?"
+    r")?"
+)
 
 INDUSTRIAL_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
@@ -744,6 +812,13 @@ def parse_industrial_line(line):
                 cycle_attempt = max(1, min(3, int(cyc_raw)))
             except (TypeError, ValueError):
                 cycle_attempt = None
+        # Indicator (GPIO34) / Buzzer (GPIO35): اختیاری‌اند (فقط فریمورهای
+        # جدید می‌فرستند)؛ اگر نیامده باشند None می‌مانند — ذخیره یا نه در
+        # دیتابیس را save_sensor_data بر اساس تنظیمات سروری تصمیم می‌گیرد.
+        ind_raw = g.get("ind")
+        buz_raw = g.get("buz")
+        indicator = ind_raw.strip().upper() in TRUE_TOKENS if ind_raw not in (None, "") else None
+        buzzer = buz_raw.strip().upper() in TRUE_TOKENS if buz_raw not in (None, "") else None
         return {
             'num_value': g["num"],
             'nbcm': nbcm,
@@ -752,6 +827,8 @@ def parse_industrial_line(line):
             'date': date_str,
             'time': time_str,
             'cycle_attempt': cycle_attempt,
+            'indicator': indicator,
+            'buzzer': buzzer,
         }
     except Exception as exc:
         print(f"[PARSE_ERR] {exc} :: {line[:120]}")
@@ -913,23 +990,29 @@ def upload_dat_page():
         # فرمت قدیمی (قبل از قابلیت cycle=): ۲۵ بایت، بدون تعداد تلاش
         STRUCT_FORMAT_OLD = '<iff????iBBBBB'
         EXPECTED_SIZE_OLD = struct.calcsize(STRUCT_FORMAT_OLD)   # 25
-        # فرمت جدید: یک بایت اضافه در انتها برای cycle_attempt (۱/۲/۳)
+        # فرمت میانی: یک بایت اضافه در انتها برای cycle_attempt (۱/۲/۳)
         STRUCT_FORMAT_NEW = '<iff????iBBBBBB'
         EXPECTED_SIZE_NEW = struct.calcsize(STRUCT_FORMAT_NEW)   # 26
+        # فرمت فعلی: دو بولی اضافه در انتها برای Indicator (GPIO34) و
+        # Buzzer (GPIO35)
+        STRUCT_FORMAT_V3 = '<iff????iBBBBBB??'
+        EXPECTED_SIZE_V3 = struct.calcsize(STRUCT_FORMAT_V3)     # 28
 
         def detect_record_format(data_len):
             """
-            فایل‌های .dat قبل از این آپدیت ۲۵ بایت/رکورد بودند؛ از این به بعد
-            ۲۶ بایت/رکورد (با cycle_attempt اضافه) خواهند بود. چون نمی‌توان
-            مطمئن بود فایل آپلودی با کدام فریمور ساخته شده، اندازه‌ای که طول
-            فایل را دقیقاً (بدون باقی‌مانده) می‌پوشاند انتخاب می‌شود —
-            فرمت جدید در اولویت است.
+            فایل‌های .dat قبل از این آپدیت‌ها ۲۵ یا ۲۶ بایت/رکورد بودند؛ از
+            این به بعد ۲۸ بایت/رکورد (با Indicator/Buzzer اضافه) خواهند بود.
+            چون نمی‌توان مطمئن بود فایل آپلودی با کدام فریمور ساخته شده،
+            اندازه‌ای که طول فایل را دقیقاً (بدون باقی‌مانده) می‌پوشاند
+            انتخاب می‌شود — جدیدترین فرمت در اولویت است.
             """
+            if data_len % EXPECTED_SIZE_V3 == 0:
+                return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3
             if data_len % EXPECTED_SIZE_NEW == 0:
                 return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW
             if data_len % EXPECTED_SIZE_OLD == 0:
                 return STRUCT_FORMAT_OLD, EXPECTED_SIZE_OLD
-            return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
+            return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
 
         master_buffer = []
         
@@ -948,7 +1031,8 @@ def upload_dat_page():
             try:
                 file_bytes = file.read()
                 STRUCT_FORMAT, EXPECTED_SIZE = detect_record_format(len(file_bytes))
-                has_cycle_attempt = (EXPECTED_SIZE == EXPECTED_SIZE_NEW)
+                has_cycle_attempt = (EXPECTED_SIZE in (EXPECTED_SIZE_NEW, EXPECTED_SIZE_V3))
+                has_extra_signals = (EXPECTED_SIZE == EXPECTED_SIZE_V3)
                 # اگر انتهای فایل خراب/ناقص بود، رکوردهای «کامل» داخلش
                 # نجات داده می‌شوند — قبلاً کل فایل دور ریخته می‌شد.
                 usable = (len(file_bytes) // EXPECTED_SIZE) * EXPECTED_SIZE
@@ -995,13 +1079,24 @@ def upload_dat_page():
 
                     formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
 
-                    # تعداد تلاش (cycle_attempt): فقط فایل‌های فرمت جدید (۲۶ بایت)
-                    # این بایت آخر را دارند؛ فایل‌های قدیمی None می‌مانند
+                    # تعداد تلاش (cycle_attempt): فقط فایل‌های فرمت میانی/جدید
+                    # (۲۶ یا ۲۸ بایت) این بایت را دارند؛ فایل‌های قدیمی (۲۵
+                    # بایتی) None می‌مانند
                     cyc_val = None
                     if has_cycle_attempt:
                         cyc_raw = data[13]
                         if cyc_raw:
                             cyc_val = max(1, min(3, int(cyc_raw)))
+
+                    # Indicator (GPIO34) / Buzzer (GPIO35): فقط فایل‌های فرمت
+                    # فعلی (۲۸ بایتی) این دو بولی آخر را دارند. ذخیره در
+                    # دیتابیس هم مثل مسیر سریال، فقط اگر تیک تنظیمات روشن
+                    # باشد انجام می‌شود؛ در غیر این‌صورت discard می‌شود.
+                    indicator_val = None
+                    buzzer_val = None
+                    if has_extra_signals and extra_signals_config.get('save_indicator_buzzer'):
+                        indicator_val = bool(data[14])
+                        buzzer_val = bool(data[15])
 
                     # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
                     if master_exists(num_val, device_date_str, device_time_str):
@@ -1019,7 +1114,9 @@ def upload_dat_page():
                         timestamp=upload_time_server.replace(tzinfo=None),
                         formatted_log=formatted_log,
                         cycle=compute_cycle_ok(nbcm_str),
-                        cycle_attempt=cyc_val
+                        cycle_attempt=cyc_val,
+                        indicator=indicator_val,
+                        buzzer=buzzer_val
                     ))
                     success_count += 1
             except Exception as e:
@@ -1173,7 +1270,9 @@ def get_sensor_data():
                 'nbcm_statuses': nbcm_map,
                 'bcm_results': build_bcm_results(r.nbcm_selected),
                 'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
-                'cycle_attempt': r.cycle_attempt
+                'cycle_attempt': r.cycle_attempt,
+                'indicator': r.indicator,
+                'buzzer': r.buzzer
             })
             
         return jsonify(output)
@@ -1296,6 +1395,8 @@ def get_master_data():
             'bcm_results': build_bcm_results(r.nbcm_selected),
             'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
             'cycle_attempt': r.cycle_attempt,
+            'indicator': r.indicator,
+            'buzzer': r.buzzer,
             'date': r.date
         })
 
@@ -1481,6 +1582,14 @@ def import_csv():
                 except (TypeError, ValueError):
                     cyc_val = None
 
+            # ستون‌های «Indicator»/«Buzzer» هم اختیاری‌اند (خروجی اکسل جدید
+            # آن‌ها را دارد، اگر تیک تنظیمات روشن بوده باشد؛ فایل‌های
+            # قدیمی‌تر یا سلول خالی -> None می‌ماند)
+            ind_raw = pick(row, 'INDICATOR')
+            buz_raw = pick(row, 'BUZZER')
+            indicator_val = ind_raw.upper() in TRUE_TOKENS if ind_raw else None
+            buzzer_val = buz_raw.upper() in TRUE_TOKENS if buz_raw else None
+
             payload = {
                 'num_value': num,
                 'nbcm': fields,
@@ -1489,6 +1598,8 @@ def import_csv():
                 'date': date_s,
                 'time': time_s,
                 'cycle_attempt': cyc_val,
+                'indicator': indicator_val,
+                'buzzer': buzzer_val,
             }
             # خط استاندارد برای بکاپ‌گیری در صورت شکست ذخیره
             raw_line = record_to_line(safe_int(num), fields,
@@ -1648,6 +1759,37 @@ def set_cycle_config():
     return jsonify({'status': 'success', 'cycle_config': cycle_config, 'sent_immediately': sent})
 
 
+@app.route('/api/extra_signals_config')
+def get_extra_signals_config():
+    """وضعیت فعلی تیک «ذخیره‌ی Indicator/Buzzer در دیتابیس» (برای فرم تنظیمات داشبورد)."""
+    return jsonify({
+        'save_indicator_buzzer': extra_signals_config['save_indicator_buzzer'],
+    })
+
+
+@app.route('/api/set_extra_signals_config', methods=['POST'])
+def set_extra_signals_config():
+    """
+    روشن/خاموش کردن ذخیره‌ی دو فیلد Indicator (GPIO34) و Buzzer (GPIO35)
+    در دیتابیس. ESP32 این دو را همیشه می‌خواند و می‌فرستد (بدون سوییچ
+    سمت فرم‌ور)؛ این تنظیم فقط تصمیم می‌گیرد سرور آن‌ها را بنویسد یا
+    parse-and-discard کند. مقدار در فایل محلی هم ذخیره می‌شود تا بعد از
+    ری‌استارت سرور باقی بماند.
+    """
+    data = request.get_json(silent=True) or request.form
+    raw = data.get('save_indicator_buzzer')
+    if isinstance(raw, bool):
+        enabled = raw
+    else:
+        enabled = str(raw).strip().lower() in ('1', 'true', 'on', 'yes')
+
+    extra_signals_config['save_indicator_buzzer'] = enabled
+    save_extra_signals_config()
+    print(f"[CFG] ذخیره‌ی Indicator/Buzzer در دیتابیس: {'فعال' if enabled else 'غیرفعال'}")
+
+    return jsonify({'status': 'success', 'extra_signals_config': extra_signals_config})
+
+
 @app.route('/export_excel')
 def export_excel():
     target_date = request.args.get('date')
@@ -1656,7 +1798,7 @@ def export_excel():
     cw.writerow(['ID', 'NUM',
                  'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
                  'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
-                 'Cycle', 'Attempts',
+                 'Cycle', 'Attempts', 'Indicator', 'Buzzer',
                  'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
@@ -1667,6 +1809,10 @@ def export_excel():
     for r in recs:
         res = build_bcm_results(r.nbcm_selected)
         cycle_val = r.cycle if r.cycle is not None else (res['BCM1']['ok'] and res['BCM2']['ok'])
+        # Indicator/Buzzer فقط وقتی تیک تنظیمات روشن بوده مقدار دارند؛
+        # در غیر این‌صورت None هستند و به‌صورت سلول خالی نوشته می‌شوند.
+        indicator_cell = '' if r.indicator is None else ('OK' if r.indicator else 'NOK')
+        buzzer_cell = '' if r.buzzer is None else ('OK' if r.buzzer else 'NOK')
         cw.writerow([
             r.id, r.num_value,
             'OK' if res['BCM1']['open'] else 'NOK',
@@ -1677,6 +1823,7 @@ def export_excel():
             'OK' if res['BCM2']['ok'] else 'NOK',
             'OK' if cycle_val else 'NOK',
             r.cycle_attempt if r.cycle_attempt is not None else '',
+            indicator_cell, buzzer_cell,
             r.temp, r.humidity, r.time, r.date, r.timestamp])
     
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report.csv"})
@@ -1803,6 +1950,29 @@ def _ensure_master_attempt_column():
         return False
 
 
+def _ensure_master_extra_signal_columns():
+    """
+    مهاجرتِ ستون‌های «indicator» و «buzzer» روی دیتابیس‌های قدیمی‌تر.
+
+    این دو سیگنال جدیدند؛ برای داده‌ی قدیمی قابل بازسازی نیستند، پس
+    رکوردهای قدیمی با NULL باقی می‌مانند (یعنی «—» در UI، مثل cycle_attempt).
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "indicator" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN indicator BOOLEAN"))
+            if "buzzer" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN buzzer BOOLEAN"))
+        print("[DB] ستون‌های indicator/buzzer بررسی/اضافه شدند.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون‌های indicator/buzzer ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
 def bootstrap_server(recover_unsaved=True, start_serial=True):
     """
     راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
@@ -1817,6 +1987,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
         _ensure_master_unique_index()
         _ensure_master_cycle_column()
         _ensure_master_attempt_column()
+        _ensure_master_extra_signal_columns()
 
         # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
         if recover_unsaved and os.path.exists(UNSAVED_LOG):
@@ -1828,6 +1999,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
     # زمان‌بندی سیکل مستقل از وضعیت سریال بارگذاری می‌شود تا /api/cycle_config
     # همیشه آخرین مقدار ذخیره‌شده را نشان دهد، حتی اگر سریال هنوز استارت نشده
     load_cycle_config()
+    load_extra_signals_config()
 
     if start_serial:
         load_serial_config()      # آخرین پورت و باود انتخاب‌شده

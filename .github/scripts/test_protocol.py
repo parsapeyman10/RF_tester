@@ -30,6 +30,12 @@ KEYS = ["NUM", "BCM1_OPEN", "BCM1_CLOSE", "BCM2_OPEN", "BCM2_CLOSE",
 # هر سه لایه حضور داشته باشد: snprintf فرستنده، sscanf/printf گیرنده
 KEY_CYCLE = "cycle="
 
+# دو فیلد جدید: Indicator (GPIO34، سطح high-side) و Buzzer (GPIO35، شمارش
+# لبه‌ی پالس مربعی). ESP32 همیشه این دو را می‌خواند/می‌فرستد (بدون سوییچ
+# فرم‌ور)؛ باید در هر سه لایه حضور داشته باشند.
+KEY_INDICATOR = "Indicator="
+KEY_BUZZER = "Buzzer="
+
 failures = []
 warnings = []
 
@@ -59,16 +65,21 @@ for blob, name in ((esp32, "ESP32 snprintf"), (esp8266, "ESP8266")):
     for key in KEYS:
         check(key + "=" in blob, f"[{name}] کلید {key}= در فرمت پیدا نشد")
     check(KEY_CYCLE in blob, f"[{name}] فیلد {KEY_CYCLE} (تعداد تلاش سیکل) در فرمت پیدا نشد")
+    check(KEY_INDICATOR in blob, f"[{name}] فیلد {KEY_INDICATOR} (GPIO34) در فرمت پیدا نشد")
+    check(KEY_BUZZER in blob, f"[{name}] فیلد {KEY_BUZZER} (GPIO35) در فرمت پیدا نشد")
 check(KEY_CYCLE in app_src, f"[app.py] فیلد {KEY_CYCLE} در رجکس/پارسر پیدا نشد")
+check("Indicator=" in app_src, "[app.py] فیلد Indicator= در رجکس/پارسر پیدا نشد")
+check("Buzzer=" in app_src, "[app.py] فیلد Buzzer= در رجکس/پارسر پیدا نشد")
 
 # ------------------------------------------------- 2) تعداد فیلدهای sscanf
-# فیلد cycle= اختیاری است (سازگاری عقب‌رو با فریمورهای قدیمی‌تر)، پس
-# sscanf باید هم با ۱۳ فیلد (بدون cycle=) و هم با ۱۴ فیلد (با cycle=)
-# معتبر شمرده شود
+# فیلد cycle= و Indicator=/Buzzer= اختیاری‌اند (سازگاری عقب‌رو با
+# فریمورهای قدیمی‌تر)، پس sscanf باید با ۱۳ فیلد (بدون cycle=)، ۱۴ فیلد
+# (فقط cycle=) و ۱۶ فیلد (cycle= + Indicator= + Buzzer=) معتبر شمرده شود
 _m_all = re.findall(r"itemsParsed\s*==\s*(\d+)", esp8266)
 check(bool(_m_all), "[ESP8266] شرط تعداد فیلدهای sscanf پیدا نشد")
-check(set(_m_all) == {"13", "14"},
-      f"[ESP8266] sscanf باید هم ۱۳ (بدون cycle=) و هم ۱۴ (با cycle=) را بپذیرد؛ یافت‌شده: {_m_all}")
+check(set(_m_all) == {"13", "14", "16"},
+      f"[ESP8266] sscanf باید ۱۳ (بدون cycle=)، ۱۴ (فقط cycle=) و ۱۶ "
+      f"(cycle=+Indicator=+Buzzer=) را بپذیرد؛ یافت‌شده: {_m_all}")
 
 # ------------------------------------ 3) پارس واقعی خط توسط سرور Flask
 # دیتابیس تست: قبل از import جداسازی می‌شود تا رکوردهای تستِ داینامیک
@@ -108,27 +119,38 @@ check(flask_app.parse_industrial_line("[LOG]: ID:42 | T:23") is None,
       "خط بدون NUM= نباید پارس شود")
 
 # ------------------------------------------- 4) اندازه‌ی struct فایل .dat
-# ESP32: #pragma pack(1) struct { int; float; float; 4x bool; int; 5x uint8; 1x uint8 (CycleAttempt) }
-# فرمت قدیمی (قبل از cycle=) ۲۵ بایت بود؛ فرمت جدید با CycleAttempt ۲۶ بایت است.
-# app.py باید هر دو را تشخیص بدهد تا فایل‌های .dat قدیمی هم قابل آپلود بمانند.
+# ESP32: #pragma pack(1) struct { int; float; float; 4x bool; int; 5x uint8;
+#                                  1x uint8 (CycleAttempt); 2x bool (Indicator, Buzzer) }
+# فرمت قدیمی (قبل از cycle=) ۲۵ بایت؛ فرمت میانی با CycleAttempt ۲۶ بایت؛
+# فرمت فعلی با Indicator+Buzzer ۲۸ بایت. app.py باید هر سه را تشخیص بدهد
+# تا فایل‌های .dat قدیمی‌تر هم قابل آپلود بمانند.
 expected_size_old = struct.calcsize("<iff????iBBBBB")
 expected_size_new = struct.calcsize("<iff????iBBBBBB")
+expected_size_v3 = struct.calcsize("<iff????iBBBBBB??")
 check(expected_size_old == 25, f"چیدمان struct قدیمی پایتون 25 بایت نیست: {expected_size_old}")
-check(expected_size_new == 26, f"چیدمان struct جدید پایتون 26 بایت نیست: {expected_size_new}")
+check(expected_size_new == 26, f"چیدمان struct میانی پایتون 26 بایت نیست: {expected_size_new}")
+check(expected_size_v3 == 28, f"چیدمان struct فعلی پایتون 28 بایت نیست: {expected_size_v3}")
 
 check("uint8_t CycleAttempt;" in esp32,
       "[ESP32] فیلد CycleAttempt به struct WifiData اضافه شده")
+check("bool Indicator;" in esp32, "[ESP32] فیلد Indicator به struct WifiData اضافه شده")
+check("bool Buzzer;" in esp32, "[ESP32] فیلد Buzzer به struct WifiData اضافه شده")
 
 m_old = re.search(r"STRUCT_FORMAT_OLD\s*=\s*'([^']+)'", app_src)
 m_new = re.search(r"STRUCT_FORMAT_NEW\s*=\s*'([^']+)'", app_src)
+m_v3 = re.search(r"STRUCT_FORMAT_V3\s*=\s*'([^']+)'", app_src)
 check(m_old is not None, "STRUCT_FORMAT_OLD در app.py پیدا نشد")
 check(m_new is not None, "STRUCT_FORMAT_NEW در app.py پیدا نشد")
+check(m_v3 is not None, "STRUCT_FORMAT_V3 در app.py پیدا نشد")
 if m_old:
     check(struct.calcsize(m_old.group(1)) == expected_size_old,
           f"STRUCT_FORMAT_OLD='{m_old.group(1)}' با فرمت قدیمی ESP32 ({expected_size_old} بایت) نمی‌خواند")
 if m_new:
     check(struct.calcsize(m_new.group(1)) == expected_size_new,
-          f"STRUCT_FORMAT_NEW='{m_new.group(1)}' با فرمت جدید ESP32 ({expected_size_new} بایت) نمی‌خواند")
+          f"STRUCT_FORMAT_NEW='{m_new.group(1)}' با فرمت میانی ESP32 ({expected_size_new} بایت) نمی‌خواند")
+if m_v3:
+    check(struct.calcsize(m_v3.group(1)) == expected_size_v3,
+          f"STRUCT_FORMAT_V3='{m_v3.group(1)}' با فرمت فعلی ESP32 ({expected_size_v3} بایت) نمی‌خواند")
 check("#pragma pack(1)" in esp32, "[ESP32] struct باید با pragma pack(1) پک شده باشد")
 
 # ------------------------- 5) ساختار فریمور: فازها و مانیتورینگ
@@ -432,6 +454,48 @@ try:
         _row = flask_app.MasterReading.query.filter_by(num_value=99005).first()
     check(_row is not None and _row.cycle_attempt == 2,
           f"[app.py/داینامیک] cycle_attempt=2 درست در دیتابیس ذخیره شد (ردیف={_row.cycle_attempt if _row else None})")
+
+    # ۲پ) Indicator=/Buzzer=: باید همیشه پارس شوند، ولی فقط وقتی تیک
+    # تنظیمات «ذخیره‌ی Indicator/Buzzer» روشن است در دیتابیس نوشته شوند
+    _rec_ind = ("NUM=99006,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+                "Temp=21.00,Humidity=40.00,Date=2026-09-30,Time=10:16:00,"
+                "cycle=1,Indicator=OK,Buzzer=NOK")
+    _payload_ind = flask_app.parse_industrial_line(_rec_ind)
+    check(_payload_ind is not None and _payload_ind.get("indicator") is True
+          and _payload_ind.get("buzzer") is False,
+          f"[app.py/داینامیک] Indicator=/Buzzer= درست پارس شدند ({_payload_ind})")
+
+    _orig_extra_cfg = dict(flask_app.extra_signals_config)
+    try:
+        # تیک خاموش (پیش‌فرض): باید discard شود (None در دیتابیس بماند)
+        flask_app.extra_signals_config['save_indicator_buzzer'] = False
+        _sent.clear()
+        flask_app.handle_serial_line(_rec_ind)
+        with flask_app.app.app_context():
+            _row_off = flask_app.MasterReading.query.filter_by(num_value=99006).first()
+        check(_row_off is not None and _row_off.indicator is None and _row_off.buzzer is None,
+              f"[app.py/داینامیک] تیک خاموش -> Indicator/Buzzer در DB ذخیره نشدند (indicator={_row_off.indicator if _row_off else '?'}, buzzer={_row_off.buzzer if _row_off else '?'})")
+
+        # تیک روشن: باید در دیتابیس نوشته شود
+        flask_app.extra_signals_config['save_indicator_buzzer'] = True
+        _rec_ind2 = _rec_ind.replace("NUM=99006", "NUM=99007")
+        _sent.clear()
+        flask_app.handle_serial_line(_rec_ind2)
+        with flask_app.app.app_context():
+            _row_on = flask_app.MasterReading.query.filter_by(num_value=99007).first()
+        check(_row_on is not None and _row_on.indicator is True and _row_on.buzzer is False,
+              f"[app.py/داینامیک] تیک روشن -> Indicator/Buzzer در DB ذخیره شدند (indicator={_row_on.indicator if _row_on else '?'}, buzzer={_row_on.buzzer if _row_on else '?'})")
+    finally:
+        flask_app.extra_signals_config.update(_orig_extra_cfg)
+
+    # ۲ت) سازگاری عقب‌رو: خط بدون Indicator=/Buzzer= (فریمور قبلی) هم باید
+    # بدون خطا پارس و ذخیره شود (indicator/buzzer باید None بمانند)
+    _rec_nocyc_signals = ("NUM=99008,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+                          "Temp=20.00,Humidity=35.00,Date=2026-09-30,Time=10:17:00,cycle=1")
+    _payload_legacy = flask_app.parse_industrial_line(_rec_nocyc_signals)
+    check(_payload_legacy is not None and _payload_legacy.get("indicator") is None
+          and _payload_legacy.get("buzzer") is None,
+          f"[app.py/داینامیک] خط بدون Indicator=/Buzzer= (فریمور قدیمی) هم بدون خطا پارس می‌شود ({_payload_legacy})")
 
     # ۳) سلام و پینگ گیرنده با شناسه‌ی نشست فعلی
     # SRV_HELLO حالا علاوه بر SRV_READY، خط CFG زمان‌بندی سیکل را هم

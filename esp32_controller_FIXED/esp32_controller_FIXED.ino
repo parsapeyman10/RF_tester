@@ -1818,13 +1818,14 @@ void TaskRelayControl(void *pv) {
       xSemaphoreGive(xGlobalStateMutex);
 
       DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
-                   "T=%.2f H=%.2f  cycle=%u  @ %04d-%02d-%02d %02d:%02d:%02d\n",
+                   "T=%.2f H=%.2f  cycle=%u  Indicator=%s  Buzzer=%s  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
                    DEVICE_NAMES[0], snapshot.BCM1_OPEN ? "OK" : "NOK",
                                     snapshot.BCM1_CLOSE ? "OK" : "NOK",
                    DEVICE_NAMES[1], snapshot.BCM2_OPEN ? "OK" : "NOK",
                                     snapshot.BCM2_CLOSE ? "OK" : "NOK",
                    snapshot.Temp, snapshot.Hum, (unsigned)snapshot.CycleAttempt,
+                   snapshot.Indicator ? "OK" : "NOK", snapshot.Buzzer ? "OK" : "NOK",
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
 

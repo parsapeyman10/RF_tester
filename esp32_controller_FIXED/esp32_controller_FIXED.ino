@@ -79,9 +79,38 @@ const uint8_t FEEDBACK_PINS[PHASE_COUNT][DEVICE_COUNT] = {
 // اگر false شود، دیدن یکی از دو فاز کافی است.
 const bool REQUIRE_BOTH_FEEDBACKS = true;
 
+// -----------------------------------------------------------------------------
+//  دو سیگنال دیجیتال اضافی مربوط به BCM2 (دو فانکشنِ جداگانه، نه BCM1؛
+//  همیشه خوانده و فرستاده می‌شوند، بدون سوییچ سمت فرم‌ور؛ تصمیم «ذخیره در
+//  دیتابیس یا نه» کاملاً سمت سرور است):
+//    GPIO34 = Indicator (مربوط به BCM2) : سیگنال سطح (high-side)، دقیقاً
+//                         مثل ۴ سیگنال BCM بالا با همان الگوریتم debounce
+//                         خوانده می‌شود.
+//    GPIO35 = Buzzer    : پالس مربعی تأییدیه‌ی بازر (۵۰۰هرتز..۴کیلوهرتز)؛
+//                         چون فرکانسش بسیار بالاتر از پولینگ ۱۰ میلی‌ثانیه‌ای
+//                         TaskDigitalRead است، با وقفه‌ی سخت‌افزاری (CHANGE)
+//                         لبه‌شماری می‌شود.
+//  هر دو پایه روی ESP32 «ورودی‌خالص» هستند (بدون پول‌آپ/پول‌داون داخلی)؛
+//  مقاومت pull مناسب باید روی سخت‌افزار بیرونی تعبیه شده باشد.
+// -----------------------------------------------------------------------------
+const uint8_t PIN_INDICATOR = 34;
+const uint8_t PIN_BUZZER = 35;
+// حداقل تعداد لبه (rising+falling) طی یک پنجره‌ی مانیتورینگ (FEEDBACK_WINDOW_MS)
+// که برای تایید «بازر فعال بود» لازم است. در پایین‌ترین فرکانس مجاز (۵۰۰هرتز)
+// طی ۳ ثانیه، حدوداً ۳۰۰۰ لبه انتظار می‌رود؛ آستانه را خیلی پایین‌تر از این
+// می‌گذاریم تا حتی یک فعال‌سازی کوتاه (کسری از پنجره) هم به اندازه‌ی کافی
+// نویز را از سیگنال واقعی تفکیک کند.
+const uint32_t BUZZER_EDGE_THRESHOLD = 10;
+
 // --- زمان‌بندی تست هر رله ---
 const uint32_t RELAY_SETTLE_MS = 50;        // فاصله‌ی فعال شدن رله تا شروع مانیتورینگ
-const uint32_t RELAY_RETRY_GAP_MS = 2000;   // فاصله‌ی بین تلاش‌ها
+// RELAY_RETRY_GAP_MS از سرور قابل تغییر است (دستور CFG از طریق ESP8266)؛
+// مقدار پیش‌فرض و بازه‌ی مجاز پایین تعریف شده، مقدار جاری در gRelayRetryGapMs
+// نگه داشته می‌شود و در NVS هم ذخیره می‌شود تا بعد از ریست باقی بماند.
+const uint32_t DEFAULT_RELAY_RETRY_GAP_MS = 2000;
+const uint32_t MIN_RELAY_RETRY_GAP_MS = 200;      // حداقل مجاز (ایمنی رله)
+const uint32_t MAX_RELAY_RETRY_GAP_MS = 60000;    // حداکثر مجاز (۶۰ ثانیه)
+volatile uint32_t gRelayRetryGapMs = DEFAULT_RELAY_RETRY_GAP_MS;
 // فاصله‌ی «تریگ تا تریگ»: از لحظه‌ی فعال شدن رله‌ی اول تا لحظه‌ی فعال شدن
 // رله‌ی دوم دقیقاً همین مقدار طول می‌کشد (شامل مدت مانیتورینگ).
 const uint32_t PHASE_TRIGGER_INTERVAL_MS = 5000;
@@ -92,7 +121,18 @@ const uint32_t PHASE_MIN_GAP_MS = 300;
 const uint32_t FEEDBACK_WINDOW_MS = 3000;   // مهلت پاسخ BCM بعد از تریگ
 const uint8_t RELAY_MAX_ATTEMPTS = 3;       // تعداد تلاش برای هر رله
 const uint32_t PULSE_CONFIRM_MS = 100;      // حداقل مدت HIGH برای معتبر بودن پالس
-const uint32_t CYCLE_PERIOD_MS = 120000;    // فاصله‌ی بین سیکل‌ها (۲ دقیقه)
+// CYCLE_PERIOD_MS هم مثل RELAY_RETRY_GAP_MS از سرور قابل تغییر است؛ همان
+// الگو: پیش‌فرض + بازه‌ی مجاز + متغیر سراسری قابل‌تغییر که در NVS می‌ماند.
+const uint32_t DEFAULT_CYCLE_PERIOD_MS = 120000;  // ۲ دقیقه
+// حداقل مجاز: مقادیر کمتر از این اصلاً قبول نمی‌شوند (نه کلمپ به این
+// عدد؛ کلاً رد می‌شوند و مقدار قبلی دست‌نخورده می‌ماند — به درخواست کاربر)
+const uint32_t MIN_CYCLE_PERIOD_MS = 35000;       // حداقل مجاز (۳۵ ثانیه)
+const uint32_t MAX_CYCLE_PERIOD_MS = 3600000;     // حداکثر مجاز (۱ ساعت)
+volatile uint32_t gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
+// فاصله‌ی هر بار «بیدار شدن» در حلقه‌ی انتظار بین سیکل‌ها (TaskRelayControl)
+// برای چک کردن اینکه آیا gCyclePeriodMs از سرور عوض شده یا نه. هرچه کوچک‌تر،
+// واکنش به تغییر زمان سریع‌تر است؛ ۲۰۰ میلی‌ثانیه برای این منظور کافی است.
+const uint32_t CYCLE_WAIT_POLL_MS = 200;
 
 // --- شبکه ---
 const char *DATA_AP_SSID = "ESP8266_AP";  // گیرنده‌ی دیتا (سمت کامپیوتر)
@@ -140,9 +180,9 @@ const uint32_t HELLO_WAIT_MS   = 2000;   // سقف انتظار برای READY �
 //   • سنسور  : هر سیکل یک ضربان      -> ۳ برابر دوره‌ی سیکل
 const uint32_t WDT_CHECK_PERIOD_MS = 15000;
 const uint32_t WDT_TIMEOUT_NET_MS = 90000;
-const uint32_t WDT_TIMEOUT_RELAY_MS = CYCLE_PERIOD_MS * 3;
-const uint32_t WDT_TIMEOUT_DIGITAL_MS = CYCLE_PERIOD_MS * 3;
-const uint32_t WDT_TIMEOUT_SHT_MS = CYCLE_PERIOD_MS * 3;
+// این سه سقف به gCyclePeriodMs وابسته‌اند که حالا از سرور قابل تغییر است؛
+// پس دیگر const نیستند و TaskHealthMonitor هر بار آن‌ها را به‌روز می‌کند
+// (نگاه کنید به beats[].timeoutMs داخل همان تسک).
 const uint32_t LINK_DOWN_RESET_MS = 600000;      // ۱۰ دقیقه قطعی بعد از اتصال موفق
 const char *DEVICE_HOSTNAME = "RF-TESTER";
 
@@ -301,8 +341,13 @@ private:
 
 // =====================================================================
 //                         DATA STRUCTURE
-// ساختار دقیقاً مثل قبل است تا با پارسر ESP8266 و با
-// STRUCT_FORMAT = '<iff????iBBBBB' (۲۵ بایت) در app.py سازگار بماند.
+// ساختار قبلاً دقیقاً با STRUCT_FORMAT = '<iff????iBBBBB' (۲۵ بایت) در
+// app.py سازگار بود. یک فیلد CycleAttempt به آن اضافه شد (۲۶ بایت)، و
+// حالا دو فیلد بولی جدید Indicator و Buzzer هم به انتها اضافه شده‌اند
+// (سایز نهایی ۲۸ بایت): app.py باید STRUCT_FORMAT_V3='<iff????iBBBBBB??'
+// (۲۸ بایت) بخواند. فایل‌های .dat قدیمی‌تر (۲۵ یا ۲۶ بایتی) هنوز
+// قابل‌خواندن‌اند چون app.py بر اساس باقیمانده‌ی طول فایل بر ۲۵/۲۶/۲۸
+// فرمت را تشخیص می‌دهد.
 // =====================================================================
 #pragma pack(1)
 struct WifiData {
@@ -313,8 +358,22 @@ struct WifiData {
   bool BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
   int Year;
   uint8_t Month, Day, Hour, Minute, Second;
+  // تعداد تلاش‌هایی که runTestCycle() طول کشید تا هر دو BCM تایید شوند
+  // (یا بعد از ۳ تلاش ناموفق ناقص باقی بماند): مقدار ۱، ۲ یا ۳.
+  uint8_t CycleAttempt;
+  // GPIO34 (Indicator, سیگنال high-side): مثل ۴ سیگنال BCM در همان
+  // پنجره‌ی مانیتورینگِ هر فاز خوانده و debounce می‌شود (PULSE_CONFIRM_MS)،
+  // و مثل got[][] در کل سیکل (همه‌ی تلاش‌ها) تجمعی باقی می‌ماند.
+  bool Indicator;
+  // GPIO35 (Buzzer, پالس مربعی ۵۰۰Hz..4kHz): چون فرکانسش خیلی بالاتر از
+  // پولینگ ۱۰ میلی‌ثانیه‌ای TaskDigitalRead است، با وقفه‌ی سخت‌افزاری
+  // (attachInterrupt) شمارش لبه می‌شود؛ اگر طی یک پنجره‌ی مانیتورینگ به
+  // اندازه‌ی کافی لبه دیده شود (BUZZER_EDGE_THRESHOLD)، همان پنجره تایید
+  // می‌شود؛ مثل Indicator در کل سیکل تجمعی باقی می‌ماند.
+  bool Buzzer;
 };
 #pragma pack()
+
 
 enum WiFiOperationMode {
   MODE_CLIENT_UPLOAD = 0,  // حالت نرمال: اتصال به گیرنده و آپلود
@@ -384,6 +443,22 @@ volatile WifiData globalSystemState;
 // نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ:  fbSeen[فاز][دستگاه]
 volatile bool fbSeen[PHASE_COUNT][DEVICE_COUNT] = { { false, false }, { false, false } };
 
+// نتیجه‌ی خام آخرین پنجره‌ی مانیتورینگ برای Indicator (GPIO34)؛ توسط
+// TaskDigitalRead با همان الگوریتم debounce چهار سیگنال BCM پر می‌شود.
+volatile bool fbIndicatorSeen = false;
+
+// شمارنده‌ی لبه‌های Buzzer (GPIO35) طی پنجره‌ی مانیتورینگِ جاری؛ توسط
+// وقفه‌ی سخت‌افزاری onBuzzerEdge() افزایش می‌یابد، در ابتدای هر پنجره
+// (beginFeedbackWindow) صفر می‌شود.
+volatile uint32_t buzzerEdgeCount = 0;
+
+// وقفه‌ی GPIO35: چون پریود پالس بازر می‌تواند تا ۲۵۰ میکروثانیه (۴کیلوهرتز)
+// کوتاه باشد، پولینگ ۱۰ میلی‌ثانیه‌ایِ TaskDigitalRead قادر به دیدن آن
+// نیست؛ به همین دلیل لبه‌شماری با وقفه‌ی سخت‌افزاری CHANGE انجام می‌شود.
+void IRAM_ATTR onBuzzerEdge() {
+  buzzerEdgeCount++;
+}
+
 // پرچم‌های پورتال تنظیم ساعت
 volatile bool portalTimeSet = false;
 volatile bool portalModeChosen = false;
@@ -405,6 +480,8 @@ void TaskHealthMonitor(void *pv);
 void loadConfig();
 void saveWifiConfig(const String &dSsid, const String &dPass,
                     const String &tSsid, const String &tPass);
+void loadTimingConfig();
+void saveTimingConfig(uint32_t cycleMs, uint32_t retryGapMs);
 bool syncTimeFromNtp();
 void runSetupPortal(bool timeAlreadyValid);
 bool rtcTimeLooksValid();
@@ -473,6 +550,7 @@ void setup() {
 
   WiFi.onEvent(onWiFiEvent);  // با اطلاعات دلیل قطعی
   loadConfig();
+  loadTimingConfig();
   rtc.initClock();
 
   // ---------------- SD & شماره‌ی رکورد ----------------
@@ -530,6 +608,13 @@ void setup() {
       pinMode(FEEDBACK_PINS[p][d], INPUT_PULLDOWN);
     }
   }
+
+  // GPIO34/35 روی ESP32 «ورودی‌خالص» هستند و پول‌آپ/پول‌داون داخلی ندارند؛
+  // برخلاف FEEDBACK_PINS بالا با INPUT ساده تنظیم می‌شوند (مقاومت pull باید
+  // بیرونی/روی سخت‌افزار باشد).
+  pinMode(PIN_INDICATOR, INPUT);
+  pinMode(PIN_BUZZER, INPUT);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUZZER), onBuzzerEdge, CHANGE);
 
   xEventGroupSetBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE);
 
@@ -618,6 +703,40 @@ void saveWifiConfig(const String &dSsid, const String &dPass,
   cfgTimePass = tPass;
   prefs.end();
   DEBUG_PRINTLN("[CFG] WiFi settings saved to NVS.");
+}
+
+// =====================================================================
+//   تنظیمات زمان‌بندی سیکل (CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS)
+//   این دو مقدار از سرور (از طریق ESP8266، خط «CFG ...») قابل تغییرند و
+//   در همان NVS فضای "rfcfg" ذخیره می‌شوند تا بعد از قطع برق/ریست هم بمانند.
+// =====================================================================
+void loadTimingConfig() {
+  prefs.begin("rfcfg", true);  // read-only
+  gCyclePeriodMs = prefs.getUInt("cycleMs", DEFAULT_CYCLE_PERIOD_MS);
+  gRelayRetryGapMs = prefs.getUInt("retryGapMs", DEFAULT_RELAY_RETRY_GAP_MS);
+  prefs.end();
+
+  // اگر مقدار ذخیره‌شده (یا NVS خراب) خارج از بازه‌ی مجاز بود، به پیش‌فرض برگرد
+  if (gCyclePeriodMs < MIN_CYCLE_PERIOD_MS || gCyclePeriodMs > MAX_CYCLE_PERIOD_MS)
+    gCyclePeriodMs = DEFAULT_CYCLE_PERIOD_MS;
+  if (gRelayRetryGapMs < MIN_RELAY_RETRY_GAP_MS || gRelayRetryGapMs > MAX_RELAY_RETRY_GAP_MS)
+    gRelayRetryGapMs = DEFAULT_RELAY_RETRY_GAP_MS;
+
+  DEBUG_PRINTF("[CFG] زمان‌بندی سیکل: CYCLE_PERIOD_MS=%u RELAY_RETRY_GAP_MS=%u\n",
+               (unsigned)gCyclePeriodMs, (unsigned)gRelayRetryGapMs);
+}
+
+/** مقدار جدید را اعمال و در NVS ذخیره می‌کند (مقادیر قبلاً clamp شده‌اند) */
+void saveTimingConfig(uint32_t cycleMs, uint32_t retryGapMs) {
+  prefs.begin("rfcfg", false);
+  prefs.putUInt("cycleMs", cycleMs);
+  prefs.putUInt("retryGapMs", retryGapMs);
+  prefs.end();
+  gCyclePeriodMs = cycleMs;
+  gRelayRetryGapMs = retryGapMs;
+  DEBUG_PRINTF("[CFG] زمان‌بندی سیکل از سرور به‌روزرسانی و در NVS ذخیره شد: "
+               "CYCLE_PERIOD_MS=%u RELAY_RETRY_GAP_MS=%u\n",
+               (unsigned)cycleMs, (unsigned)retryGapMs);
 }
 
 bool rtcTimeLooksValid() {
@@ -1243,6 +1362,55 @@ void processLinkLine(const char* line, bool windowActive) {
     // دوباره ارسال می‌شود (retry تا موفق — هیچ داده‌ای دور ریخته نمی‌شود)
     DEBUG_PRINTF("[LINK] گیرنده رد کرد: %s\n", line);
   }
+  else if (strncmp(line, "CFG ", 4) == 0) {
+    // پیکربندی زمان‌بندی از سرور (عیناً توسط ESP8266 فوروارد شده):
+    //   CFG CYCLE_PERIOD_MS=<ms>;RELAY_RETRY_GAP_MS=<ms>
+    // هر دو کلید اختیاری‌اند؛ هرکدام نبود همان مقدار فعلی باقی می‌ماند.
+    long newCycleMs = (long)gCyclePeriodMs;
+    long newGapMs = (long)gRelayRetryGapMs;
+    bool changed = false;
+
+    char body[80];
+    strlcpy(body, line + 4, sizeof(body));
+    char *saveptr = nullptr;
+    char *tok = strtok_r(body, ";", &saveptr);
+    while (tok != nullptr) {
+      char *eq = strchr(tok, '=');
+      if (eq) {
+        *eq = '\0';
+        const char *key = tok;
+        long val = strtol(eq + 1, NULL, 10);
+        if (strcmp(key, "CYCLE_PERIOD_MS") == 0 && val > 0) {
+          newCycleMs = val;
+          changed = true;
+        } else if (strcmp(key, "RELAY_RETRY_GAP_MS") == 0 && val > 0) {
+          newGapMs = val;
+          changed = true;
+        }
+      }
+      tok = strtok_r(nullptr, ";", &saveptr);
+    }
+
+    if (changed) {
+      // CYCLE_PERIOD_MS: اگر مقدار درخواستی کمتر از حداقل مجاز باشد، دیگر
+      // کلمپ به نزدیک‌ترین حد مجاز نمی‌شود — کلاً رد می‌شود و مقدار فعلی
+      // (gCyclePeriodMs) دست‌نخورده باقی می‌ماند (طبق درخواست صریح: زیر
+      // این آستانه اصلاً قبول نشود).
+      if (newCycleMs < (long)MIN_CYCLE_PERIOD_MS) {
+        DEBUG_PRINTF("[CFG] CYCLE_PERIOD_MS=%ld رد شد (کمتر از حداقل مجاز %u) -> "
+                     "مقدار قبلی (%u) حفظ شد\n",
+                     newCycleMs, (unsigned)MIN_CYCLE_PERIOD_MS, (unsigned)gCyclePeriodMs);
+        newCycleMs = (long)gCyclePeriodMs;
+      }
+      if (newCycleMs > (long)MAX_CYCLE_PERIOD_MS) newCycleMs = MAX_CYCLE_PERIOD_MS;
+      if (newGapMs < (long)MIN_RELAY_RETRY_GAP_MS) newGapMs = MIN_RELAY_RETRY_GAP_MS;
+      if (newGapMs > (long)MAX_RELAY_RETRY_GAP_MS) newGapMs = MAX_RELAY_RETRY_GAP_MS;
+
+      if ((uint32_t)newCycleMs != gCyclePeriodMs || (uint32_t)newGapMs != gRelayRetryGapMs) {
+        saveTimingConfig((uint32_t)newCycleMs, (uint32_t)newGapMs);
+      }
+    }
+  }
   // PONG و هر خط ناشناخته‌ی دیگر: نادیده گرفته می‌شود
 }
 
@@ -1453,6 +1621,8 @@ void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 static void beginFeedbackWindow() {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) fbSeen[p][d] = false;
+  fbIndicatorSeen = false;
+  buzzerEdgeCount = 0;  // شمارش لبه‌ی بازر برای همین پنجره از صفر شروع می‌شود
 
   // باگ: اگر بیت STOP از پنجره‌ی قبلی باقی مانده باشد، تسک خواندن به‌محض
   // شروع، پنجره را می‌بندد و هیچ پالسی دیده نمی‌شود (همه‌چیز NOK می‌شود).
@@ -1471,13 +1641,14 @@ static void endFeedbackWindow() {
  * نتیجه در got[phase][device] جمع می‌شود (تجمعی است و پاک نمی‌شود).
  */
 static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT],
+                     bool *gotIndicator = nullptr, bool *gotBuzzer = nullptr,
                      uint32_t *triggeredAtMs = nullptr) {
   uint8_t pin = RELAY_PINS[phase];
 
   digitalWrite(pin, HIGH);                          // 1) تحریک رله
   if (triggeredAtMs) *triggeredAtMs = millis();     // لحظه‌ی دقیق تریگ
   vTaskDelay(pdMS_TO_TICKS(RELAY_SETTLE_MS));       //    پایدار شدن کنتاکت
-  beginFeedbackWindow();                            // 2) مانیتورینگ فعال
+  beginFeedbackWindow();                            // 2) مانیتورینگ فعال (fbSeen/Indicator/Buzzer صفر می‌شوند)
   vTaskDelay(pdMS_TO_TICKS(FEEDBACK_WINDOW_MS));    // 3) زمان مجاز
   endFeedbackWindow();                              // 4) مانیتورینگ غیرفعال
   digitalWrite(pin, LOW);                           // 5) قطع رله
@@ -1485,6 +1656,12 @@ static void runPhase(int phase, bool got[PHASE_COUNT][DEVICE_COUNT],
   for (int d = 0; d < DEVICE_COUNT; d++) {
     if (fbSeen[phase][d]) got[phase][d] = true;
   }
+
+  // Indicator (GPIO34) و Buzzer (GPIO35): دقیقاً در همین پنجره‌ی مانیتورینگ
+  // (هر دو فاز OPEN و CLOSE، هر تلاش) سنجیده می‌شوند و مثل got[][] در کل
+  // سیکل تجمعی باقی می‌مانند (هیچ‌وقت در طول سیکل به false برنمی‌گردند).
+  if (fbIndicatorSeen && gotIndicator) *gotIndicator = true;
+  if (buzzerEdgeCount >= BUZZER_EDGE_THRESHOLD && gotBuzzer) *gotBuzzer = true;
 
   DEBUG_PRINTF("[PHASE %s] %s:%s  %s:%s\n",
                PHASE_NAMES[phase],
@@ -1520,19 +1697,31 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
  *
  * کل سیکل حداکثر ۳ بار تکرار می‌شود. اگر بعد از یک سیکل هر دو دستگاه هم باز
  * شدن و هم بسته شدن را تأیید کرده باشند، تکرار بعدی انجام نمی‌شود.
+ *
+ * outAttempt: شماره‌ی تلاشی که روی آن متوقف شد (۱ اگر بار اول موفق شد،
+ * ۲ اگر بار دوم، یا ۳ اگر حتی بعد از ۳ تلاش هم ناقص ماند). این همان
+ * مقداری است که در پروتکل به‌عنوان «cycle=» برای سرور فرستاده می‌شود.
+ *
+ * outIndicator/outBuzzer: نتیجه‌ی تجمعی GPIO34/GPIO35 طی کل سیکل (همه‌ی
+ * فازها و همه‌ی تلاش‌ها)؛ دقیقاً مثل got[][] هرگز در طول سیکل ریست نمی‌شوند.
  */
-static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
+static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttempt,
+                          bool *outIndicator = nullptr, bool *outBuzzer = nullptr) {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
+  bool gotIndicator = false;
+  bool gotBuzzer = false;
 
+  uint8_t usedAttempt = 1;
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
+    usedAttempt = attempt;
     relayPhaseText = "سیکل تست";
     DEBUG_PRINTF("\n[TEST] ===== سیکل %u/%u =====\n", attempt, RELAY_MAX_ATTEMPTS);
 
     // --- در هر سیکل، هر دو فرمان به ترتیب داده می‌شوند ---
     for (int phase = 0; phase < PHASE_COUNT; phase++) {
       uint32_t triggeredAt = 0;
-      runPhase(phase, got, &triggeredAt);
+      runPhase(phase, got, &gotIndicator, &gotBuzzer, &triggeredAt);
 
       // فاصله فقط بین دو فاز معنی دارد، نه بعد از فاز آخر
       if (phase < PHASE_COUNT - 1) {
@@ -1565,16 +1754,16 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT]) {
 
     if (attempt < RELAY_MAX_ATTEMPTS) {
       DEBUG_PRINTLN("[TEST] نتیجه ناقص -> کل سیکل دوباره تکرار می‌شود");
-      vTaskDelay(pdMS_TO_TICKS(RELAY_RETRY_GAP_MS));
+      vTaskDelay(pdMS_TO_TICKS(gRelayRetryGapMs));
     }
   }
 
+  if (outAttempt) *outAttempt = usedAttempt;
+  if (outIndicator) *outIndicator = gotIndicator;
+  if (outBuzzer) *outBuzzer = gotBuzzer;
 }
 
 void TaskRelayControl(void *pv) {
-  const TickType_t period = pdMS_TO_TICKS(CYCLE_PERIOD_MS);
-  TickType_t lastWake = xTaskGetTickCount();
-
   xEventGroupWaitBits(xSystemEvents, BIT_NETWORK_BOOT_COMPLETE, pdFALSE, pdTRUE, portMAX_DELAY);
 
   // در حالت «نمایش دیتا» اصلاً نباید رله‌ای زده شود
@@ -1590,9 +1779,20 @@ void TaskRelayControl(void *pv) {
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
+    // لحظه‌ی شروع این سیکل: CYCLE_PERIOD_MS از همین نقطه سنجیده می‌شود
+    // (یعنی کل فاصله‌ی «شروع یک سیکل تا شروع سیکل بعد»)، نه از لحظه‌ی
+    // پایان تست. در نتیجه با یک تنظیم مشخص، فاصله‌ی بین لاگ‌ها تقریباً
+    // ثابت می‌ماند (مستقل از ۱، ۲ یا ۳ تلاش رله)؛ فقط اگر اجرای خودِ تست
+    // (با چند تلاش ناموفق) بیشتر از CYCLE_PERIOD_MS طول بکشد، دیگر صبر
+    // اضافه‌ای انجام نمی‌شود و سیکل بعدی بی‌معطلی شروع می‌شود.
+    uint32_t cycleStartMs = millis();
+
     // نتیجه‌ی تفکیکی: برای هر دستگاه، هم «باز شد» و هم «بسته شد»
     bool got[PHASE_COUNT][DEVICE_COUNT];
-    runTestCycle(got);
+    uint8_t cycleAttemptUsed = 1;
+    bool indicatorOk = false;
+    bool buzzerOk = false;
+    runTestCycle(got, &cycleAttemptUsed, &indicatorOk, &buzzerOk);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -1609,19 +1809,22 @@ void TaskRelayControl(void *pv) {
       globalSystemState.BCM1_CLOSE = got[PHASE_CLOSE][0];
       globalSystemState.BCM2_OPEN = got[PHASE_OPEN][1];
       globalSystemState.BCM2_CLOSE = got[PHASE_CLOSE][1];
+      globalSystemState.CycleAttempt = cycleAttemptUsed;
+      globalSystemState.Indicator = indicatorOk;
+      globalSystemState.Buzzer = buzzerOk;
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
       xSemaphoreGive(xGlobalStateMutex);
 
       DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
-                   "T=%.2f H=%.2f  @ %04d-%02d-%02d %02d:%02d:%02d\n",
+                   "T=%.2f H=%.2f  cycle=%u  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
                    DEVICE_NAMES[0], snapshot.BCM1_OPEN ? "OK" : "NOK",
                                     snapshot.BCM1_CLOSE ? "OK" : "NOK",
                    DEVICE_NAMES[1], snapshot.BCM2_OPEN ? "OK" : "NOK",
                                     snapshot.BCM2_CLOSE ? "OK" : "NOK",
-                   snapshot.Temp, snapshot.Hum,
+                   snapshot.Temp, snapshot.Hum, (unsigned)snapshot.CycleAttempt,
                    snapshot.Year, snapshot.Month, snapshot.Day,
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
 
@@ -1642,7 +1845,28 @@ void TaskRelayControl(void *pv) {
 
     xEventGroupSetBits(xSystemEvents, BIT_WIFI_PERMIT);
     relayPhaseText = "انتظار تا سیکل بعد";
-    vTaskDelayUntil(&lastWake, period);
+
+    // ---- انتظار تا سیکل بعد: CYCLE_PERIOD_MS از *شروع همین سیکل* ----
+    // مبنای شمارش cycleStartMs (بالای حلقه) است، نه لحظه‌ی پایان تست؛
+    // یعنی CYCLE_PERIOD_MS = کل فاصله‌ی شروع یک سیکل تا شروع سیکل بعدی،
+    // نه فقط «استراحت اضافه‌ی بعد از تست». دو نتیجه:
+    //   ۱) اگر اجرای خودِ تست (با ۱، ۲ یا ۳ تلاش) کمتر از CYCLE_PERIOD_MS
+    //      طول بکشد، فقط باقیمانده صبر می‌شود -> فاصله‌ی کل تقریباً همیشه
+    //      همان CYCLE_PERIOD_MS تنظیم‌شده می‌ماند.
+    //   ۲) اگر اجرای تست (مثلاً به‌خاطر ۳ تلاش ناموفق) بیشتر از
+    //      CYCLE_PERIOD_MS طول بکشد، دیگر صبر اضافه‌ای انجام نمی‌شود و
+    //      سیکل بعدی بی‌معطلی همان لحظه شروع می‌شود.
+    // چون مبنا «شروع سیکل» است نه «شروع انتظار»، اگر کاربر همین حین مقدار
+    // CYCLE_PERIOD_MS را از سرور عوض کند، همان لحظه با مقدار تازه بازمحاسبه
+    // می‌شود؛ نیازی به ریست از صفر نیست.
+    for (;;) {
+      uint32_t targetPeriod = gCyclePeriodMs;  // ممکن است حین انتظار از سرور تغییر کرده باشد
+      uint32_t elapsedSinceStart = millis() - cycleStartMs;
+      if (elapsedSinceStart >= targetPeriod) break;  // دیر شده/دقیقاً رسیده -> بی‌معطلی ادامه
+      uint32_t remaining = targetPeriod - elapsedSinceStart;
+      uint32_t step = (remaining < CYCLE_WAIT_POLL_MS) ? remaining : CYCLE_WAIT_POLL_MS;
+      vTaskDelay(pdMS_TO_TICKS(step));
+    }
   }
 }
 
@@ -1650,12 +1874,17 @@ void TaskRelayControl(void *pv) {
 //        TASK: خواندن فیدبک‌های دیجیتال در طول پنجره‌ی مانیتورینگ
 // =====================================================================
 void TaskDigitalRead(void *pv) {
-  // هر چهار پین فیدبک هم‌زمان مانیتور می‌شوند (هر دو BCM در آنِ واحد)
-  const int pinCount = PHASE_COUNT * DEVICE_COUNT;
-  uint8_t pins[PHASE_COUNT * DEVICE_COUNT];
+  // هر چهار پین فیدبک هم‌زمان مانیتور می‌شوند (هر دو BCM در آنِ واحد)، به‌علاوه
+  // یک پین پنجم: PIN_INDICATOR (GPIO34)، که دقیقاً با همان الگوریتم debounce
+  // (PULSE_CONFIRM_MS) خوانده می‌شود — آخرین اندیس آرایه‌ی pins[].
+  const int FB_PIN_COUNT = PHASE_COUNT * DEVICE_COUNT;
+  const int pinCount = FB_PIN_COUNT + 1;  // +1 برای Indicator
+  const int INDICATOR_IDX = FB_PIN_COUNT;
+  uint8_t pins[FB_PIN_COUNT + 1];
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++)
       pins[p * DEVICE_COUNT + d] = FEEDBACK_PINS[p][d];
+  pins[INDICATOR_IDX] = PIN_INDICATOR;
 
   bool lastState[8];
   uint32_t highSince[8];
@@ -1697,6 +1926,7 @@ void TaskDigitalRead(void *pv) {
     for (int p = 0; p < PHASE_COUNT; p++)
       for (int d = 0; d < DEVICE_COUNT; d++)
         if (confirmed[p * DEVICE_COUNT + d]) fbSeen[p][d] = true;
+    if (confirmed[INDICATOR_IDX]) fbIndicatorSeen = true;
 
     xEventGroupSetBits(xSystemEvents, BIT_DIGITAL_READ_COMPLETE);
   }
@@ -2125,7 +2355,8 @@ void saveRecord(const WifiData &data) {
 void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
   snprintf(out, outSize,
            "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
-           "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d",
+           "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
+           "cycle=%u,Indicator=%s,Buzzer=%s",
            d.NUM,
            d.BCM1_OPEN ? "OK" : "NOK",
            d.BCM1_CLOSE ? "OK" : "NOK",
@@ -2133,7 +2364,10 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
            d.BCM2_CLOSE ? "OK" : "NOK",
            d.Temp, d.Hum,
            d.Year, d.Month, d.Day,
-           d.Hour, d.Minute, d.Second);
+           d.Hour, d.Minute, d.Second,
+           (unsigned)(d.CycleAttempt ? d.CycleAttempt : 1),
+           d.Indicator ? "OK" : "NOK",
+           d.Buzzer ? "OK" : "NOK");
 }
 
 void sendRecord(WiFiClient &cl, const WifiData &d) {
@@ -2488,11 +2722,14 @@ void TaskHealthMonitor(void *pv) {
     uint32_t lastChangeMs;
   };
 
+  // سقف‌های رله/دیجیتال/سنسور از gCyclePeriodMs مشتق می‌شوند که از سرور
+  // قابل تغییر است؛ مقدار اولیه از همان لحظه‌ی شروع تسک گرفته می‌شود و در
+  // حلقه‌ی زیر هر بار به‌روز می‌شود تا تغییرات زمان اجرا هم اعمال شوند.
   Beat beats[] = {
     { "شبکه", &hbNet, WDT_TIMEOUT_NET_MS, 0, millis() },
-    { "رله", &hbRelay, WDT_TIMEOUT_RELAY_MS, 0, millis() },
-    { "دیجیتال", &hbDigital, WDT_TIMEOUT_DIGITAL_MS, 0, millis() },
-    { "سنسور", &hbSht, WDT_TIMEOUT_SHT_MS, 0, millis() },
+    { "رله", &hbRelay, gCyclePeriodMs * 3, 0, millis() },
+    { "دیجیتال", &hbDigital, gCyclePeriodMs * 3, 0, millis() },
+    { "سنسور", &hbSht, gCyclePeriodMs * 3, 0, millis() },
   };
   const int beatCount = sizeof(beats) / sizeof(beats[0]);
 
@@ -2501,6 +2738,12 @@ void TaskHealthMonitor(void *pv) {
 
   for (;;) {
     vTaskDelayUntil(&lastWake, period);
+
+    // سقف‌های وابسته به دوره‌ی سیکل را تازه نگه دار (ممکن است از سرور
+    // در حین اجرا تغییر کرده باشد؛ اندیس‌ها مطابق ترتیب تعریف beats[] بالاست)
+    beats[1].timeoutMs = gCyclePeriodMs * 3;
+    beats[2].timeoutMs = gCyclePeriodMs * 3;
+    beats[3].timeoutMs = gCyclePeriodMs * 3;
 
     size_t freeHeap = ESP.getFreeHeap();
     size_t minHeap = ESP.getMinFreeHeap();

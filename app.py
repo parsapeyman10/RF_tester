@@ -116,6 +116,16 @@ def build_bcm_results(stored_fields):
     return out
 
 
+def compute_cycle_ok(stored_fields):
+    """
+    ستون «Cycle»: آیا این سیکل داده را کامل دریافت کرد؟
+    یعنی AND هر چهار سیگنال: BCM1 (باز و بسته) AND BCM2 (باز و بسته).
+    فقط وقتی هر دو BCM به‌طور کامل OK باشند True است.
+    """
+    res = build_bcm_results(stored_fields)
+    return bool(res["BCM1"]["ok"] and res["BCM2"]["ok"])
+
+
 TEMPLATE_DIR = _resolve_templates()
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 
@@ -167,6 +177,24 @@ class MasterReading(db.Model):
     date = db.Column(db.String(50), nullable=True) 
     timestamp = db.Column(db.DateTime, nullable=False, index=True) 
     formatted_log = db.Column(db.String(500), nullable=True)
+    # ستون «Cycle» — سیکلی که داده‌اش کامل دریافت شد: یعنی هم باز شدن و
+    # هم بسته شدن، در هر دو BCM (BCM1 و BCM2) با موفقیت تأیید شده باشد.
+    # True/False = AND چهار سیگنال (BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE)
+    cycle = db.Column(db.Boolean, nullable=True, default=False, index=True)
+    # ستون «Attempts» (پروتکل: cycle=<1|2|3>) — این یک مفهوم کاملاً جدا از
+    # ستون Cycle بالاست: تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید
+    # تا هر دو BCM را تایید کند (یا بعد از ۳ تلاش ناقص بماند).
+    #   ۱ = بار اول موفق شد   ۲ = بار دوم موفق شد   ۳ = بعد از ۳ تلاش هم تمام شد
+    # می‌تواند None باشد (رکوردهای قدیمی/فریمورهای قدیمی که این فیلد را نمی‌فرستند)
+    cycle_attempt = db.Column(db.Integer, nullable=True)
+    # دو سیگنال دیجیتال اضافی (GPIO34=Indicator بر پایه‌ی سطح، GPIO35=Buzzer
+    # بر پایه‌ی شمارش لبه‌ی پالس مربعی). ESP32 همیشه این دو را می‌خواند و
+    # می‌فرستد؛ اما سمت سرور فقط وقتی تیک تنظیمات «ذخیره‌ی Indicator/Buzzer»
+    # روشن باشد در این دو ستون نوشته می‌شوند؛ در غیر این‌صورت مقدار پارس
+    # می‌شود ولی در دیتابیس ذخیره نمی‌گردد (None می‌ماند) تا رفتار/شِمای
+    # فعلی دیتابیس دست‌نخورده باقی بماند.
+    indicator = db.Column(db.Boolean, nullable=True)
+    buzzer = db.Column(db.Boolean, nullable=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -275,7 +303,7 @@ def insert_daily_rows(date_str, rows):
 UNSAVED_LOG = os.path.join(DATA_DIR, "unsaved_records.log")
 
 
-def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
+def record_to_line(num_value, fields, temp, humidity, date_str, time_str, cycle_attempt=None):
     """ساخت همان خط استاندارد پروژه از روی مقادیر یک رکورد"""
     # fields می‌تواند رشته‌ی «,»جداشده یا لیست باشد
     if isinstance(fields, (list, tuple, set)):
@@ -288,6 +316,8 @@ def record_to_line(num_value, fields, temp, humidity, date_str, time_str):
     parts.append(f"Humidity={humidity}")
     parts.append(f"Date={date_str}")
     parts.append(f"Time={time_str}")
+    if cycle_attempt is not None:
+        parts.append(f"cycle={cycle_attempt}")
     return ",".join(parts)
 
 
@@ -441,13 +471,39 @@ def save_sensor_data(data_source, raw_line=None):
         i_time = data_source.get('time') or now_tehran.strftime('%H:%M:%S')
         i_date = data_source.get('date') or now_tehran.strftime('%Y-%m-%d')
 
-        # --- ساخت Timestamp واقعی از روی دستگاه ---
-        try:
-            dt_str = f"{i_date} {i_time}"
-            real_timestamp = datetime.datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S')
-        except Exception:
-            # در صورت خطا در فرمت، همان زمان آپلود را بگذار
-            real_timestamp = now_tehran
+        # تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید (فیلد «cycle=»
+        # در پروتکل). اختیاری است؛ اگر نیامده بود None می‌ماند.
+        cyc_raw = data_source.get('cycle_attempt')
+        cycle_attempt_val = None
+        if cyc_raw not in (None, ""):
+            try:
+                cycle_attempt_val = max(1, min(3, int(cyc_raw)))
+            except (TypeError, ValueError):
+                cycle_attempt_val = None
+
+        # دو سیگنال دیجیتال اضافی (Indicator=GPIO34, Buzzer=GPIO35) — دو
+        # فانکشنِ مربوط به BCM2. ESP32 همیشه این دو را می‌فرستد و ESP8266
+        # همیشه آن‌ها را به سرور می‌رساند؛ پس همیشه در دیتابیس هم ذخیره
+        # می‌شوند (داده‌ای که از سخت‌افزار می‌رسد دور ریخته نمی‌شود). تیک
+        # تنظیماتِ «ذخیره‌ی Indicator/Buzzer» فقط تصمیم می‌گیرد این دو
+        # ستون در صفحه‌ی تاریخچه نمایش داده شوند یا نه — کاملاً یک تنظیمِ
+        # نمایشی سمت سرور است، نه تصمیم‌گیری درباره‌ی ذخیره‌سازی.
+        indicator_val = None
+        buzzer_val = None
+        ind_raw = data_source.get('indicator')
+        buz_raw = data_source.get('buzzer')
+        if isinstance(ind_raw, bool):
+            indicator_val = ind_raw
+        if isinstance(buz_raw, bool):
+            buzzer_val = buz_raw
+
+
+        # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
+        # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
+        # «زمان ثبت» باید همان ساعت سرور (کامپیوتر) در لحظه‌ی ذخیره باشد.
+        # تاریخ/ساعت دستگاه هنوز در ستون‌های جداگانه‌ی date/time نگه داشته
+        # می‌شود و مبنای مرتب‌سازی و نمایش «ساعت دستگاه (RTC)» است.
+        real_timestamp = now_tehran.replace(tzinfo=None)
 
         # هرچه غیر از کانال‌های تعریف‌شده باشد کنار گذاشته می‌شود
         nbcm_checked_list = normalize_fields(nbcm_checked_list)
@@ -456,7 +512,7 @@ def save_sensor_data(data_source, raw_line=None):
 
         # خط استاندارد برای بکاپ — از همین لحظه آماده است
         backup_line = raw_line or record_to_line(
-            num_int, nbcm_str, t_val, h_val, i_date, i_time)
+            num_int, nbcm_str, t_val, h_val, i_date, i_time, cycle_attempt_val)
 
         # --- جلوگیری از رکورد تکراری ---
         # منابع تکرار: اکوی سریال، ارسال مجدد ESP32 وقتی ACK گم می‌شود،
@@ -469,8 +525,12 @@ def save_sensor_data(data_source, raw_line=None):
         master_entry = MasterReading(
             num_value=num_int, nbcm_selected=nbcm_str,
             humidity=h_val, temp=t_val, time=i_time, date=i_date,
-            timestamp=real_timestamp,  # زمان واقعی دستگاه
-            formatted_log=log_str
+            timestamp=real_timestamp,  # زمان ثبت = ساعت سرور در لحظه‌ی ذخیره
+            formatted_log=log_str,
+            cycle=compute_cycle_ok(nbcm_str),
+            cycle_attempt=cycle_attempt_val,
+            indicator=indicator_val,
+            buzzer=buzzer_val
         )
         db.session.add(master_entry)
         try:
@@ -560,6 +620,101 @@ def send_serial_line(line):
     return False
 
 # =====================================================================
+#  تنظیم از‌راه‌دور زمان‌بندی سیکل ESP32 (CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS)
+#
+#  به‌جای هاردکد در فرم‌ور، این دو مقدار از داشبورد قابل تغییرند و از
+#  مسیر سرور --Serial--> ESP8266 --TCP--> ESP32 به‌صورت یک خط
+#  «CFG CYCLE_PERIOD_MS=<ms>;RELAY_RETRY_GAP_MS=<ms>» فرستاده می‌شوند.
+#  ESP32 خودش مقدار را اعتبارسنجی/clamp و در NVS دائمی می‌کند.
+#
+#  چون این مسیر «ارسال و فراموش» است (نه مثل داده‌ها که ACK دارند)، برای
+#  اطمینان از رسیدن حتی اگر لحظه‌ی تنظیم، ESP32 آنلاین نباشد، همین خط
+#  همراه هر ضربان SRV_READY (هر ۱۰ ثانیه) هم دوباره فرستاده می‌شود؛ به
+#  محض اینکه ESP32 وصل شود، در اولین ضربان بعدی مقدار را می‌گیرد.
+# =====================================================================
+CYCLE_CONFIG_FILE = os.path.join(DATA_DIR, 'cycle_config.json')
+DEFAULT_CYCLE_PERIOD_MS = 120000     # باید با DEFAULT_CYCLE_PERIOD_MS فرم‌ور ESP32 یکی باشد
+DEFAULT_RELAY_RETRY_GAP_MS = 2000    # باید با DEFAULT_RELAY_RETRY_GAP_MS فرم‌ور ESP32 یکی باشد
+MIN_CYCLE_PERIOD_MS, MAX_CYCLE_PERIOD_MS = 35000, 3600000
+MIN_RELAY_RETRY_GAP_MS, MAX_RELAY_RETRY_GAP_MS = 200, 60000
+
+cycle_config = {
+    'cycle_period_ms': DEFAULT_CYCLE_PERIOD_MS,
+    'relay_retry_gap_ms': DEFAULT_RELAY_RETRY_GAP_MS,
+}
+
+
+def load_cycle_config():
+    global cycle_config
+    if not os.path.exists(CYCLE_CONFIG_FILE):
+        return
+    try:
+        with open(CYCLE_CONFIG_FILE, encoding='utf-8') as fh:
+            saved = json.load(fh)
+        cycle_config['cycle_period_ms'] = int(saved.get('cycle_period_ms', DEFAULT_CYCLE_PERIOD_MS))
+        cycle_config['relay_retry_gap_ms'] = int(saved.get('relay_retry_gap_ms', DEFAULT_RELAY_RETRY_GAP_MS))
+        print(f"[CFG] زمان‌بندی سیکل قبلی بازیابی شد: {cycle_config}")
+    except Exception as exc:
+        print(f"[CFG] خواندن تنظیمات زمان‌بندی ناموفق: {exc}")
+
+
+def save_cycle_config():
+    try:
+        with open(CYCLE_CONFIG_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(cycle_config, fh)
+    except Exception as exc:
+        print(f"[CFG] ذخیره‌ی تنظیمات زمان‌بندی ناموفق: {exc}")
+
+
+def build_cfg_line():
+    return (f"CFG CYCLE_PERIOD_MS={cycle_config['cycle_period_ms']};"
+            f"RELAY_RETRY_GAP_MS={cycle_config['relay_retry_gap_ms']}")
+
+
+# =====================================================================
+#  تیک تنظیماتِ «ذخیره‌ی Indicator/Buzzer در دیتابیس»
+#
+#  ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
+#  هر رکورد می‌فرستد (هیچ سوییچی سمت فرم‌ور نیست). این تنظیم کاملاً
+#  سمت سرور است: وقتی خاموش باشد (پیش‌فرض)، این دو فیلد پارس می‌شوند ولی
+#  در دیتابیس نوشته نمی‌شوند (رفتار/شِمای فعلی دست‌نخورده می‌ماند)؛ وقتی
+#  روشن شود، از همان لحظه به بعد در دو ستون indicator/buzzer ذخیره می‌شوند.
+# =====================================================================
+EXTRA_SIGNALS_CONFIG_FILE = os.path.join(DATA_DIR, 'extra_signals_config.json')
+
+extra_signals_config = {
+    'save_indicator_buzzer': False,
+}
+
+
+def load_extra_signals_config():
+    global extra_signals_config
+    if not os.path.exists(EXTRA_SIGNALS_CONFIG_FILE):
+        return
+    try:
+        with open(EXTRA_SIGNALS_CONFIG_FILE, encoding='utf-8') as fh:
+            saved = json.load(fh)
+        extra_signals_config['save_indicator_buzzer'] = bool(saved.get('save_indicator_buzzer', False))
+        print(f"[CFG] تنظیمات Indicator/Buzzer قبلی بازیابی شد: {extra_signals_config}")
+    except Exception as exc:
+        print(f"[CFG] خواندن تنظیمات Indicator/Buzzer ناموفق: {exc}")
+
+
+def save_extra_signals_config():
+    """تلاش برای نوشتن تنظیمات روی دیسک. True/False برمی‌گرداند تا
+    endpoint بتواند به کاربر خبر بدهد که آیا تنظیم فقط برای همین اجرای
+    سرور فعال شد یا واقعاً روی دیسک هم ماندگار گشت (مثلاً اگر پوشه‌ی
+    کنار exe قابل‌نوشتن نباشد، حداقل در حافظه درست باقی می‌ماند)."""
+    try:
+        with open(EXTRA_SIGNALS_CONFIG_FILE, 'w', encoding='utf-8') as fh:
+            json.dump(extra_signals_config, fh)
+        return True
+    except Exception as exc:
+        print(f"[CFG] ذخیره‌ی تنظیمات Indicator/Buzzer ناموفق: {exc}")
+        return False
+
+
+# =====================================================================
 #  تنظیمات پورت سریال ماندگار می‌شوند
 #  قبلاً فقط در حافظه بود؛ با هر بار بستن سرور، پورت و باود از دست
 #  می‌رفت و باید دوباره دستی انتخاب می‌شد.
@@ -603,6 +758,18 @@ def load_serial_config():
 # =====================================================================
 _FLOAT_RE = r"-?(?:\d+(?:\.\d+)?|nan|NaN|NAN|inf|Inf|INF)"
 
+#  فیلد انتهایی «,cycle=<1|2|3>[,Indicator=OK/NOK,Buzzer=OK/NOK]» اختیاری
+#  است. cycle به‌تنهایی اختیاری گذاشته شده تا خط‌های فریمورهای قدیمی‌تر
+#  (قبل از این قابلیت) یا رکوردهای قدیمیِ stash‌شده در unsaved_records.log
+#  هم بدون خطا پارس شوند. Indicator/Buzzer (GPIO34/GPIO35) فیلدهای جدیدتری
+#  هستند که فقط همراه با cycle= می‌آیند (فریمورهایی که cycle دارند ولی این
+#  دو را ندارند هم هنوز معتبر پارس می‌شوند — سازگاری رو به عقب).
+_CYCLE_SUFFIX_RE = (
+    r"(?:,cycle=(?P<cyc>\d+)"
+    r"(?:,Indicator=(?P<ind>[A-Za-z0-9]+),Buzzer=(?P<buz>[A-Za-z0-9]+))?"
+    r")?"
+)
+
 INDUSTRIAL_LINE_RE = re.compile(
     r"NUM=(?P<num>-?\d+),"
     r"BCM1_OPEN=(?P<f1>[A-Za-z0-9]+),BCM1_CLOSE=(?P<f2>[A-Za-z0-9]+),"
@@ -610,6 +777,7 @@ INDUSTRIAL_LINE_RE = re.compile(
     rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+    + _CYCLE_SUFFIX_RE
 )
 
 # فریمورهای قدیمی که هنوز NBCM1..4 می‌فرستند هم پذیرفته می‌شوند
@@ -620,6 +788,7 @@ LEGACY_LINE_RE = re.compile(
     rf"Temp=(?P<temp>{_FLOAT_RE}),Humidity=(?P<hum>{_FLOAT_RE}),"
     r"Date=(?P<y>\d{4})-(?P<mo>\d{1,2})-(?P<d>\d{1,2}),"
     r"Time=(?P<hh>\d{1,2}):(?P<mi>\d{1,2}):(?P<ss>\d{1,2})"
+    + _CYCLE_SUFFIX_RE
 )
 
 TRUE_TOKENS = ("OK", "1", "TRUE", "YES")
@@ -641,6 +810,23 @@ def parse_industrial_line(line):
         time_str = "%02d:%02d:%02d" % (int(g["hh"]), int(g["mi"]), int(g["ss"]))
         # اعتبارسنجی واقعی تاریخ (مثلاً 2026-02-31 رد می‌شود)
         datetime.datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+        # «cycle=» یعنی تعداد تلاش‌هایی که ESP32 برای تایید هر دو BCM طول
+        # کشید (۱/۲/۳). اختیاری است؛ اگر نیامده بود None می‌ماند (مثلاً
+        # فریمور قدیمی یا ورودی دستی از صفحه‌ی /paste).
+        cyc_raw = g.get("cyc")
+        cycle_attempt = None
+        if cyc_raw not in (None, ""):
+            try:
+                cycle_attempt = max(1, min(3, int(cyc_raw)))
+            except (TypeError, ValueError):
+                cycle_attempt = None
+        # Indicator (GPIO34) / Buzzer (GPIO35): اختیاری‌اند (فقط فریمورهای
+        # جدید می‌فرستند)؛ اگر نیامده باشند None می‌مانند — ذخیره یا نه در
+        # دیتابیس را save_sensor_data بر اساس تنظیمات سروری تصمیم می‌گیرد.
+        ind_raw = g.get("ind")
+        buz_raw = g.get("buz")
+        indicator = ind_raw.strip().upper() in TRUE_TOKENS if ind_raw not in (None, "") else None
+        buzzer = buz_raw.strip().upper() in TRUE_TOKENS if buz_raw not in (None, "") else None
         return {
             'num_value': g["num"],
             'nbcm': nbcm,
@@ -648,6 +834,9 @@ def parse_industrial_line(line):
             'humidity': g["hum"],
             'date': date_str,
             'time': time_str,
+            'cycle_attempt': cycle_attempt,
+            'indicator': indicator,
+            'buzzer': buzzer,
         }
     except Exception as exc:
         print(f"[PARSE_ERR] {exc} :: {line[:120]}")
@@ -704,6 +893,7 @@ def handle_serial_line(line):
     if line.startswith("SRV_HELLO"):
         # گیرنده تازه بوت/وصل شده؛ وضعیت آماده بودن و شناسه‌ی نشست را بده
         send_serial_line(f"SRV_READY {serial_session_id or make_session_id()}")
+        send_serial_line(build_cfg_line())  # زمان‌بندی جاری هم همراهش برود
         return True
     if line.startswith("SRV_PING"):
         send_serial_line(f"SRV_PONG {serial_session_id or ''}".strip())
@@ -747,6 +937,7 @@ def read_serial_worker():
                         serial_session_id = make_session_id()
                         last_ready_sent = time.time()
                         send_serial_line(f"SRV_READY {serial_session_id}")
+                        send_serial_line(build_cfg_line())  # زمان‌بندی جاری هم همراهش برود
                         print(f"[SERIAL] Connected to {active_serial_port} "
                               f"(session {serial_session_id})")
                     except Exception as e:
@@ -776,6 +967,7 @@ def read_serial_worker():
                     # معطلی می‌فهمد که سرور پشت پورت نشسته است
                     if time.time() - last_ready_sent >= SRV_READY_PERIOD:
                         send_serial_line(f"SRV_READY {serial_session_id}")
+                        send_serial_line(build_cfg_line())  # تضمین رسیدن حتی اگر ESP32 دیرتر وصل شده باشد
                         last_ready_sent = time.time()
                     time.sleep(0.01)
             else:
@@ -803,9 +995,33 @@ def upload_dat_page():
             return jsonify({'status': 'error', 'message': 'No files received'}), 400
         
         uploaded_files = request.files.getlist('folder_upload')
-        STRUCT_FORMAT = '<iff????iBBBBB'
-        EXPECTED_SIZE = 25
-        
+        # فرمت قدیمی (قبل از قابلیت cycle=): ۲۵ بایت، بدون تعداد تلاش
+        STRUCT_FORMAT_OLD = '<iff????iBBBBB'
+        EXPECTED_SIZE_OLD = struct.calcsize(STRUCT_FORMAT_OLD)   # 25
+        # فرمت میانی: یک بایت اضافه در انتها برای cycle_attempt (۱/۲/۳)
+        STRUCT_FORMAT_NEW = '<iff????iBBBBBB'
+        EXPECTED_SIZE_NEW = struct.calcsize(STRUCT_FORMAT_NEW)   # 26
+        # فرمت فعلی: دو بولی اضافه در انتها برای Indicator (GPIO34) و
+        # Buzzer (GPIO35)
+        STRUCT_FORMAT_V3 = '<iff????iBBBBBB??'
+        EXPECTED_SIZE_V3 = struct.calcsize(STRUCT_FORMAT_V3)     # 28
+
+        def detect_record_format(data_len):
+            """
+            فایل‌های .dat قبل از این آپدیت‌ها ۲۵ یا ۲۶ بایت/رکورد بودند؛ از
+            این به بعد ۲۸ بایت/رکورد (با Indicator/Buzzer اضافه) خواهند بود.
+            چون نمی‌توان مطمئن بود فایل آپلودی با کدام فریمور ساخته شده،
+            اندازه‌ای که طول فایل را دقیقاً (بدون باقی‌مانده) می‌پوشاند
+            انتخاب می‌شود — جدیدترین فرمت در اولویت است.
+            """
+            if data_len % EXPECTED_SIZE_V3 == 0:
+                return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3
+            if data_len % EXPECTED_SIZE_NEW == 0:
+                return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW
+            if data_len % EXPECTED_SIZE_OLD == 0:
+                return STRUCT_FORMAT_OLD, EXPECTED_SIZE_OLD
+            return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
+
         master_buffer = []
         
         success_count = 0      # رکوردهای سالمِ جدید که برای ذخیره آماده شدند
@@ -822,6 +1038,9 @@ def upload_dat_page():
             
             try:
                 file_bytes = file.read()
+                STRUCT_FORMAT, EXPECTED_SIZE = detect_record_format(len(file_bytes))
+                has_cycle_attempt = (EXPECTED_SIZE in (EXPECTED_SIZE_NEW, EXPECTED_SIZE_V3))
+                has_extra_signals = (EXPECTED_SIZE == EXPECTED_SIZE_V3)
                 # اگر انتهای فایل خراب/ناقص بود، رکوردهای «کامل» داخلش
                 # نجات داده می‌شوند — قبلاً کل فایل دور ریخته می‌شد.
                 usable = (len(file_bytes) // EXPECTED_SIZE) * EXPECTED_SIZE
@@ -865,14 +1084,28 @@ def upload_dat_page():
                     
                     device_date_str = f"{year}-{month:02d}-{day:02d}"
                     device_time_str = f"{hour:02d}:{minute:02d}:{second:02d}"
-                    
-                    try:
-                        sensor_dt = datetime.datetime.strptime(
-                            f"{device_date_str} {device_time_str}", '%Y-%m-%d %H:%M:%S')
-                    except Exception:
-                        sensor_dt = upload_time_server
 
                     formatted_log = f"NUM:{num_val}, H:{hum_str}, T:{temp_str}"
+
+                    # تعداد تلاش (cycle_attempt): فقط فایل‌های فرمت میانی/جدید
+                    # (۲۶ یا ۲۸ بایت) این بایت را دارند؛ فایل‌های قدیمی (۲۵
+                    # بایتی) None می‌مانند
+                    cyc_val = None
+                    if has_cycle_attempt:
+                        cyc_raw = data[13]
+                        if cyc_raw:
+                            cyc_val = max(1, min(3, int(cyc_raw)))
+
+                    # Indicator (GPIO34) / Buzzer (GPIO35): فقط فایل‌های فرمت
+                    # فعلی (۲۸ بایتی) این دو بولی آخر را دارند. مثل مسیر
+                    # سریال، همیشه در دیتابیس ذخیره می‌شوند (داده‌ای که از
+                    # سخت‌افزار می‌رسد دور ریخته نمی‌شود)؛ تیک تنظیمات فقط
+                    # نمایش این دو ستون در تاریخچه را کنترل می‌کند.
+                    indicator_val = None
+                    buzzer_val = None
+                    if has_extra_signals:
+                        indicator_val = bool(data[14])
+                        buzzer_val = bool(data[15])
 
                     # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
                     if master_exists(num_val, device_date_str, device_time_str):
@@ -886,9 +1119,13 @@ def upload_dat_page():
                         temp=temp_str,      # قبلاً Float بود که باعث خطا می‌شد
                         time=device_time_str,
                         date=device_date_str,
-                        # مرجع زمان در کل سیستم، RTC دستگاه است
-                        timestamp=sensor_dt,
-                        formatted_log=formatted_log
+                        # زمان ثبت = ساعت سرور در لحظه‌ی آپلود (نه RTC دستگاه)
+                        timestamp=upload_time_server.replace(tzinfo=None),
+                        formatted_log=formatted_log,
+                        cycle=compute_cycle_ok(nbcm_str),
+                        cycle_attempt=cyc_val,
+                        indicator=indicator_val,
+                        buzzer=buzzer_val
                     ))
                     success_count += 1
             except Exception as e:
@@ -1004,7 +1241,8 @@ def history():
 
     return render_template('history.html', readings=readings, label=label,
                            dates=available_dates, current_date=target_date,
-                           bcm_results=build_bcm_results)
+                           bcm_results=build_bcm_results, cycle_ok=compute_cycle_ok,
+                           show_indicator_buzzer=bool(extra_signals_config.get('save_indicator_buzzer')))
 
 @app.route('/submit_form', methods=['POST'])
 def submit_form():
@@ -1040,7 +1278,11 @@ def get_sensor_data():
                 'date': r.date,       # تاریخ دستگاه
                 'timestamp': r.timestamp, # زمان آپلود (صرفا جهت اطلاع)
                 'nbcm_statuses': nbcm_map,
-                'bcm_results': build_bcm_results(r.nbcm_selected)
+                'bcm_results': build_bcm_results(r.nbcm_selected),
+                'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
+                'cycle_attempt': r.cycle_attempt,
+                'indicator': r.indicator,
+                'buzzer': r.buzzer
             })
             
         return jsonify(output)
@@ -1048,6 +1290,74 @@ def get_sensor_data():
     except Exception as e:
         print(f"[API Error] {e}")
         return jsonify([])
+
+
+# =====================================================================
+#  آمار تجمعیِ همه‌ی رکوردهای ثبت‌شده (از ابتدا تا الان) برای BCM1 و BCM2
+#  به تفکیک باز شدن (OPEN) و بسته شدن (CLOSE):
+#      «کار کرده»  = همان حرکت در آن رکورد با موفقیت تأیید شده (OK)
+#      «کار نکرده» = همان حرکت تأیید نشده (NOK)
+#  برای نمایش در مکعب دما/رطوبت در بالای داشبورد
+# =====================================================================
+@app.route('/api/bcm_stats')
+def api_bcm_stats():
+    try:
+        from sqlalchemy import func, or_
+
+        # نکته‌ی مهم: رکوردهای قدیمی ممکن است با نام‌گذاری قدیمی
+        # NBCM1..NBCM4 ذخیره شده باشند (قبل از مهاجرت به BCM1_OPEN...).
+        # هر دو فرمت (جدید و قدیمی) با OR در یک کوئری شمرده می‌شوند تا
+        # هم درست باشد و هم روی جدول‌های بزرگ کند نشود (کل جدول به پایتون
+        # کشیده نمی‌شود، فقط COUNT در خود دیتابیس انجام می‌شود).
+        NEW_TO_LEGACY = {v: k for k, v in LEGACY_FIELD_MAP.items()}
+
+        def patterns_for(field_name):
+            pats = [field_name]
+            legacy = NEW_TO_LEGACY.get(field_name)
+            if legacy:
+                pats.append(legacy)
+            return pats
+
+        def count_match(*field_names):
+            """تعداد رکوردهایی که همه‌ی field_name ها حضور دارند (AND)؛
+            هر فیلد می‌تواند با نام جدید یا معادل قدیمی‌اش ذخیره شده باشد (OR)."""
+            q = db.session.query(func.count(MasterReading.id))
+            for name in field_names:
+                pats = patterns_for(name)
+                q = q.filter(or_(*[MasterReading.nbcm_selected.like(f"%{p}%") for p in pats]))
+            return q.scalar() or 0
+
+        total = db.session.query(func.count(MasterReading.id)).scalar() or 0
+
+        bcm1_open_ok = count_match("BCM1_OPEN")
+        bcm1_close_ok = count_match("BCM1_CLOSE")
+        bcm2_open_ok = count_match("BCM2_OPEN")
+        bcm2_close_ok = count_match("BCM2_CLOSE")
+
+        # عملکرد صحیح = AND باز و بسته با هم؛ یعنی فقط وقتی هر دو حرکت
+        # با موفقیت تأیید شده باشند، آن چرخه «کار کرده» حساب می‌شود
+        bcm1_correct_ok = count_match("BCM1_OPEN", "BCM1_CLOSE")
+        bcm2_correct_ok = count_match("BCM2_OPEN", "BCM2_CLOSE")
+
+        def stat(ok):
+            return {'ok': ok, 'fail': max(total - ok, 0)}
+
+        return jsonify({
+            'total': total,
+            'BCM1': {'open': stat(bcm1_open_ok), 'close': stat(bcm1_close_ok),
+                     'correct': stat(bcm1_correct_ok)},
+            'BCM2': {'open': stat(bcm2_open_ok), 'close': stat(bcm2_close_ok),
+                     'correct': stat(bcm2_correct_ok)},
+        })
+    except Exception as e:
+        print(f"[API Error] bcm_stats: {e}")
+        _empty = {'open': {'ok': 0, 'fail': 0}, 'close': {'ok': 0, 'fail': 0},
+                  'correct': {'ok': 0, 'fail': 0}}
+        # خطای واقعی هم در پاسخ برگردانده می‌شود تا بدون نیاز به دسترسی به
+        # کنسول سرور هم بشود علت صفر ماندن شمارش را فهمید
+        return jsonify({'total': 0, 'BCM1': _empty, 'BCM2': dict(_empty),
+                        'error': str(e)})
+
 
 # در فایل app.py، این تابع را جایگزین تابع get_master_data کنید
 
@@ -1093,6 +1403,10 @@ def get_master_data():
             'timestamp': iso_timestamp,  # <--- این متغیر کلیدی است
             'nbcm_statuses': nbcm_map,
             'bcm_results': build_bcm_results(r.nbcm_selected),
+            'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
+            'cycle_attempt': r.cycle_attempt,
+            'indicator': r.indicator,
+            'buzzer': r.buzzer,
             'date': r.date
         })
 
@@ -1268,6 +1582,24 @@ def import_csv():
                 if val in TRUE_TOKENS:
                     fields.append(name)
 
+            # ستون «Attempts»/«CYCLE_ATTEMPT» اختیاری است (خروجی اکسل جدید آن
+            # را دارد؛ فایل‌های قدیمی‌تر ندارند و None می‌ماند)
+            cyc_raw = pick(row, 'ATTEMPTS', 'CYCLE_ATTEMPT')
+            cyc_val = None
+            if cyc_raw:
+                try:
+                    cyc_val = max(1, min(3, int(float(cyc_raw))))
+                except (TypeError, ValueError):
+                    cyc_val = None
+
+            # ستون‌های «Indicator»/«Buzzer» هم اختیاری‌اند (خروجی اکسل جدید
+            # آن‌ها را دارد، اگر تیک تنظیمات روشن بوده باشد؛ فایل‌های
+            # قدیمی‌تر یا سلول خالی -> None می‌ماند)
+            ind_raw = pick(row, 'INDICATOR')
+            buz_raw = pick(row, 'BUZZER')
+            indicator_val = ind_raw.upper() in TRUE_TOKENS if ind_raw else None
+            buzzer_val = buz_raw.upper() in TRUE_TOKENS if buz_raw else None
+
             payload = {
                 'num_value': num,
                 'nbcm': fields,
@@ -1275,11 +1607,14 @@ def import_csv():
                 'humidity': pick(row, 'HUMIDITY', 'HUM') or '0',
                 'date': date_s,
                 'time': time_s,
+                'cycle_attempt': cyc_val,
+                'indicator': indicator_val,
+                'buzzer': buzzer_val,
             }
             # خط استاندارد برای بکاپ‌گیری در صورت شکست ذخیره
             raw_line = record_to_line(safe_int(num), fields,
                                       payload['temp'], payload['humidity'],
-                                      date_s, time_s)
+                                      date_s, time_s, cyc_val)
 
             if master_exists(safe_int(num), date_s, time_s):
                 duplicates += 1
@@ -1385,6 +1720,98 @@ def close_serial_port():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route('/api/cycle_config')
+def get_cycle_config():
+    """مقادیر فعلی زمان‌بندی سیکل ESP32 (برای نمایش در فرم تنظیمات داشبورد)."""
+    return jsonify({
+        'cycle_period_ms': cycle_config['cycle_period_ms'],
+        'relay_retry_gap_ms': cycle_config['relay_retry_gap_ms'],
+        'min_cycle_period_ms': MIN_CYCLE_PERIOD_MS,
+        'max_cycle_period_ms': MAX_CYCLE_PERIOD_MS,
+        'min_relay_retry_gap_ms': MIN_RELAY_RETRY_GAP_MS,
+        'max_relay_retry_gap_ms': MAX_RELAY_RETRY_GAP_MS,
+        'serial_connected': bool(ser and ser.is_open),
+    })
+
+
+@app.route('/api/set_cycle_config', methods=['POST'])
+def set_cycle_config():
+    """
+    تنظیم از‌راه‌دور CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS.
+
+    مقدار معتبرسازی و در فایل محلی ذخیره می‌شود (تا بعد از ری‌استارت سرور
+    هم بماند)، سپس بلافاصله روی سریال به سمت ESP8266 فرستاده می‌شود. چون
+    این مسیر ACK ندارد، همین مقدار همراه هر ضربان SRV_READی بعدی (هر ۱۰
+    ثانیه) هم دوباره فرستاده می‌شود تا حتی اگر ESP32 لحظه‌ی تنظیم آنلاین
+    نبوده، به محض وصل‌شدن مقدار را بگیرد.
+    """
+    data = request.get_json(silent=True) or request.form
+    try:
+        cycle_ms = int(data.get('cycle_period_ms'))
+        gap_ms = int(data.get('relay_retry_gap_ms'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'مقادیر باید عدد صحیح (میلی‌ثانیه) باشند'}), 400
+
+    if not (MIN_CYCLE_PERIOD_MS <= cycle_ms <= MAX_CYCLE_PERIOD_MS):
+        return jsonify({'status': 'error',
+                        'message': f'CYCLE_PERIOD_MS باید بین {MIN_CYCLE_PERIOD_MS} و {MAX_CYCLE_PERIOD_MS} باشد'}), 400
+    if not (MIN_RELAY_RETRY_GAP_MS <= gap_ms <= MAX_RELAY_RETRY_GAP_MS):
+        return jsonify({'status': 'error',
+                        'message': f'RELAY_RETRY_GAP_MS باید بین {MIN_RELAY_RETRY_GAP_MS} و {MAX_RELAY_RETRY_GAP_MS} باشد'}), 400
+
+    cycle_config['cycle_period_ms'] = cycle_ms
+    cycle_config['relay_retry_gap_ms'] = gap_ms
+    save_cycle_config()
+
+    sent = send_serial_line(build_cfg_line())
+    print(f"[CFG] زمان‌بندی سیکل تنظیم شد: {cycle_config} (ارسال فوری روی سریال: {'موفق' if sent else 'پورت بسته/در صف ضربان بعدی'})")
+
+    return jsonify({'status': 'success', 'cycle_config': cycle_config, 'sent_immediately': sent})
+
+
+@app.route('/api/extra_signals_config')
+def get_extra_signals_config():
+    """وضعیت فعلی تیک «ذخیره‌ی Indicator/Buzzer در دیتابیس» (برای فرم تنظیمات داشبورد)."""
+    resp = jsonify({
+        'save_indicator_buzzer': extra_signals_config['save_indicator_buzzer'],
+    })
+    # تا هیچ مرورگر/پراکسی‌ای این پاسخ را کش نکند و همیشه تازه‌ترین وضعیتِ
+    # واقعیِ سرور خوانده شود (جلوگیری از هر گونه «پرش» ظاهریِ تیک به دلیل
+    # داده‌ی کهنه‌ی کش‌شده).
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+
+@app.route('/api/set_extra_signals_config', methods=['POST'])
+def set_extra_signals_config():
+    """
+    روشن/خاموش کردن ذخیره‌ی دو فیلد Indicator (GPIO34) و Buzzer (GPIO35)
+    در دیتابیس. ESP32 این دو را همیشه می‌خواند و می‌فرستد (بدون سوییچ
+    سمت فرم‌ور)؛ این تنظیم فقط تصمیم می‌گیرد سرور آن‌ها را بنویسد یا
+    parse-and-discard کند. مقدار در فایل محلی هم ذخیره می‌شود تا بعد از
+    ری‌استارت سرور باقی بماند.
+    """
+    data = request.get_json(silent=True) or request.form
+    raw = data.get('save_indicator_buzzer')
+    if isinstance(raw, bool):
+        enabled = raw
+    else:
+        enabled = str(raw).strip().lower() in ('1', 'true', 'on', 'yes')
+
+    extra_signals_config['save_indicator_buzzer'] = enabled
+    persisted = save_extra_signals_config()
+    print(f"[CFG] ذخیره‌ی Indicator/Buzzer در دیتابیس: {'فعال' if enabled else 'غیرفعال'}"
+          f"{' (⚠️ روی دیسک ذخیره نشد)' if not persisted else ''}")
+
+    resp = jsonify({
+        'status': 'success',
+        'extra_signals_config': extra_signals_config,
+        'persisted': persisted,
+    })
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return resp
+
+
 @app.route('/export_excel')
 def export_excel():
     target_date = request.args.get('date')
@@ -1393,6 +1820,7 @@ def export_excel():
     cw.writerow(['ID', 'NUM',
                  'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
                  'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
+                 'Cycle', 'Attempts', 'Indicator', 'Buzzer',
                  'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
@@ -1402,6 +1830,11 @@ def export_excel():
     
     for r in recs:
         res = build_bcm_results(r.nbcm_selected)
+        cycle_val = r.cycle if r.cycle is not None else (res['BCM1']['ok'] and res['BCM2']['ok'])
+        # Indicator/Buzzer همیشه ذخیره می‌شوند؛ فقط رکوردهای خیلی قدیمی
+        # (قبل از اضافه شدن این دو سیگنال) مقدار None خواهند داشت.
+        indicator_cell = '' if r.indicator is None else ('OK' if r.indicator else 'NOK')
+        buzzer_cell = '' if r.buzzer is None else ('OK' if r.buzzer else 'NOK')
         cw.writerow([
             r.id, r.num_value,
             'OK' if res['BCM1']['open'] else 'NOK',
@@ -1410,6 +1843,9 @@ def export_excel():
             'OK' if res['BCM2']['open'] else 'NOK',
             'OK' if res['BCM2']['close'] else 'NOK',
             'OK' if res['BCM2']['ok'] else 'NOK',
+            'OK' if cycle_val else 'NOK',
+            r.cycle_attempt if r.cycle_attempt is not None else '',
+            indicator_cell, buzzer_cell,
             r.temp, r.humidity, r.time, r.date, r.timestamp])
     
     return Response(si.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f"attachment; filename=report.csv"})
@@ -1483,6 +1919,82 @@ def _ensure_master_unique_index():
         return False
 
 
+def _ensure_master_cycle_column():
+    """
+    مهاجرتِ ستون «Cycle» روی دیتابیس‌های قدیمی‌تر.
+
+    db.create_all() فقط جدول‌های جدید را می‌سازد و ستون جدید را به جدول
+    از قبل موجود اضافه نمی‌کند؛ پس اگر دیتابیس قدیمی باشد، این تابع با
+    ALTER TABLE ستون cycle را اضافه می‌کند و مقدار آن را برای رکوردهای
+    قدیمی از روی nbcm_selected محاسبه و پر می‌کند (backfill).
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "cycle" in cols:
+                return True  # از قبل وجود دارد، کاری لازم نیست
+            conn.execute(text("ALTER TABLE master_reading ADD COLUMN cycle BOOLEAN DEFAULT 0"))
+        # Backfill: مقدار Cycle رکوردهای قدیمی را از روی nbcm_selected حساب کن
+        updated = 0
+        for row in MasterReading.query.all():
+            row.cycle = compute_cycle_ok(row.nbcm_selected)
+            updated += 1
+        db.session.commit()
+        print(f"[DB] ستون Cycle اضافه شد و برای {updated} رکورد قدیمی محاسبه شد.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون Cycle ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
+def _ensure_master_attempt_column():
+    """
+    مهاجرتِ ستون «cycle_attempt» (تعداد تلاش ۱/۲/۳) روی دیتابیس‌های قدیمی‌تر.
+
+    برخلاف ستون Cycle، این مقدار از روی داده‌ی قدیمی قابل بازسازی نیست
+    (چون فریمورهای قبلی اصلاً این عدد را نمی‌فرستادند)؛ پس رکوردهای قدیمی
+    با NULL باقی می‌مانند و در UI به‌صورت «—» نمایش داده می‌شوند.
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "cycle_attempt" in cols:
+                return True  # از قبل وجود دارد، کاری لازم نیست
+            conn.execute(text("ALTER TABLE master_reading ADD COLUMN cycle_attempt INTEGER"))
+        print("[DB] ستون cycle_attempt (تعداد تلاش) اضافه شد.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون cycle_attempt ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
+def _ensure_master_extra_signal_columns():
+    """
+    مهاجرتِ ستون‌های «indicator» و «buzzer» روی دیتابیس‌های قدیمی‌تر.
+
+    این دو سیگنال جدیدند؛ برای داده‌ی قدیمی قابل بازسازی نیستند، پس
+    رکوردهای قدیمی با NULL باقی می‌مانند (یعنی «—» در UI، مثل cycle_attempt).
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "indicator" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN indicator BOOLEAN"))
+            if "buzzer" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN buzzer BOOLEAN"))
+        print("[DB] ستون‌های indicator/buzzer بررسی/اضافه شدند.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون‌های indicator/buzzer ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
 def bootstrap_server(recover_unsaved=True, start_serial=True):
     """
     راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
@@ -1495,6 +2007,9 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
     with app.app_context():
         db.create_all()
         _ensure_master_unique_index()
+        _ensure_master_cycle_column()
+        _ensure_master_attempt_column()
+        _ensure_master_extra_signal_columns()
 
         # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
         if recover_unsaved and os.path.exists(UNSAVED_LOG):
@@ -1503,11 +2018,17 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
             except Exception as exc:
                 print(f"[DB] بازیابی خودکار ناموفق: {exc}")
 
+    # زمان‌بندی سیکل مستقل از وضعیت سریال بارگذاری می‌شود تا /api/cycle_config
+    # همیشه آخرین مقدار ذخیره‌شده را نشان دهد، حتی اگر سریال هنوز استارت نشده
+    load_cycle_config()
+    load_extra_signals_config()
+
     if start_serial:
         load_serial_config()      # آخرین پورت و باود انتخاب‌شده
         stop_event.clear()
         serial_thread = threading.Thread(target=read_serial_worker, daemon=True)
         serial_thread.start()
+
 
 
 if __name__ == '__main__':

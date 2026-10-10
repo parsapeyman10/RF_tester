@@ -58,6 +58,13 @@
             100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
         }
         
+        /* Indicator (GPIO34) وقتی OK است چشمک می‌زند؛ Buzzer (GPIO35) وقتی OK
+           است یک موج مربعی PWM کوچک نمایش داده می‌شود (استاتیک). */
+        @keyframes blink-led {
+            0%, 49%  { opacity: 1; }
+            50%, 100% { opacity: 0.15; }
+        }
+
         input, select { background: #0f172a !important; border: 1px solid #334155 !important; color: white !important; }
     </style>
 </head>
@@ -143,14 +150,51 @@
                 <div id="live-num" class="text-4xl font-bold mt-2 text-orange-400 font-mono">--</div>
             </div>
             
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
-                <div id="live-temp" class="text-4xl font-bold mt-2 text-blue-400 font-mono">--</div>
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 flex flex-col justify-center min-h-[140px] px-3">
+                <div class="grid grid-cols-2 gap-2 text-center">
+                    <div>
+                        <span class="text-blue-300 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
+                        <div id="live-temp" class="text-3xl font-bold mt-1 text-blue-400 font-mono">--</div>
+                    </div>
+                    <div>
+                        <span class="text-cyan-300 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
+                        <div id="live-humidity" class="text-3xl font-bold mt-1 text-cyan-400 font-mono">--</div>
+                    </div>
+                </div>
             </div>
-            
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-cyan-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
-                <div id="live-humidity" class="text-4xl font-bold mt-2 text-cyan-400 font-mono">--</div>
+
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-rose-500 flex flex-col justify-center min-h-[160px] px-3">
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center block mb-1">آمار عملکرد BCM1 / BCM2</span>
+                <div class="flex items-center justify-center gap-3 text-[9px] text-slate-400 mb-2">
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-emerald-400 inline-block"></span>کار کرده</span>
+                    <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-red-400 inline-block"></span>کار نکرده</span>
+                </div>
+                <div class="grid grid-cols-2 gap-2 px-1">
+                    {% for dev, label in [('BCM1','BCM1'), ('BCM2','BCM2')] %}
+                    <div class="bg-slate-900/60 rounded-lg px-2 py-2">
+                        <div class="text-[11px] text-slate-300 font-bold text-center mb-1.5">{{ label }}</div>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-0.5">
+                            <span>باز:</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-open-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-open-fail" class="text-red-400">--</span>
+                            </span>
+                        </div>
+                        <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono mb-0.5">
+                            <span>بسته:</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-close-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-close-fail" class="text-red-400">--</span>
+                            </span>
+                        </div>
+                        <div class="flex items-center justify-between text-[10px] text-amber-300 font-mono border-t border-slate-700/60 mt-1 pt-1">
+                            <span>عملکرد صحیح:</span>
+                            <span class="text-lg leading-none font-black font-mono">
+                                <span id="bcm-{{ dev }}-correct-ok" class="text-emerald-400">--</span>/<span id="bcm-{{ dev }}-correct-fail" class="text-red-400">--</span>
+                            </span>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <p class="text-[8px] text-slate-500 text-center mt-2">عملکرد صحیح = باز شدن AND بسته شدن، هر دو موفق</p>
             </div>
             
             <div class="glass-card p-4 rounded-2xl border-t-4 border-purple-500 flex flex-col justify-center min-h-[140px] px-3">
@@ -167,6 +211,10 @@
             </div>
 
             <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
+                <div class="flex items-center justify-center gap-2 mb-2">
+                    <span class="text-slate-400 text-[9px] font-bold uppercase tracking-widest">تعداد تلاش این سیکل:</span>
+                    <span id="live-cycle-attempt" class="text-sm font-black font-mono text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-amber-500/20">--/3</span>
+                </div>
                 <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">سطح منطقی (۱ / ۰)</span>
                 <div class="grid grid-cols-2 gap-2 px-1">
                     {% for key, fa in [('BCM1_OPEN','BCM1 باز'), ('BCM1_CLOSE','BCM1 بسته'),
@@ -178,6 +226,22 @@
                     </div>
                     {% endfor %}
                 </div>
+            </div>
+        </div>
+
+        <div class="glass-card p-3 rounded-2xl border-t-4 border-amber-500 flex items-center justify-center gap-6 mt-4">
+            <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">سیگنال‌های BCM2:</span>
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] text-slate-400 font-mono">Indicator</span>
+                <span id="indicator-led" class="w-3.5 h-3.5 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
+                <span id="indicator-led-txt" class="text-[10px] text-slate-600 font-bold">—</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="text-[10px] text-slate-400 font-mono">Buzzer</span>
+                <svg id="buzzer-pwm" width="40" height="16" viewBox="0 0 44 18">
+                    <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
+                </svg>
+                <span id="buzzer-pwm-txt" class="text-[10px] text-slate-600 font-bold">—</span>
             </div>
         </div>
 
@@ -215,6 +279,53 @@
                 </div>
                 <div id="serialStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
             </div>
+        </div>
+
+        <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-purple-600 mt-6">
+            <h3 class="text-xl font-bold mb-2 flex items-center gap-3">
+                <span>⏱️</span> زمان‌بندی سیکل ESP32 (از‌راه‌دور)
+            </h3>
+            <p class="text-xs text-slate-500 mb-6">
+                این دو مقدار از طریق سرور، ESP8266 و در نهایت به ESP32 فرستاده می‌شود؛
+                نیازی به آپلود دوباره‌ی فرم‌ور نیست. چون این لینک ACK ندارد، مقدار جدید
+                با هر ضربان سرور (هر ۱۰ ثانیه) هم دوباره فرستاده می‌شود تا حتی اگر ESP32
+                لحظه‌ی تنظیم آنلاین نباشد، به‌محض وصل‌شدن اعمال شود.
+            </p>
+            <div class="space-y-6">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">فاصله‌ی بین سیکل‌ها — CYCLE_PERIOD_MS (میلی‌ثانیه):</label>
+                    <input type="number" id="cycleePeriodInput" min="35000" max="3600000" step="1000"
+                           class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="مثلاً 120000">
+                </div>
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">فاصله‌ی بین تلاش‌های رله — RELAY_RETRY_GAP_MS (میلی‌ثانیه):</label>
+                    <input type="number" id="relayRetryGapInput" min="200" max="60000" step="100"
+                           class="w-full p-3 rounded-xl outline-none focus:ring-2 focus:ring-purple-500" placeholder="مثلاً 2000">
+                </div>
+                <button id="applyCycleConfig" class="w-full bg-purple-600 hover:bg-purple-500 py-4 rounded-2xl font-bold transition-all shadow-lg">ارسال به ESP32</button>
+                <div id="cycleConfigStatus" class="mt-2 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
+            </div>
+        </div>
+
+        <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-amber-500 mt-6">
+            <h3 class="text-xl font-bold mb-2 flex items-center gap-3">
+                <span>🔔</span> سیگنال‌های Indicator / Buzzer (مربوط به BCM2)
+            </h3>
+            <p class="text-xs text-slate-500 mb-6">
+                این دو سیگنال، دو فانکشنِ جداگانه‌ی مربوط به BCM2 هستند (نه BCM1):
+                ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
+                هر رکورد می‌فرستد، ESP8266 همیشه آن‌ها را به سرور می‌رساند و سرور
+                همیشه این دو مقدار را در دیتابیس ذخیره می‌کند — این تیک کاری به
+                ذخیره‌سازی ندارد و فقط نمایش را کنترل می‌کند: وقتی خاموش باشد
+                (پیش‌فرض)، صفحه‌ی تاریخچه دقیقاً همان فرمت قبلی را نشان می‌دهد
+                (بدون دو ستون Indicator/Buzzer)؛ وقتی روشن شود، همان دو ستون
+                اضافه در تاریخچه نمایش داده می‌شوند.
+            </p>
+            <label class="flex items-center gap-3 p-4 bg-slate-900/50 rounded-xl border border-slate-700 cursor-pointer select-none">
+                <input type="checkbox" id="saveIndicatorBuzzerToggle" class="w-5 h-5 accent-amber-500">
+                <span class="text-sm">نمایش ستون‌های Indicator و Buzzer (BCM2) در تاریخچه</span>
+            </label>
+            <div id="extraSignalsStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
         </div>
     </section>
 
@@ -410,6 +521,62 @@
                 el.className = 'text-2xl font-black leading-none transition-all duration-300 '
                     + (one ? 'text-emerald-400 drop-shadow-[0_0_8px_#22c55e]' : 'text-red-400');
             });
+
+            // تعداد تلاش‌هایی که این سیکل طول کشید (۱، ۲ یا ۳) — فیلد cycle=
+            const attEl = document.getElementById('live-cycle-attempt');
+            if (attEl) {
+                const att = last.cycle_attempt;
+                if (att === null || att === undefined) {
+                    attEl.textContent = '--/3';
+                    attEl.className = 'text-sm font-black font-mono text-slate-500 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-slate-700';
+                } else {
+                    attEl.textContent = att + '/3';
+                    const color = att >= 3 ? 'text-red-400 border-red-500/30'
+                                : (att === 2 ? 'text-amber-300 border-amber-500/30' : 'text-emerald-400 border-emerald-500/30');
+                    attEl.className = 'text-sm font-black font-mono bg-slate-900/60 px-2 py-0.5 rounded-lg border ' + color;
+                }
+            }
+
+            // Indicator (GPIO34): OK -> چراغ چشمک‌زن سبز، NOK -> چراغ خاموش
+            const indLed = document.getElementById('indicator-led');
+            const indTxt = document.getElementById('indicator-led-txt');
+            if (indLed && indTxt) {
+                if (last.indicator === true) {
+                    indLed.className = 'w-4 h-4 rounded-full bg-emerald-400 shadow-[0_0_10px_#22c55e] inline-block';
+                    indLed.style.animation = 'blink-led 1s steps(1) infinite';
+                    indTxt.textContent = 'OK';
+                    indTxt.className = 'text-[9px] text-emerald-400 font-bold mt-1';
+                } else if (last.indicator === false) {
+                    indLed.className = 'w-4 h-4 rounded-full bg-slate-700/50 border border-slate-600 inline-block';
+                    indLed.style.animation = 'none';
+                    indTxt.textContent = 'NOK';
+                    indTxt.className = 'text-[9px] text-slate-500 font-bold mt-1';
+                } else {
+                    indLed.className = 'w-4 h-4 rounded-full bg-slate-800/50 border border-slate-700 inline-block';
+                    indLed.style.animation = 'none';
+                    indTxt.textContent = '—';
+                    indTxt.className = 'text-[9px] text-slate-600 font-bold mt-1';
+                }
+            }
+
+            // Buzzer (GPIO35): OK -> موج مربعی PWM ۵۰٪، NOK -> خط صاف
+            const buzSvg = document.getElementById('buzzer-pwm');
+            const buzTxt = document.getElementById('buzzer-pwm-txt');
+            if (buzSvg && buzTxt) {
+                if (last.buzzer === true) {
+                    buzSvg.innerHTML = '<polyline points="0,15 0,3 11,3 11,15 22,15 22,3 33,3 33,15 44,15" fill="none" stroke="#22c55e" stroke-width="2"/>';
+                    buzTxt.textContent = 'OK';
+                    buzTxt.className = 'text-[9px] text-emerald-400 font-bold mt-1';
+                } else if (last.buzzer === false) {
+                    buzSvg.innerHTML = '<line x1="0" y1="15" x2="44" y2="15" stroke="#64748b" stroke-width="2"/>';
+                    buzTxt.textContent = 'NOK';
+                    buzTxt.className = 'text-[9px] text-slate-500 font-bold mt-1';
+                } else {
+                    buzSvg.innerHTML = '<line x1="0" y1="15" x2="44" y2="15" stroke="#334155" stroke-width="2"/>';
+                    buzTxt.textContent = '—';
+                    buzTxt.className = 'text-[9px] text-slate-600 font-bold mt-1';
+                }
+            }
         } catch (e) { console.error("Dashboard Sync Error:", e); }
     }
 
@@ -440,11 +607,162 @@
 
     document.getElementById('refreshSerialPorts').onclick = updateSerialUI;
 
+    // ================= زمان‌بندی سیکل ESP32 (از‌راه‌دور) =================
+    async function loadCycleConfig() {
+        try {
+            const res = await fetch('/api/cycle_config');
+            const d = await res.json();
+            const cycleEl = document.getElementById('cycleePeriodInput');
+            const gapEl = document.getElementById('relayRetryGapInput');
+            if (cycleEl && !cycleEl.value) cycleEl.value = d.cycle_period_ms;
+            if (gapEl && !gapEl.value) gapEl.value = d.relay_retry_gap_ms;
+        } catch (e) { console.error("Cycle Config Load Error:", e); }
+    }
+
+    const applyCycleBtn = document.getElementById('applyCycleConfig');
+    if (applyCycleBtn) {
+        applyCycleBtn.onclick = async () => {
+            const statusEl = document.getElementById('cycleConfigStatus');
+            const cycleMs = parseInt(document.getElementById('cycleePeriodInput').value);
+            const gapMs = parseInt(document.getElementById('relayRetryGapInput').value);
+            if (!cycleMs || !gapMs) {
+                if (statusEl) statusEl.textContent = 'لطفاً هر دو مقدار را به‌درستی وارد کنید.';
+                return;
+            }
+            try {
+                const res = await fetch('/api/set_cycle_config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({cycle_period_ms: cycleMs, relay_retry_gap_ms: gapMs})
+                });
+                const d = await res.json();
+                if (statusEl) {
+                    if (res.ok) {
+                        statusEl.textContent = d.sent_immediately
+                            ? '✅ ذخیره و فوراً روی سریال ارسال شد.'
+                            : '✅ ذخیره شد؛ پورت سریال فعلاً بسته است، با وصل‌شدن ارسال می‌شود.';
+                    } else {
+                        statusEl.textContent = '❌ ' + (d.message || 'خطای نامشخص');
+                    }
+                }
+            } catch (e) {
+                console.error("Cycle Config Save Error:", e);
+                if (statusEl) statusEl.textContent = '❌ ارتباط با سرور برقرار نشد.';
+            }
+        };
+    }
+    loadCycleConfig();
+
+    // ================= تیک «ذخیره‌ی Indicator/Buzzer در دیتابیس» =================
+    // نکته‌ی مهم: تیک همیشه باید نماینده‌ی «وضعیتِ واقعیِ سرور» باشد، نه حدسِ
+    // محلیِ جاوااسکریپت. برای همین در موفقیت هم مقدارِ echo-شده از سرور را
+    // می‌نشانیم و در خطا هم به‌جای حدس زدن، دوباره از سرور می‌خوانیم؛ این‌طوری
+    // هیچ‌وقت تیک با وضعیتِ واقعیِ دیتابیس ناهمگام («پریدن») نمی‌ماند.
+    async function loadExtraSignalsConfig() {
+        try {
+            const res = await fetch('/api/extra_signals_config', { cache: 'no-store' });
+            const d = await res.json();
+            const toggle = document.getElementById('saveIndicatorBuzzerToggle');
+            if (toggle) toggle.checked = !!d.save_indicator_buzzer;
+        } catch (e) { console.error("Extra Signals Config Load Error:", e); }
+    }
+
+    const extraSignalsToggle = document.getElementById('saveIndicatorBuzzerToggle');
+    if (extraSignalsToggle) {
+        extraSignalsToggle.onchange = async () => {
+            const statusEl = document.getElementById('extraSignalsStatus');
+            const enabled = extraSignalsToggle.checked;
+            extraSignalsToggle.disabled = true;   // جلوگیری از کلیک‌های پیاپی حین ارسال
+            try {
+                const res = await fetch('/api/set_extra_signals_config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({save_indicator_buzzer: enabled}),
+                    cache: 'no-store'
+                });
+                let d = {};
+                try { d = await res.json(); } catch (_) { /* پاسخ JSON نبود */ }
+
+                if (res.ok && d.status === 'success') {
+                    // اعتماد به مقدارِ واقعیِ echo-شده از سرور (نه enabled محلی)
+                    const serverVal = !!(d.extra_signals_config && d.extra_signals_config.save_indicator_buzzer);
+                    extraSignalsToggle.checked = serverVal;
+                    if (statusEl) {
+                        if (d.persisted === false) {
+                            statusEl.textContent = '⚠️ این تنظیم فقط برای همین اجرای سرور فعال شد؛ روی دیسک ذخیره نشد (دسترسی نوشتن کنار برنامه را بررسی کنید).';
+                        } else {
+                            statusEl.textContent = serverVal
+                                ? '✅ از این پس دو ستون Indicator/Buzzer در تاریخچه نمایش داده می‌شوند.'
+                                : '✅ نمایش خاموش شد؛ تاریخچه به فرمت قبلی برمی‌گردد (داده‌ها در دیتابیس دست‌نخورده باقی می‌مانند).';
+                        }
+                    }
+                } else {
+                    if (statusEl) statusEl.textContent = '❌ ' + (d.message || ('خطای سرور (HTTP ' + res.status + ')'));
+                    await loadExtraSignalsConfig();   // همگام‌سازی مجدد با وضعیتِ واقعیِ سرور
+                }
+            } catch (e) {
+                console.error("Extra Signals Config Save Error:", e);
+                if (statusEl) statusEl.textContent = '❌ ارتباط با سرور برقرار نشد — دوباره تلاش کنید.';
+                await loadExtraSignalsConfig();   // حدس نمی‌زنیم؛ وضعیتِ واقعی را از سرور می‌خوانیم
+            } finally {
+                extraSignalsToggle.disabled = false;
+            }
+        };
+    }
+    loadExtraSignalsConfig();
+
+    // ================= آمار تجمعی BCM1 / BCM2 (باز و بسته، کار کرده/نکرده) =================
+    async function updateBcmStats() {
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+        const setAll = (val) => {
+            ['BCM1', 'BCM2'].forEach(dev => {
+                ['open-ok', 'open-fail', 'close-ok', 'close-fail', 'correct-ok', 'correct-fail']
+                    .forEach(suffix => set(`bcm-${dev}-${suffix}`, val));
+            });
+        };
+        try {
+            const res = await fetch('/api/bcm_stats');
+            if (!res.ok) {
+                console.error("BCM Stats HTTP Error:", res.status, res.statusText);
+                setAll('ERR');
+                return;
+            }
+            const data = await res.json();
+            if (data.error) {
+                // سرور خودش خطا را گزارش کرده (مثلاً استثنای دیتابیس)
+                console.error("BCM Stats Server Error:", data.error);
+                setAll('ERR');
+                return;
+            }
+            ['BCM1', 'BCM2'].forEach(dev => {
+                const d = data[dev] || {};
+                const open = d.open || {ok: 0, fail: 0};
+                const close = d.close || {ok: 0, fail: 0};
+                const correct = d.correct || {ok: 0, fail: 0};
+                set(`bcm-${dev}-open-ok`, open.ok);
+                set(`bcm-${dev}-open-fail`, open.fail);
+                set(`bcm-${dev}-close-ok`, close.ok);
+                set(`bcm-${dev}-close-fail`, close.fail);
+                set(`bcm-${dev}-correct-ok`, correct.ok);
+                set(`bcm-${dev}-correct-fail`, correct.fail);
+            });
+        } catch (e) {
+            // اگر /api/bcm_stats اصلاً پیدا نشود (مثلاً سرور با نسخه‌ی قدیمی‌تر
+            // اجرا شده) fetch/json همین‌جا خطا می‌دهد؛ به‌جای «--» ثابت، ERR
+            // نشان داده می‌شود تا معلوم شود مشکل شبکه/نسخه است نه نبود داده
+            console.error("BCM Stats Error (احتمالاً سرور به‌روزرسانی نشده):", e);
+            setAll('ERR');
+        }
+    }
+
+
     setInterval(updateSerialUI, 10000);
     setInterval(updateLiveDashboard, 2000); // رفرش سریع‌تر برای نمای بهتر
+    setInterval(updateBcmStats, 5000);
     
     updateSerialUI();
     updateLiveDashboard();
+    updateBcmStats();
     // ================= ساعت سرور (کامپیوتر) =================
     let serverClock = null;      // ثانیه‌شمار محلی بین دو همگام‌سازی
     async function syncServerClock() {
@@ -480,6 +798,7 @@
                     msg.className = 'text-sm text-center text-emerald-400';
                     manualForm.reset();
                     updateLiveDashboard();          // به‌روزرسانی فوری
+                    updateBcmStats();                // آمار تجمعی BCM هم به‌روز شود
                     const frame = document.getElementById('plotIframe');
                     if (frame) frame.contentWindow.location.reload();
                 } else {

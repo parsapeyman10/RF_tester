@@ -161,14 +161,17 @@ check(half["BCM2"]["close"] and not half["BCM2"]["open"] and not half["BCM2"]["o
 none = flask_app.build_bcm_results("")
 check(none["BCM1"] == {"open": False, "close": False, "ok": False}, "بدون فیدبک همه NOK")
 
-print("\n[7c] مرجع زمان، RTC دستگاه است (نه ساعت سرور)")
+print("\n[7c] date/time از RTC دستگاه، timestamp (زمان ثبت) از ساعت سرور")
 _blob = struct.pack("<iff????iBBBBB", 777, 22.00, 43.00,
                     True, True, True, False, 2026, 3, 9, 7, 45, 12)
 import io as _io
+import datetime as _dt
+_before_upload = _dt.datetime.now(flask_app.TEHRAN_TZ).replace(tzinfo=None)
 _resp = _c_dat = flask_app.app.test_client().post(
     "/upload_dat",
     data={"folder_upload": (_io.BytesIO(_blob), "20260309.dat")},
     content_type="multipart/form-data")
+_after_upload = _dt.datetime.now(flask_app.TEHRAN_TZ).replace(tzinfo=None)
 check(_resp.status_code == 200, f"/upload_dat -> {_resp.status_code}")
 with flask_app.app.app_context():
     rec = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=777).first()
@@ -176,8 +179,8 @@ check(rec is not None, "رکورد آپلودشده ثبت شد")
 if rec:
     check(rec.date == "2026-03-09" and rec.time == "07:45:12",
           f"تاریخ و ساعت از RTC خوانده شد ({rec.date} {rec.time})")
-    check(rec.timestamp.strftime("%Y-%m-%d %H:%M:%S") == "2026-03-09 07:45:12",
-          f"timestamp هم زمان RTC است نه زمان آپلود سرور ({rec.timestamp})")
+    check(_before_upload <= rec.timestamp <= _after_upload,
+          f"timestamp (زمان ثبت) همان لحظه‌ی ساعت سرور است، نه RTC دستگاه ({rec.timestamp})")
     _r = flask_app.build_bcm_results(rec.nbcm_selected)
     check(_r["BCM1"]["ok"] and _r["BCM2"]["open"] and not _r["BCM2"]["close"],
           f"چهار نتیجه از فایل باینری درست خوانده شد ({rec.nbcm_selected})")

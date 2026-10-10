@@ -11,6 +11,8 @@ instance/
 unsaved_records.log
 backup_*.db
 serial_config.json
+cycle_config.json
+extra_signals_config.json
 
 # Arduino build output
 build/

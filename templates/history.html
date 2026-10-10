@@ -38,6 +38,11 @@
         ::-webkit-scrollbar-track { background: #1e293b; }
         ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: #475569; }
+        /* Indicator وقتی OK است چشمک می‌زند */
+        @keyframes blink-led {
+            0%, 49%  { opacity: 1; }
+            50%, 100% { opacity: 0.15; }
+        }
     </style>
 </head>
 <body class="p-4 md:p-8 text-slate-200">
@@ -146,6 +151,12 @@
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">رطوبت (Humidity)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">زمان دستگاه (Device)</th>
                             <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">زمان ثبت (TimeStamp)</th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Cycle</th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Attempts</th>
+                            {% if show_indicator_buzzer %}
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Indicator <span class="normal-case text-slate-600">(BCM2)</span></th>
+                            <th class="p-5 text-slate-400 text-xs font-bold uppercase tracking-widest text-center">Buzzer <span class="normal-case text-slate-600">(BCM2)</span></th>
+                            {% endif %}
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-800">
@@ -194,12 +205,76 @@
                                     <span class="text-[10px] text-slate-500 font-mono mt-0.5">{{ r.timestamp.strftime('%Y-%m-%d') }}</span>
                                 </div>
                             </td>
+
+                            <td class="p-5 text-center">
+                                {% set cyc = r.cycle if (r.cycle is defined and r.cycle is not none) else (cycle_ok(r.nbcm_selected) if cycle_ok else False) %}
+                                {% if cyc %}
+                                <span class="bg-green-500/10 text-green-400 px-3 py-1 rounded-lg font-bold border border-green-500/20 text-xs">OK</span>
+                                {% else %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/20 text-xs">FAIL</span>
+                                {% endif %}
+                            </td>
+
+                            <td class="p-5 text-center">
+                                {% set att = r.cycle_attempt if (r.cycle_attempt is defined and r.cycle_attempt is not none) else none %}
+                                {% if att == 1 %}
+                                <span class="bg-emerald-500/10 text-emerald-300 px-3 py-1 rounded-lg font-bold border border-emerald-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% elif att == 2 %}
+                                <span class="bg-amber-500/10 text-amber-300 px-3 py-1 rounded-lg font-bold border border-amber-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% elif att == 3 %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% elif att %}
+                                <span class="bg-slate-500/10 text-slate-300 px-3 py-1 rounded-lg font-bold border border-slate-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% else %}
+                                <span class="text-slate-600 text-xs">—</span>
+                                {% endif %}
+                            </td>
+
+                            {% if show_indicator_buzzer %}
+                            <td class="p-5 text-center">
+                                {% set ind = r.indicator if (r.indicator is defined and r.indicator is not none) else none %}
+                                {% if ind is none %}
+                                <span class="text-slate-600 text-xs">—</span>
+                                {% elif ind %}
+                                <div class="flex flex-col items-center gap-1">
+                                    <span class="w-3.5 h-3.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_10px_#22c55e]" style="animation: blink-led 1s steps(1) infinite;"></span>
+                                    <span class="text-[9px] text-emerald-400 font-bold">OK</span>
+                                </div>
+                                {% else %}
+                                <div class="flex flex-col items-center gap-1">
+                                    <span class="w-3.5 h-3.5 rounded-full bg-slate-700/60 border border-slate-600 inline-block"></span>
+                                    <span class="text-[9px] text-slate-500 font-bold">NOK</span>
+                                </div>
+                                {% endif %}
+                            </td>
+
+                            <td class="p-5 text-center">
+                                {% set buz = r.buzzer if (r.buzzer is defined and r.buzzer is not none) else none %}
+                                {% if buz is none %}
+                                <span class="text-slate-600 text-xs">—</span>
+                                {% elif buz %}
+                                <div class="flex flex-col items-center gap-1">
+                                    <svg width="42" height="16" viewBox="0 0 42 16" class="mx-auto">
+                                        <polyline points="0,13 0,3 10.5,3 10.5,13 21,13 21,3 31.5,3 31.5,13 42,13" fill="none" stroke="#22c55e" stroke-width="2"/>
+                                    </svg>
+                                    <span class="text-[9px] text-emerald-400 font-bold">OK</span>
+                                </div>
+                                {% else %}
+                                <div class="flex flex-col items-center gap-1">
+                                    <svg width="42" height="16" viewBox="0 0 42 16" class="mx-auto opacity-40">
+                                        <line x1="0" y1="13" x2="42" y2="13" stroke="#64748b" stroke-width="2"/>
+                                    </svg>
+                                    <span class="text-[9px] text-slate-500 font-bold">NOK</span>
+                                </div>
+                                {% endif %}
+                            </td>
+                            {% endif %}
                         </tr>
                         {% endfor %}
                         
                         {% if not readings %}
                         <tr>
-                            <td colspan="7" class="p-24 text-center">
+                            <td colspan="{{ 11 if show_indicator_buzzer else 9 }}" class="p-24 text-center">
                                 <div class="flex flex-col items-center opacity-30">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-20 w-20 mb-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />

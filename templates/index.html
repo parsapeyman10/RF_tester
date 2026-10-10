@@ -228,12 +228,12 @@
                 </div>
                 <div class="grid grid-cols-2 gap-2 px-1 mt-2 pt-2 border-t border-slate-700/60">
                     <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center justify-center">
-                        <span class="text-[9px] text-slate-400 font-mono mb-1">Indicator</span>
+                        <span class="text-[9px] text-slate-400 font-mono mb-1">Indicator <span class="text-amber-400/80">(BCM2)</span></span>
                         <span id="indicator-led" class="w-4 h-4 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
                         <span id="indicator-led-txt" class="text-[9px] text-slate-600 font-bold mt-1">—</span>
                     </div>
                     <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center justify-center">
-                        <span class="text-[9px] text-slate-400 font-mono mb-1">Buzzer</span>
+                        <span class="text-[9px] text-slate-400 font-mono mb-1">Buzzer <span class="text-amber-400/80">(BCM2)</span></span>
                         <svg id="buzzer-pwm" width="44" height="18" viewBox="0 0 44 18">
                             <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
                         </svg>
@@ -307,9 +307,10 @@
 
         <div class="max-w-2xl mx-auto glass-card p-8 rounded-2xl border-b-4 border-amber-500 mt-6">
             <h3 class="text-xl font-bold mb-2 flex items-center gap-3">
-                <span>🔔</span> سیگنال‌های Indicator / Buzzer
+                <span>🔔</span> سیگنال‌های Indicator / Buzzer (مربوط به BCM2)
             </h3>
             <p class="text-xs text-slate-500 mb-6">
+                این دو سیگنال، دو فانکشنِ جداگانه‌ی مربوط به BCM2 هستند (نه BCM1):
                 ESP32 همیشه GPIO34 (Indicator) و GPIO35 (Buzzer) را می‌خواند و همراه
                 هر رکورد می‌فرستد — این تنظیم در فرم‌ور سوییچی ندارد. این تیک کاملاً
                 سمت سرور است: وقتی خاموش باشد (پیش‌فرض)، این دو مقدار فقط دریافت و
@@ -318,7 +319,7 @@
             </p>
             <label class="flex items-center gap-3 p-4 bg-slate-900/50 rounded-xl border border-slate-700 cursor-pointer select-none">
                 <input type="checkbox" id="saveIndicatorBuzzerToggle" class="w-5 h-5 accent-amber-500">
-                <span class="text-sm">ذخیره‌ی Indicator و Buzzer در دیتابیس</span>
+                <span class="text-sm">ذخیره‌ی Indicator و Buzzer (BCM2) در دیتابیس</span>
             </label>
             <div id="extraSignalsStatus" class="mt-4 p-4 bg-slate-900/50 rounded-xl text-xs font-mono text-center border border-slate-700"></div>
         </div>

@@ -1705,6 +1705,14 @@ void TaskRelayControl(void *pv) {
     DEBUG_PRINTLN("\n[CYCLE] ===== Started =====");
     xEventGroupClearBits(xSystemEvents, BIT_WIFI_PERMIT);
 
+    // لحظه‌ی شروع این سیکل: CYCLE_PERIOD_MS از همین نقطه سنجیده می‌شود
+    // (یعنی کل فاصله‌ی «شروع یک سیکل تا شروع سیکل بعد»)، نه از لحظه‌ی
+    // پایان تست. در نتیجه با یک تنظیم مشخص، فاصله‌ی بین لاگ‌ها تقریباً
+    // ثابت می‌ماند (مستقل از ۱، ۲ یا ۳ تلاش رله)؛ فقط اگر اجرای خودِ تست
+    // (با چند تلاش ناموفق) بیشتر از CYCLE_PERIOD_MS طول بکشد، دیگر صبر
+    // اضافه‌ای انجام نمی‌شود و سیکل بعدی بی‌معطلی شروع می‌شود.
+    uint32_t cycleStartMs = millis();
+
     // نتیجه‌ی تفکیکی: برای هر دستگاه، هم «باز شد» و هم «بسته شد»
     bool got[PHASE_COUNT][DEVICE_COUNT];
     uint8_t cycleAttemptUsed = 1;
@@ -1760,38 +1768,26 @@ void TaskRelayControl(void *pv) {
     xEventGroupSetBits(xSystemEvents, BIT_WIFI_PERMIT);
     relayPhaseText = "انتظار تا سیکل بعد";
 
-    // ---- انتظار تا سیکل بعد: یک CYCLE_PERIOD_MS کامل ----
-    // این شمارش همیشه از همین لحظه (پایان واقعی سیکل فعلی، چه با ۱، چه با
-    // ۲ و چه بعد از هر ۳ تلاش تمام شده باشد) از صفر شروع می‌شود؛ قبلاً با
-    // vTaskDelayUntil روی یک برنامه‌ی زمانی تجمعی حساب می‌شد که دو مشکل
-    // داشت:
-    //   ۱) اگر اجرای خودِ سیکل (مخصوصاً بعد از ۳ تلاش با چند Retry Gap)
-    //      بیشتر از CYCLE_PERIOD_MS طول می‌کشید، vTaskDelayUntil اصلاً صبر
-    //      نمی‌کرد و سیکل بعدی بی‌درنگ شروع می‌شد.
-    //   ۲) اگر CYCLE_PERIOD_MS حین همین انتظار از سرور تغییر می‌کرد، مقدار
-    //      جدید فقط در دور بعدی اعمال می‌شد؛ انتظار جاری با مقدار قدیمی تا
-    //      انتهایش ادامه پیدا می‌کرد.
-    // حلقه‌ی زیر با گام‌های کوچک (CYCLE_WAIT_POLL_MS) بیدار می‌شود، هر بار
-    // تازه‌ترین gCyclePeriodMs را می‌خواند؛ اگر عوض شده باشد، شمارش را از
-    // صفر و با مقدار تازه از نو شروع می‌کند (نه ادامه‌ی مقدار قبلی).
-    {
-      uint32_t waitStart = millis();
-      uint32_t waitTarget = gCyclePeriodMs;
-      for (;;) {
-        uint32_t nowPeriod = gCyclePeriodMs;  // ممکن است همین الان از سرور تغییر کرده باشد
-        if (nowPeriod != waitTarget) {
-          DEBUG_PRINTF("[CYCLE] CYCLE_PERIOD_MS حین انتظار از %u به %u تغییر کرد -> "
-                       "شمارش از صفر با مقدار جدید\n",
-                       (unsigned)waitTarget, (unsigned)nowPeriod);
-          waitTarget = nowPeriod;
-          waitStart = millis();
-        }
-        uint32_t elapsed = millis() - waitStart;
-        if (elapsed >= waitTarget) break;
-        uint32_t remaining = waitTarget - elapsed;
-        uint32_t step = (remaining < CYCLE_WAIT_POLL_MS) ? remaining : CYCLE_WAIT_POLL_MS;
-        vTaskDelay(pdMS_TO_TICKS(step));
-      }
+    // ---- انتظار تا سیکل بعد: CYCLE_PERIOD_MS از *شروع همین سیکل* ----
+    // مبنای شمارش cycleStartMs (بالای حلقه) است، نه لحظه‌ی پایان تست؛
+    // یعنی CYCLE_PERIOD_MS = کل فاصله‌ی شروع یک سیکل تا شروع سیکل بعدی،
+    // نه فقط «استراحت اضافه‌ی بعد از تست». دو نتیجه:
+    //   ۱) اگر اجرای خودِ تست (با ۱، ۲ یا ۳ تلاش) کمتر از CYCLE_PERIOD_MS
+    //      طول بکشد، فقط باقیمانده صبر می‌شود -> فاصله‌ی کل تقریباً همیشه
+    //      همان CYCLE_PERIOD_MS تنظیم‌شده می‌ماند.
+    //   ۲) اگر اجرای تست (مثلاً به‌خاطر ۳ تلاش ناموفق) بیشتر از
+    //      CYCLE_PERIOD_MS طول بکشد، دیگر صبر اضافه‌ای انجام نمی‌شود و
+    //      سیکل بعدی بی‌معطلی همان لحظه شروع می‌شود.
+    // چون مبنا «شروع سیکل» است نه «شروع انتظار»، اگر کاربر همین حین مقدار
+    // CYCLE_PERIOD_MS را از سرور عوض کند، همان لحظه با مقدار تازه بازمحاسبه
+    // می‌شود؛ نیازی به ریست از صفر نیست.
+    for (;;) {
+      uint32_t targetPeriod = gCyclePeriodMs;  // ممکن است حین انتظار از سرور تغییر کرده باشد
+      uint32_t elapsedSinceStart = millis() - cycleStartMs;
+      if (elapsedSinceStart >= targetPeriod) break;  // دیر شده/دقیقاً رسیده -> بی‌معطلی ادامه
+      uint32_t remaining = targetPeriod - elapsedSinceStart;
+      uint32_t step = (remaining < CYCLE_WAIT_POLL_MS) ? remaining : CYCLE_WAIT_POLL_MS;
+      vTaskDelay(pdMS_TO_TICKS(step));
     }
   }
 }

@@ -195,6 +195,15 @@ class MasterReading(db.Model):
     # فعلی دیتابیس دست‌نخورده باقی بماند.
     indicator = db.Column(db.Boolean, nullable=True)
     buzzer = db.Column(db.Boolean, nullable=True)
+    # دو ستون جدید: تعداد تلاشی که هر BCM به‌طور *مستقل* برای این سیکل طول
+    # کشید (۱/۲/۳). بر خلاف cycle_attempt بالا (که مشترک بین هر دو BCM است
+    # و فقط می‌گوید «کل حلقه در کدام تلاش متوقف شد»)، این دو مقدار جدا
+    # هستند تا معلوم شود کدام BCM زودتر/دیرتر جواب داده است. Indicator و
+    # Buzzer مقدار جداگانه‌ای ندارند و در نمایش از bcm2_cycle_attempt
+    # استفاده می‌کنند (چون در همان جعبه‌ی BCM2 گروه‌بندی شده‌اند).
+    # None برای رکوردهای قدیمی/فریمورهای قدیمی که این دو فیلد را نمی‌فرستند.
+    bcm1_cycle_attempt = db.Column(db.Integer, nullable=True)
+    bcm2_cycle_attempt = db.Column(db.Integer, nullable=True)
     
 class DailyRecordAdapter:
     def __init__(self, row):
@@ -497,6 +506,28 @@ def save_sensor_data(data_source, raw_line=None):
         if isinstance(buz_raw, bool):
             buzzer_val = buz_raw
 
+        # تعداد تلاش‌هایی که هر BCM به‌طور *مستقل* برای این سیکل طول کشید
+        # (فیلدهای «BCM1_Cycle=»/«BCM2_Cycle=» در پروتکل). اختیاری هستند؛
+        # اگر فریمور فرستنده قدیمی‌تر باشد و این دو را نفرستد، به همان
+        # مقدار مشترک cycle_attempt_val برمی‌گردیم (سازگاری به‌عقب).
+        bcm1_cyc_raw = data_source.get('bcm1_cycle_attempt')
+        bcm2_cyc_raw = data_source.get('bcm2_cycle_attempt')
+        bcm1_cycle_attempt_val = None
+        bcm2_cycle_attempt_val = None
+        if bcm1_cyc_raw not in (None, ""):
+            try:
+                bcm1_cycle_attempt_val = max(1, min(3, int(bcm1_cyc_raw)))
+            except (TypeError, ValueError):
+                bcm1_cycle_attempt_val = None
+        if bcm2_cyc_raw not in (None, ""):
+            try:
+                bcm2_cycle_attempt_val = max(1, min(3, int(bcm2_cyc_raw)))
+            except (TypeError, ValueError):
+                bcm2_cycle_attempt_val = None
+        if bcm1_cycle_attempt_val is None:
+            bcm1_cycle_attempt_val = cycle_attempt_val
+        if bcm2_cycle_attempt_val is None:
+            bcm2_cycle_attempt_val = cycle_attempt_val
 
         # --- زمان ثبت در دیتابیس = لحظه‌ی واقعیِ ساعت سرور ---
         # قبلاً اینجا از تاریخ/ساعتِ دستگاه (RTC) ساخته می‌شد؛ طبق درخواست،
@@ -530,7 +561,9 @@ def save_sensor_data(data_source, raw_line=None):
             cycle=compute_cycle_ok(nbcm_str),
             cycle_attempt=cycle_attempt_val,
             indicator=indicator_val,
-            buzzer=buzzer_val
+            buzzer=buzzer_val,
+            bcm1_cycle_attempt=bcm1_cycle_attempt_val,
+            bcm2_cycle_attempt=bcm2_cycle_attempt_val
         )
         db.session.add(master_entry)
         try:
@@ -764,9 +797,15 @@ _FLOAT_RE = r"-?(?:\d+(?:\.\d+)?|nan|NaN|NAN|inf|Inf|INF)"
 #  هم بدون خطا پارس شوند. Indicator/Buzzer (GPIO34/GPIO35) فیلدهای جدیدتری
 #  هستند که فقط همراه با cycle= می‌آیند (فریمورهایی که cycle دارند ولی این
 #  دو را ندارند هم هنوز معتبر پارس می‌شوند — سازگاری رو به عقب).
+# BCM1_Cycle=/BCM2_Cycle= جدیدترین فیلدها هستند: شماره‌ی تلاشی که هر BCM
+# به‌طور *مستقل* کامل شد (برخلاف cycle= که مشترک است). فقط همراه با
+# Indicator=/Buzzer= می‌آیند (سازگاری رو به عقب با فریمورهای قدیمی‌تر که
+# این دو را ندارند هنوز حفظ شده است).
 _CYCLE_SUFFIX_RE = (
     r"(?:,cycle=(?P<cyc>\d+)"
-    r"(?:,Indicator=(?P<ind>[A-Za-z0-9]+),Buzzer=(?P<buz>[A-Za-z0-9]+))?"
+    r"(?:,Indicator=(?P<ind>[A-Za-z0-9]+),Buzzer=(?P<buz>[A-Za-z0-9]+)"
+    r"(?:,BCM1_Cycle=(?P<bcm1cyc>\d+),BCM2_Cycle=(?P<bcm2cyc>\d+))?"
+    r")?"
     r")?"
 )
 
@@ -827,6 +866,28 @@ def parse_industrial_line(line):
         buz_raw = g.get("buz")
         indicator = ind_raw.strip().upper() in TRUE_TOKENS if ind_raw not in (None, "") else None
         buzzer = buz_raw.strip().upper() in TRUE_TOKENS if buz_raw not in (None, "") else None
+        # BCM1_Cycle=/BCM2_Cycle=: شماره‌ی تلاشی که هر BCM به‌طور مستقل
+        # کامل شد. اختیاری‌اند (فقط فریمورهای جدید می‌فرستند)؛ اگر نیامده
+        # باشند، به همان مقدار مشترک cycle_attempt برمی‌گردیم (سازگاری
+        # رو به عقب با فریمورهای قدیمی‌تر).
+        bcm1cyc_raw = g.get("bcm1cyc")
+        bcm2cyc_raw = g.get("bcm2cyc")
+        bcm1_cycle_attempt = None
+        bcm2_cycle_attempt = None
+        if bcm1cyc_raw not in (None, ""):
+            try:
+                bcm1_cycle_attempt = max(1, min(3, int(bcm1cyc_raw)))
+            except (TypeError, ValueError):
+                bcm1_cycle_attempt = None
+        if bcm2cyc_raw not in (None, ""):
+            try:
+                bcm2_cycle_attempt = max(1, min(3, int(bcm2cyc_raw)))
+            except (TypeError, ValueError):
+                bcm2_cycle_attempt = None
+        if bcm1_cycle_attempt is None:
+            bcm1_cycle_attempt = cycle_attempt
+        if bcm2_cycle_attempt is None:
+            bcm2_cycle_attempt = cycle_attempt
         return {
             'num_value': g["num"],
             'nbcm': nbcm,
@@ -837,6 +898,8 @@ def parse_industrial_line(line):
             'cycle_attempt': cycle_attempt,
             'indicator': indicator,
             'buzzer': buzzer,
+            'bcm1_cycle_attempt': bcm1_cycle_attempt,
+            'bcm2_cycle_attempt': bcm2_cycle_attempt,
         }
     except Exception as exc:
         print(f"[PARSE_ERR] {exc} :: {line[:120]}")
@@ -1001,26 +1064,32 @@ def upload_dat_page():
         # فرمت میانی: یک بایت اضافه در انتها برای cycle_attempt (۱/۲/۳)
         STRUCT_FORMAT_NEW = '<iff????iBBBBBB'
         EXPECTED_SIZE_NEW = struct.calcsize(STRUCT_FORMAT_NEW)   # 26
-        # فرمت فعلی: دو بولی اضافه در انتها برای Indicator (GPIO34) و
+        # فرمت قبلی: دو بولی اضافه در انتها برای Indicator (GPIO34) و
         # Buzzer (GPIO35)
         STRUCT_FORMAT_V3 = '<iff????iBBBBBB??'
         EXPECTED_SIZE_V3 = struct.calcsize(STRUCT_FORMAT_V3)     # 28
+        # فرمت فعلی: دو بایت اضافه در انتها برای BCM1_CycleAttempt/
+        # BCM2_CycleAttempt (شماره‌ی تلاشی که هر BCM مستقلاً کامل شد)
+        STRUCT_FORMAT_V4 = '<iff????iBBBBBB??BB'
+        EXPECTED_SIZE_V4 = struct.calcsize(STRUCT_FORMAT_V4)     # 30
 
         def detect_record_format(data_len):
             """
-            فایل‌های .dat قبل از این آپدیت‌ها ۲۵ یا ۲۶ بایت/رکورد بودند؛ از
-            این به بعد ۲۸ بایت/رکورد (با Indicator/Buzzer اضافه) خواهند بود.
-            چون نمی‌توان مطمئن بود فایل آپلودی با کدام فریمور ساخته شده،
-            اندازه‌ای که طول فایل را دقیقاً (بدون باقی‌مانده) می‌پوشاند
-            انتخاب می‌شود — جدیدترین فرمت در اولویت است.
+            فایل‌های .dat قبل از این آپدیت‌ها ۲۵، ۲۶ یا ۲۸ بایت/رکورد بودند؛
+            از این به بعد ۳۰ بایت/رکورد (با BCM1/BCM2_CycleAttempt اضافه)
+            خواهند بود. چون نمی‌توان مطمئن بود فایل آپلودی با کدام فریمور
+            ساخته شده، اندازه‌ای که طول فایل را دقیقاً (بدون باقی‌مانده)
+            می‌پوشاند انتخاب می‌شود — جدیدترین فرمت در اولویت است.
             """
+            if data_len % EXPECTED_SIZE_V4 == 0:
+                return STRUCT_FORMAT_V4, EXPECTED_SIZE_V4
             if data_len % EXPECTED_SIZE_V3 == 0:
                 return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3
             if data_len % EXPECTED_SIZE_NEW == 0:
                 return STRUCT_FORMAT_NEW, EXPECTED_SIZE_NEW
             if data_len % EXPECTED_SIZE_OLD == 0:
                 return STRUCT_FORMAT_OLD, EXPECTED_SIZE_OLD
-            return STRUCT_FORMAT_V3, EXPECTED_SIZE_V3  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
+            return STRUCT_FORMAT_V4, EXPECTED_SIZE_V4  # پیش‌فرض؛ دنباله‌ی ناقص بعداً trim می‌شود
 
         master_buffer = []
         
@@ -1039,8 +1108,9 @@ def upload_dat_page():
             try:
                 file_bytes = file.read()
                 STRUCT_FORMAT, EXPECTED_SIZE = detect_record_format(len(file_bytes))
-                has_cycle_attempt = (EXPECTED_SIZE in (EXPECTED_SIZE_NEW, EXPECTED_SIZE_V3))
-                has_extra_signals = (EXPECTED_SIZE == EXPECTED_SIZE_V3)
+                has_cycle_attempt = (EXPECTED_SIZE in (EXPECTED_SIZE_NEW, EXPECTED_SIZE_V3, EXPECTED_SIZE_V4))
+                has_extra_signals = (EXPECTED_SIZE in (EXPECTED_SIZE_V3, EXPECTED_SIZE_V4))
+                has_bcm_split_cycle = (EXPECTED_SIZE == EXPECTED_SIZE_V4)
                 # اگر انتهای فایل خراب/ناقص بود، رکوردهای «کامل» داخلش
                 # نجات داده می‌شوند — قبلاً کل فایل دور ریخته می‌شد.
                 usable = (len(file_bytes) // EXPECTED_SIZE) * EXPECTED_SIZE
@@ -1107,6 +1177,19 @@ def upload_dat_page():
                         indicator_val = bool(data[14])
                         buzzer_val = bool(data[15])
 
+                    # BCM1_CycleAttempt / BCM2_CycleAttempt: فقط فایل‌های فرمت
+                    # فعلی (۳۰ بایتی) این دو بایت آخر را دارند. اگر نبود، به
+                    # همان مقدار مشترک cyc_val برمی‌گردیم (سازگاری رو به عقب).
+                    bcm1_cyc_val = cyc_val
+                    bcm2_cyc_val = cyc_val
+                    if has_bcm_split_cycle:
+                        b1_raw = data[16]
+                        b2_raw = data[17]
+                        if b1_raw:
+                            bcm1_cyc_val = max(1, min(3, int(b1_raw)))
+                        if b2_raw:
+                            bcm2_cyc_val = max(1, min(3, int(b2_raw)))
+
                     # رد کردن رکوردی که قبلاً ثبت شده (آپلود دوباره‌ی همان پوشه)
                     if master_exists(num_val, device_date_str, device_time_str):
                         skipped_count += 1
@@ -1125,7 +1208,9 @@ def upload_dat_page():
                         cycle=compute_cycle_ok(nbcm_str),
                         cycle_attempt=cyc_val,
                         indicator=indicator_val,
-                        buzzer=buzzer_val
+                        buzzer=buzzer_val,
+                        bcm1_cycle_attempt=bcm1_cyc_val,
+                        bcm2_cycle_attempt=bcm2_cyc_val
                     ))
                     success_count += 1
             except Exception as e:
@@ -1282,7 +1367,9 @@ def get_sensor_data():
                 'cycle': bool(r.cycle) if r.cycle is not None else compute_cycle_ok(r.nbcm_selected),
                 'cycle_attempt': r.cycle_attempt,
                 'indicator': r.indicator,
-                'buzzer': r.buzzer
+                'buzzer': r.buzzer,
+                'bcm1_cycle_attempt': r.bcm1_cycle_attempt,
+                'bcm2_cycle_attempt': r.bcm2_cycle_attempt
             })
             
         return jsonify(output)
@@ -1407,6 +1494,8 @@ def get_master_data():
             'cycle_attempt': r.cycle_attempt,
             'indicator': r.indicator,
             'buzzer': r.buzzer,
+            'bcm1_cycle_attempt': r.bcm1_cycle_attempt,
+            'bcm2_cycle_attempt': r.bcm2_cycle_attempt,
             'date': r.date
         })
 
@@ -1600,6 +1689,24 @@ def import_csv():
             indicator_val = ind_raw.upper() in TRUE_TOKENS if ind_raw else None
             buzzer_val = buz_raw.upper() in TRUE_TOKENS if buz_raw else None
 
+            # ستون‌های «BCM1_CYCLE_ATTEMPT»/«BCM2_CYCLE_ATTEMPT» هم اختیاری‌اند
+            # (خروجی اکسل جدید آن‌ها را دارد؛ فایل‌های قدیمی‌تر ندارند -> به
+            # همان مقدار مشترک cyc_val برمی‌گردیم)
+            bcm1_cyc_raw = pick(row, 'BCM1_CYCLE_ATTEMPT', 'BCM1_ATTEMPTS')
+            bcm2_cyc_raw = pick(row, 'BCM2_CYCLE_ATTEMPT', 'BCM2_ATTEMPTS')
+            bcm1_cyc_val = cyc_val
+            bcm2_cyc_val = cyc_val
+            if bcm1_cyc_raw:
+                try:
+                    bcm1_cyc_val = max(1, min(3, int(float(bcm1_cyc_raw))))
+                except (TypeError, ValueError):
+                    pass
+            if bcm2_cyc_raw:
+                try:
+                    bcm2_cyc_val = max(1, min(3, int(float(bcm2_cyc_raw))))
+                except (TypeError, ValueError):
+                    pass
+
             payload = {
                 'num_value': num,
                 'nbcm': fields,
@@ -1610,6 +1717,8 @@ def import_csv():
                 'cycle_attempt': cyc_val,
                 'indicator': indicator_val,
                 'buzzer': buzzer_val,
+                'bcm1_cycle_attempt': bcm1_cyc_val,
+                'bcm2_cycle_attempt': bcm2_cyc_val,
             }
             # خط استاندارد برای بکاپ‌گیری در صورت شکست ذخیره
             raw_line = record_to_line(safe_int(num), fields,
@@ -1817,10 +1926,13 @@ def export_excel():
     target_date = request.args.get('date')
     si = io.StringIO()
     cw = csv.writer(si)
+    # ستون «Attempts» قدیمی (مشترک بین هر دو BCM) ابهام داشت: معلوم نبود
+    # کدام BCM به تلاش دوم/سوم نیاز داشته. به‌جایش دو ستون مجزا گذاشته شده:
+    # BCM1_Attempts و BCM2_Attempts.
     cw.writerow(['ID', 'NUM',
                  'BCM1_OPEN', 'BCM1_CLOSE', 'BCM1_OK',
                  'BCM2_OPEN', 'BCM2_CLOSE', 'BCM2_OK',
-                 'Cycle', 'Attempts', 'Indicator', 'Buzzer',
+                 'Cycle', 'BCM1_Attempts', 'BCM2_Attempts', 'Indicator', 'Buzzer',
                  'Temp', 'Humidity', 'Time', 'Date', 'Timestamp'])
     
     query = MasterReading.query
@@ -1844,7 +1956,8 @@ def export_excel():
             'OK' if res['BCM2']['close'] else 'NOK',
             'OK' if res['BCM2']['ok'] else 'NOK',
             'OK' if cycle_val else 'NOK',
-            r.cycle_attempt if r.cycle_attempt is not None else '',
+            r.bcm1_cycle_attempt if r.bcm1_cycle_attempt is not None else '',
+            r.bcm2_cycle_attempt if r.bcm2_cycle_attempt is not None else '',
             indicator_cell, buzzer_cell,
             r.temp, r.humidity, r.time, r.date, r.timestamp])
     
@@ -1995,6 +2108,31 @@ def _ensure_master_extra_signal_columns():
         return False
 
 
+def _ensure_master_bcm_attempt_columns():
+    """
+    مهاجرتِ ستون‌های «bcm1_cycle_attempt» و «bcm2_cycle_attempt» (تعداد
+    تلاش مستقل هر BCM) روی دیتابیس‌های قدیمی‌تر.
+
+    این دو مقدار از روی داده‌ی قدیمی قابل بازسازی نیستند (چون فریمورهای
+    قبلی این عدد را به‌تفکیک BCM نمی‌فرستادند)؛ پس رکوردهای قدیمی با NULL
+    باقی می‌مانند (یعنی «—» در UI، مثل cycle_attempt).
+    """
+    try:
+        from sqlalchemy import text
+        with db.engine.begin() as conn:
+            cols = [row[1] for row in conn.execute(text("PRAGMA table_info(master_reading)"))]
+            if "bcm1_cycle_attempt" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN bcm1_cycle_attempt INTEGER"))
+            if "bcm2_cycle_attempt" not in cols:
+                conn.execute(text("ALTER TABLE master_reading ADD COLUMN bcm2_cycle_attempt INTEGER"))
+        print("[DB] ستون‌های bcm1_cycle_attempt/bcm2_cycle_attempt بررسی/اضافه شدند.")
+        return True
+    except Exception as exc:
+        print(f"[DB] افزودن ستون‌های bcm1/bcm2_cycle_attempt ناموفق بود: {exc}")
+        db.session.rollback()
+        return False
+
+
 def bootstrap_server(recover_unsaved=True, start_serial=True):
     """
     راه‌اندازی مشترک بین «python app.py» و اپ دسکتاپ (desktop_app.py):
@@ -2010,6 +2148,7 @@ def bootstrap_server(recover_unsaved=True, start_serial=True):
         _ensure_master_cycle_column()
         _ensure_master_attempt_column()
         _ensure_master_extra_signal_columns()
+        _ensure_master_bcm_attempt_columns()
 
         # رکوردهایی که در اجرای قبلی ذخیره نشده بودند، برگردانده شوند
         if recover_unsaved and os.path.exists(UNSAVED_LOG):

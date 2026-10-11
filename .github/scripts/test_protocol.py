@@ -36,6 +36,13 @@ KEY_CYCLE = "cycle="
 KEY_INDICATOR = "Indicator="
 KEY_BUZZER = "Buzzer="
 
+# دو فیلد جدید: BCM1_Cycle=/BCM2_Cycle= (تعداد تلاشی که هر BCM به‌طور
+# *مستقل* برای این سیکل طول کشید). بر خلاف cycle= که مشترک بین هر دو BCM
+# است، این دو مجزا هستند تا معلوم شود کدام BCM زودتر/دیرتر جواب داده.
+# باید در هر سه لایه حضور داشته باشند (ESP32 -> ESP8266 -> app.py).
+KEY_BCM1_CYCLE = "BCM1_Cycle="
+KEY_BCM2_CYCLE = "BCM2_Cycle="
+
 failures = []
 warnings = []
 
@@ -67,19 +74,25 @@ for blob, name in ((esp32, "ESP32 snprintf"), (esp8266, "ESP8266")):
     check(KEY_CYCLE in blob, f"[{name}] فیلد {KEY_CYCLE} (تعداد تلاش سیکل) در فرمت پیدا نشد")
     check(KEY_INDICATOR in blob, f"[{name}] فیلد {KEY_INDICATOR} (GPIO34) در فرمت پیدا نشد")
     check(KEY_BUZZER in blob, f"[{name}] فیلد {KEY_BUZZER} (GPIO35) در فرمت پیدا نشد")
+    check(KEY_BCM1_CYCLE in blob, f"[{name}] فیلد {KEY_BCM1_CYCLE} (تلاش مستقل BCM1) در فرمت پیدا نشد")
+    check(KEY_BCM2_CYCLE in blob, f"[{name}] فیلد {KEY_BCM2_CYCLE} (تلاش مستقل BCM2) در فرمت پیدا نشد")
 check(KEY_CYCLE in app_src, f"[app.py] فیلد {KEY_CYCLE} در رجکس/پارسر پیدا نشد")
 check("Indicator=" in app_src, "[app.py] فیلد Indicator= در رجکس/پارسر پیدا نشد")
 check("Buzzer=" in app_src, "[app.py] فیلد Buzzer= در رجکس/پارسر پیدا نشد")
+check(KEY_BCM1_CYCLE in app_src, f"[app.py] فیلد {KEY_BCM1_CYCLE} در رجکس/پارسر پیدا نشد")
+check(KEY_BCM2_CYCLE in app_src, f"[app.py] فیلد {KEY_BCM2_CYCLE} در رجکس/پارسر پیدا نشد")
 
 # ------------------------------------------------- 2) تعداد فیلدهای sscanf
-# فیلد cycle= و Indicator=/Buzzer= اختیاری‌اند (سازگاری عقب‌رو با
-# فریمورهای قدیمی‌تر)، پس sscanf باید با ۱۳ فیلد (بدون cycle=)، ۱۴ فیلد
-# (فقط cycle=) و ۱۶ فیلد (cycle= + Indicator= + Buzzer=) معتبر شمرده شود
+# فیلد cycle=، Indicator=/Buzzer=، و BCM1_Cycle=/BCM2_Cycle= اختیاری‌اند
+# (سازگاری عقب‌رو با فریمورهای قدیمی‌تر)، پس sscanf باید با ۱۳ فیلد (بدون
+# cycle=)، ۱۴ فیلد (فقط cycle=)، ۱۶ فیلد (cycle=+Indicator=+Buzzer=) و ۱۸
+# فیلد (+ BCM1_Cycle=+BCM2_Cycle=) معتبر شمرده شود
 _m_all = re.findall(r"itemsParsed\s*==\s*(\d+)", esp8266)
 check(bool(_m_all), "[ESP8266] شرط تعداد فیلدهای sscanf پیدا نشد")
-check(set(_m_all) == {"13", "14", "16"},
-      f"[ESP8266] sscanf باید ۱۳ (بدون cycle=)، ۱۴ (فقط cycle=) و ۱۶ "
-      f"(cycle=+Indicator=+Buzzer=) را بپذیرد؛ یافت‌شده: {_m_all}")
+check(set(_m_all) == {"13", "14", "16", "18"},
+      f"[ESP8266] sscanf باید ۱۳ (بدون cycle=)، ۱۴ (فقط cycle=)، ۱۶ "
+      f"(cycle=+Indicator=+Buzzer=) و ۱۸ (+ BCM1_Cycle=+BCM2_Cycle=) را "
+      f"بپذیرد؛ یافت‌شده: {_m_all}")
 
 # ------------------------------------ 3) پارس واقعی خط توسط سرور Flask
 # دیتابیس تست: قبل از import جداسازی می‌شود تا رکوردهای تستِ داینامیک
@@ -120,28 +133,38 @@ check(flask_app.parse_industrial_line("[LOG]: ID:42 | T:23") is None,
 
 # ------------------------------------------- 4) اندازه‌ی struct فایل .dat
 # ESP32: #pragma pack(1) struct { int; float; float; 4x bool; int; 5x uint8;
-#                                  1x uint8 (CycleAttempt); 2x bool (Indicator, Buzzer) }
+#                                  1x uint8 (CycleAttempt); 2x bool (Indicator, Buzzer);
+#                                  2x uint8 (BCM1_CycleAttempt, BCM2_CycleAttempt) }
 # فرمت قدیمی (قبل از cycle=) ۲۵ بایت؛ فرمت میانی با CycleAttempt ۲۶ بایت؛
-# فرمت فعلی با Indicator+Buzzer ۲۸ بایت. app.py باید هر سه را تشخیص بدهد
-# تا فایل‌های .dat قدیمی‌تر هم قابل آپلود بمانند.
+# فرمت قبلی با Indicator+Buzzer ۲۸ بایت؛ فرمت فعلی با BCM1/BCM2_CycleAttempt
+# ۳۰ بایت. app.py باید هر چهار را تشخیص بدهد تا فایل‌های .dat قدیمی‌تر هم
+# قابل آپلود بمانند.
 expected_size_old = struct.calcsize("<iff????iBBBBB")
 expected_size_new = struct.calcsize("<iff????iBBBBBB")
 expected_size_v3 = struct.calcsize("<iff????iBBBBBB??")
+expected_size_v4 = struct.calcsize("<iff????iBBBBBB??BB")
 check(expected_size_old == 25, f"چیدمان struct قدیمی پایتون 25 بایت نیست: {expected_size_old}")
 check(expected_size_new == 26, f"چیدمان struct میانی پایتون 26 بایت نیست: {expected_size_new}")
-check(expected_size_v3 == 28, f"چیدمان struct فعلی پایتون 28 بایت نیست: {expected_size_v3}")
+check(expected_size_v3 == 28, f"چیدمان struct قبلی پایتون 28 بایت نیست: {expected_size_v3}")
+check(expected_size_v4 == 30, f"چیدمان struct فعلی پایتون 30 بایت نیست: {expected_size_v4}")
 
 check("uint8_t CycleAttempt;" in esp32,
       "[ESP32] فیلد CycleAttempt به struct WifiData اضافه شده")
 check("bool Indicator;" in esp32, "[ESP32] فیلد Indicator به struct WifiData اضافه شده")
 check("bool Buzzer;" in esp32, "[ESP32] فیلد Buzzer به struct WifiData اضافه شده")
+check("uint8_t BCM1_CycleAttempt;" in esp32,
+      "[ESP32] فیلد BCM1_CycleAttempt به struct WifiData اضافه شده")
+check("uint8_t BCM2_CycleAttempt;" in esp32,
+      "[ESP32] فیلد BCM2_CycleAttempt به struct WifiData اضافه شده")
 
 m_old = re.search(r"STRUCT_FORMAT_OLD\s*=\s*'([^']+)'", app_src)
 m_new = re.search(r"STRUCT_FORMAT_NEW\s*=\s*'([^']+)'", app_src)
 m_v3 = re.search(r"STRUCT_FORMAT_V3\s*=\s*'([^']+)'", app_src)
+m_v4 = re.search(r"STRUCT_FORMAT_V4\s*=\s*'([^']+)'", app_src)
 check(m_old is not None, "STRUCT_FORMAT_OLD در app.py پیدا نشد")
 check(m_new is not None, "STRUCT_FORMAT_NEW در app.py پیدا نشد")
 check(m_v3 is not None, "STRUCT_FORMAT_V3 در app.py پیدا نشد")
+check(m_v4 is not None, "STRUCT_FORMAT_V4 در app.py پیدا نشد")
 if m_old:
     check(struct.calcsize(m_old.group(1)) == expected_size_old,
           f"STRUCT_FORMAT_OLD='{m_old.group(1)}' با فرمت قدیمی ESP32 ({expected_size_old} بایت) نمی‌خواند")
@@ -150,7 +173,10 @@ if m_new:
           f"STRUCT_FORMAT_NEW='{m_new.group(1)}' با فرمت میانی ESP32 ({expected_size_new} بایت) نمی‌خواند")
 if m_v3:
     check(struct.calcsize(m_v3.group(1)) == expected_size_v3,
-          f"STRUCT_FORMAT_V3='{m_v3.group(1)}' با فرمت فعلی ESP32 ({expected_size_v3} بایت) نمی‌خواند")
+          f"STRUCT_FORMAT_V3='{m_v3.group(1)}' با فرمت قبلی ESP32 ({expected_size_v3} بایت) نمی‌خواند")
+if m_v4:
+    check(struct.calcsize(m_v4.group(1)) == expected_size_v4,
+          f"STRUCT_FORMAT_V4='{m_v4.group(1)}' با فرمت فعلی ESP32 ({expected_size_v4} بایت) نمی‌خواند")
 check("#pragma pack(1)" in esp32, "[ESP32] struct باید با pragma pack(1) پک شده باشد")
 
 # ------------------------- 5) ساختار فریمور: فازها و مانیتورینگ
@@ -454,6 +480,35 @@ try:
         _row = flask_app.MasterReading.query.filter_by(num_value=99005).first()
     check(_row is not None and _row.cycle_attempt == 2,
           f"[app.py/داینامیک] cycle_attempt=2 درست در دیتابیس ذخیره شد (ردیف={_row.cycle_attempt if _row else None})")
+
+    # ۲ب-۲) BCM1_Cycle=/BCM2_Cycle=: تلاش مستقل هر BCM باید جدا پارس و
+    # جدا در دیتابیس ذخیره شود (حتی وقتی با cycle= مشترک متفاوت است —
+    # یعنی یکی از دو BCM زودتر از دیگری جواب داده)
+    _rec_bcm_cyc = ("NUM=99009,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+                    "Temp=22.50,Humidity=49.00,Date=2026-09-30,Time=10:15:30,"
+                    "cycle=3,Indicator=OK,Buzzer=OK,BCM1_Cycle=1,BCM2_Cycle=3")
+    _sent.clear()
+    _ok_bcm_cyc = flask_app.handle_serial_line(_rec_bcm_cyc)
+    check(_ok_bcm_cyc is True and _sent == ["ACK 99009"],
+          f"[app.py/داینامیک] رکورد با BCM1_Cycle=/BCM2_Cycle= هم ACK می‌گیرد (نتیجه={_ok_bcm_cyc}، ارسالی={_sent})")
+    with flask_app.app.app_context():
+        _row_bcm = flask_app.MasterReading.query.filter_by(num_value=99009).first()
+    check(_row_bcm is not None and _row_bcm.bcm1_cycle_attempt == 1 and _row_bcm.bcm2_cycle_attempt == 3,
+          f"[app.py/داینامیک] BCM1_Cycle=1/BCM2_Cycle=3 جدا در دیتابیس ذخیره شدند "
+          f"(bcm1={_row_bcm.bcm1_cycle_attempt if _row_bcm else None}, "
+          f"bcm2={_row_bcm.bcm2_cycle_attempt if _row_bcm else None})")
+
+    # ۲ب-۳) سازگاری عقب‌رو: خط با cycle= ولی بدون BCM1_Cycle=/BCM2_Cycle=
+    # (فریمور قبلی) باید هر دو مقدار جدید را با همان cycle= مشترک پر کند
+    _rec_legacy_cyc = ("NUM=99010,BCM1_OPEN=OK,BCM1_CLOSE=OK,BCM2_OPEN=OK,BCM2_CLOSE=OK,"
+                       "Temp=22.00,Humidity=47.00,Date=2026-09-30,Time=10:15:45,"
+                       "cycle=2,Indicator=OK,Buzzer=NOK")
+    _payload_legacy_cyc = flask_app.parse_industrial_line(_rec_legacy_cyc)
+    check(_payload_legacy_cyc is not None
+          and _payload_legacy_cyc.get("bcm1_cycle_attempt") == 2
+          and _payload_legacy_cyc.get("bcm2_cycle_attempt") == 2,
+          f"[app.py/داینامیک] فریمور قدیمی‌تر (بدون BCM1_Cycle=/BCM2_Cycle=) با همان "
+          f"cycle= مشترک پر می‌شود ({_payload_legacy_cyc})")
 
     # ۲پ) Indicator=/Buzzer=: باید همیشه پارس و همیشه در دیتابیس ذخیره شوند
     # (ESP32 همیشه می‌فرستد و ESP8266 همیشه رله می‌کند — داده‌ای که از

@@ -371,6 +371,14 @@ struct WifiData {
   // اندازه‌ی کافی لبه دیده شود (BUZZER_EDGE_THRESHOLD)، همان پنجره تایید
   // می‌شود؛ مثل Indicator در کل سیکل تجمعی باقی می‌ماند.
   bool Buzzer;
+  // شماره‌ی تلاشی که هر BCM به‌طور مستقل اولین بار کامل شد (هم باز و هم
+  // بسته‌شدنش تایید شد): ۱، ۲ یا ۳. اگر تا پایان ۳ تلاش هم کامل نشود،
+  // مقدار ۳ می‌ماند (یعنی «حتی بعد از ۳ تلاش هم ناقص بود»). بر خلافِ
+  // CycleAttempt بالا (که مشترک بین هر دو BCM و نشان‌دهنده‌ی توقفِ کل
+  // حلقه است)، این دو فیلد مجزا هستند تا معلوم شود کدام BCM زودتر/دیرتر
+  // جواب داده است.
+  uint8_t BCM1_CycleAttempt;
+  uint8_t BCM2_CycleAttempt;
 };
 #pragma pack()
 
@@ -1704,13 +1712,27 @@ static bool deviceDone(const bool got[PHASE_COUNT][DEVICE_COUNT], int d) {
  *
  * outIndicator/outBuzzer: نتیجه‌ی تجمعی GPIO34/GPIO35 طی کل سیکل (همه‌ی
  * فازها و همه‌ی تلاش‌ها)؛ دقیقاً مثل got[][] هرگز در طول سیکل ریست نمی‌شوند.
+ *
+ * outAttemptPerDevice[d]: شماره‌ی تلاشی که دستگاهِ d (BCM1=0, BCM2=1)
+ * به‌طور مستقل اولین بار کامل شد (هم باز، هم بسته). اگر تا پایان ۳ تلاش
+ * هم کامل نشود، همان مقدار RELAY_MAX_ATTEMPTS (۳) می‌ماند. بر خلاف
+ * outAttempt (که مشترک است و فقط می‌گوید «کل حلقه در کدام تلاش متوقف
+ * شد»)، این مقدار برای هر BCM جداست — چون ممکن است یکی زودتر از دیگری
+ * جواب بدهد ولی چون حلقه تا تکمیل *هر دو* ادامه دارد، این تفاوت با
+ * outAttempt به‌تنهایی معلوم نمی‌شد.
  */
 static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttempt,
-                          bool *outIndicator = nullptr, bool *outBuzzer = nullptr) {
+                          bool *outIndicator = nullptr, bool *outBuzzer = nullptr,
+                          uint8_t outAttemptPerDevice[DEVICE_COUNT] = nullptr) {
   for (int p = 0; p < PHASE_COUNT; p++)
     for (int d = 0; d < DEVICE_COUNT; d++) got[p][d] = false;
   bool gotIndicator = false;
   bool gotBuzzer = false;
+
+  // ۰ = هنوز کامل نشده؛ در پایان اگر صفر باقی بماند یعنی حتی بعد از
+  // RELAY_MAX_ATTEMPTS تلاش هم آن دستگاه کامل نشده (پایین‌تر با ۳ پر می‌شود)
+  uint8_t perDeviceAttempt[DEVICE_COUNT];
+  for (int d = 0; d < DEVICE_COUNT; d++) perDeviceAttempt[d] = 0;
 
   uint8_t usedAttempt = 1;
   for (uint8_t attempt = 1; attempt <= RELAY_MAX_ATTEMPTS; attempt++) {
@@ -1744,6 +1766,9 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttemp
                    got[PHASE_OPEN][d] ? "YES" : "NO",
                    got[PHASE_CLOSE][d] ? "YES" : "NO",
                    deviceDone(got, d) ? "(OK)" : "(ناقص)");
+      // اولین تلاشی که این دستگاهِ خاص کامل شد را جدا ثبت کن (مستقل از
+      // اینکه دستگاه دیگر هم کامل شده باشد یا نه)
+      if (deviceDone(got, d) && perDeviceAttempt[d] == 0) perDeviceAttempt[d] = attempt;
       if (!deviceDone(got, d)) allDone = false;
     }
 
@@ -1758,9 +1783,19 @@ static void runTestCycle(bool got[PHASE_COUNT][DEVICE_COUNT], uint8_t *outAttemp
     }
   }
 
+  // دستگاهی که حتی بعد از آخرین تلاش هم کامل نشده، مقدارش را روی
+  // RELAY_MAX_ATTEMPTS (۳) می‌گذاریم تا معنی‌اش «حتی بعد از ۳ تلاش هم
+  // ناقص ماند» باشد (دقیقاً مثل معنیِ outAttempt=3 در منطق قبلی)
+  for (int d = 0; d < DEVICE_COUNT; d++) {
+    if (perDeviceAttempt[d] == 0) perDeviceAttempt[d] = RELAY_MAX_ATTEMPTS;
+  }
+
   if (outAttempt) *outAttempt = usedAttempt;
   if (outIndicator) *outIndicator = gotIndicator;
   if (outBuzzer) *outBuzzer = gotBuzzer;
+  if (outAttemptPerDevice) {
+    for (int d = 0; d < DEVICE_COUNT; d++) outAttemptPerDevice[d] = perDeviceAttempt[d];
+  }
 }
 
 void TaskRelayControl(void *pv) {
@@ -1792,7 +1827,8 @@ void TaskRelayControl(void *pv) {
     uint8_t cycleAttemptUsed = 1;
     bool indicatorOk = false;
     bool buzzerOk = false;
-    runTestCycle(got, &cycleAttemptUsed, &indicatorOk, &buzzerOk);
+    uint8_t perDeviceAttempt[DEVICE_COUNT] = {1, 1};  // [0]=BCM1, [1]=BCM2
+    runTestCycle(got, &cycleAttemptUsed, &indicatorOk, &buzzerOk, perDeviceAttempt);
 
     // ---- خواندن دما و رطوبت و ساعت ----
     xEventGroupClearBits(xSystemEvents, BIT_SHT_READ_COMPLETE);
@@ -1812,18 +1848,22 @@ void TaskRelayControl(void *pv) {
       globalSystemState.CycleAttempt = cycleAttemptUsed;
       globalSystemState.Indicator = indicatorOk;
       globalSystemState.Buzzer = buzzerOk;
+      globalSystemState.BCM1_CycleAttempt = perDeviceAttempt[0];
+      globalSystemState.BCM2_CycleAttempt = perDeviceAttempt[1];
 
       WifiData snapshot;
       memcpy(&snapshot, (const void *)&globalSystemState, sizeof(WifiData));
       xSemaphoreGive(xGlobalStateMutex);
 
-      DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s]  %s[open:%s close:%s]  "
+      DEBUG_PRINTF("[CYCLE] #%d  %s[open:%s close:%s cyc:%u]  %s[open:%s close:%s cyc:%u]  "
                    "T=%.2f H=%.2f  cycle=%u  Indicator=%s  Buzzer=%s  @ %04d-%02d-%02d %02d:%02d:%02d\n",
                    snapshot.NUM,
                    DEVICE_NAMES[0], snapshot.BCM1_OPEN ? "OK" : "NOK",
                                     snapshot.BCM1_CLOSE ? "OK" : "NOK",
+                                    (unsigned)snapshot.BCM1_CycleAttempt,
                    DEVICE_NAMES[1], snapshot.BCM2_OPEN ? "OK" : "NOK",
                                     snapshot.BCM2_CLOSE ? "OK" : "NOK",
+                                    (unsigned)snapshot.BCM2_CycleAttempt,
                    snapshot.Temp, snapshot.Hum, (unsigned)snapshot.CycleAttempt,
                    snapshot.Indicator ? "OK" : "NOK", snapshot.Buzzer ? "OK" : "NOK",
                    snapshot.Year, snapshot.Month, snapshot.Day,
@@ -2357,7 +2397,7 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
   snprintf(out, outSize,
            "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
            "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
-           "cycle=%u,Indicator=%s,Buzzer=%s",
+           "cycle=%u,Indicator=%s,Buzzer=%s,BCM1_Cycle=%u,BCM2_Cycle=%u",
            d.NUM,
            d.BCM1_OPEN ? "OK" : "NOK",
            d.BCM1_CLOSE ? "OK" : "NOK",
@@ -2368,7 +2408,9 @@ void formatRecordLine(const WifiData &d, char *out, size_t outSize) {
            d.Hour, d.Minute, d.Second,
            (unsigned)(d.CycleAttempt ? d.CycleAttempt : 1),
            d.Indicator ? "OK" : "NOK",
-           d.Buzzer ? "OK" : "NOK");
+           d.Buzzer ? "OK" : "NOK",
+           (unsigned)(d.BCM1_CycleAttempt ? d.BCM1_CycleAttempt : 1),
+           (unsigned)(d.BCM2_CycleAttempt ? d.BCM2_CycleAttempt : 1));
 }
 
 void sendRecord(WiFiClient &cl, const WifiData &d) {

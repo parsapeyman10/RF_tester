@@ -145,20 +145,19 @@
 
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-orange-500 text-center flex flex-col justify-center min-h-[140px]">
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Sequence (NUM)</span>
-                <div id="live-num" class="text-4xl font-bold mt-2 text-orange-400 font-mono">--</div>
-            </div>
-            
-            <div class="glass-card p-4 rounded-2xl border-t-4 border-blue-500 flex flex-col justify-center min-h-[140px] px-3">
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-orange-500 flex flex-col justify-center min-h-[140px] px-3">
+                <div class="text-center border-b border-slate-700/60 pb-2 mb-2">
+                    <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">Sequence (NUM)</span>
+                    <div id="live-num" class="text-3xl font-bold mt-1 text-orange-400 font-mono">--</div>
+                </div>
                 <div class="grid grid-cols-2 gap-2 text-center">
                     <div>
                         <span class="text-blue-300 text-[10px] font-bold uppercase tracking-widest">Temp (°C)</span>
-                        <div id="live-temp" class="text-3xl font-bold mt-1 text-blue-400 font-mono">--</div>
+                        <div id="live-temp" class="text-2xl font-bold mt-1 text-blue-400 font-mono">--</div>
                     </div>
                     <div>
                         <span class="text-cyan-300 text-[10px] font-bold uppercase tracking-widest">Humidity (%)</span>
-                        <div id="live-humidity" class="text-3xl font-bold mt-1 text-cyan-400 font-mono">--</div>
+                        <div id="live-humidity" class="text-2xl font-bold mt-1 text-cyan-400 font-mono">--</div>
                     </div>
                 </div>
             </div>
@@ -212,13 +211,12 @@
 
             <div class="glass-card p-4 rounded-2xl border-t-4 border-emerald-500 flex flex-col justify-center min-h-[140px]">
                 <div class="flex items-center justify-center gap-2 mb-2">
-                    <span class="text-slate-400 text-[9px] font-bold uppercase tracking-widest">تعداد تلاش این سیکل:</span>
-                    <span id="live-cycle-attempt" class="text-sm font-black font-mono text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-amber-500/20">--/3</span>
+                    <span class="text-slate-400 text-[9px] font-bold uppercase tracking-widest">BCM1 تلاش سیکل:</span>
+                    <span id="live-cycle-attempt-bcm1" class="text-sm font-black font-mono text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-amber-500/20">--/3</span>
                 </div>
-                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">سطح منطقی (۱ / ۰)</span>
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-3">سطح منطقی BCM1 (۱ / ۰)</span>
                 <div class="grid grid-cols-2 gap-2 px-1">
-                    {% for key, fa in [('BCM1_OPEN','BCM1 باز'), ('BCM1_CLOSE','BCM1 بسته'),
-                                       ('BCM2_OPEN','BCM2 باز'), ('BCM2_CLOSE','BCM2 بسته')] %}
+                    {% for key, fa in [('BCM1_OPEN','BCM1 باز'), ('BCM1_CLOSE','BCM1 بسته')] %}
                     <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center">
                         <span class="text-[9px] text-slate-400 font-mono mb-1">{{ fa }}</span>
                         <span id="lvl-{{ key }}"
@@ -227,21 +225,36 @@
                     {% endfor %}
                 </div>
             </div>
-        </div>
 
-        <div class="glass-card p-3 rounded-2xl border-t-4 border-amber-500 flex items-center justify-center gap-6 mt-4">
-            <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest">سیگنال‌های BCM2:</span>
-            <div class="flex items-center gap-2">
-                <span class="text-[10px] text-slate-400 font-mono">Indicator</span>
-                <span id="indicator-led" class="w-3.5 h-3.5 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
-                <span id="indicator-led-txt" class="text-[10px] text-slate-600 font-bold">—</span>
-            </div>
-            <div class="flex items-center gap-2">
-                <span class="text-[10px] text-slate-400 font-mono">Buzzer</span>
-                <svg id="buzzer-pwm" width="40" height="16" viewBox="0 0 44 18">
-                    <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
-                </svg>
-                <span id="buzzer-pwm-txt" class="text-[10px] text-slate-600 font-bold">—</span>
+            <div class="glass-card p-4 rounded-2xl border-t-4 border-amber-500 flex flex-col justify-center min-h-[140px]">
+                <div class="flex items-center justify-center gap-2 mb-2">
+                    <span class="text-slate-400 text-[9px] font-bold uppercase tracking-widest">BCM2 تلاش سیکل:</span>
+                    <span id="live-cycle-attempt-bcm2" class="text-sm font-black font-mono text-amber-300 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-amber-500/20">--/3</span>
+                </div>
+                <span class="text-slate-400 text-[10px] font-bold uppercase tracking-widest text-center mb-2">سطح منطقی BCM2 (۱ / ۰)</span>
+                <div class="grid grid-cols-2 gap-2 px-1 mb-2">
+                    {% for key, fa in [('BCM2_OPEN','BCM2 باز'), ('BCM2_CLOSE','BCM2 بسته')] %}
+                    <div class="bg-slate-900/60 rounded-lg px-2 py-2 flex flex-col items-center">
+                        <span class="text-[9px] text-slate-400 font-mono mb-1">{{ fa }}</span>
+                        <span id="lvl-{{ key }}"
+                              class="text-2xl font-black leading-none text-slate-600 transition-all duration-300">–</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="flex items-center justify-center gap-4 border-t border-slate-700/60 pt-2">
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-[9px] text-slate-400 font-mono">Indicator</span>
+                        <span id="indicator-led" class="w-3.5 h-3.5 rounded-full bg-slate-700/50 border border-slate-600 inline-block"></span>
+                        <span id="indicator-led-txt" class="text-[9px] text-slate-600 font-bold">—</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <span class="text-[9px] text-slate-400 font-mono">Buzzer</span>
+                        <svg id="buzzer-pwm" width="36" height="14" viewBox="0 0 44 18">
+                            <line x1="0" y1="15" x2="44" y2="15" stroke="#475569" stroke-width="2"/>
+                        </svg>
+                        <span id="buzzer-pwm-txt" class="text-[9px] text-slate-600 font-bold">—</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -522,20 +535,26 @@
                     + (one ? 'text-emerald-400 drop-shadow-[0_0_8px_#22c55e]' : 'text-red-400');
             });
 
-            // تعداد تلاش‌هایی که این سیکل طول کشید (۱، ۲ یا ۳) — فیلد cycle=
-            const attEl = document.getElementById('live-cycle-attempt');
-            if (attEl) {
-                const att = last.cycle_attempt;
+            // تعداد تلاش‌هایی که هر BCM به‌طور *مستقل* برای این سیکل طول
+            // کشید (۱، ۲ یا ۳) — فیلدهای BCM1_Cycle=/BCM2_Cycle=. رنگ‌بندی:
+            // ۱=سبز (بار اول موفق)، ۲=زرد (بار دوم)، ۳=قرمز (بعد از ۳ تلاش هم ناقص)
+            function renderCycleAttempt(elId, att) {
+                const el = document.getElementById(elId);
+                if (!el) return;
                 if (att === null || att === undefined) {
-                    attEl.textContent = '--/3';
-                    attEl.className = 'text-sm font-black font-mono text-slate-500 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-slate-700';
+                    el.textContent = '--/3';
+                    el.className = 'text-sm font-black font-mono text-slate-500 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-slate-700';
                 } else {
-                    attEl.textContent = att + '/3';
+                    el.textContent = att + '/3';
                     const color = att >= 3 ? 'text-red-400 border-red-500/30'
                                 : (att === 2 ? 'text-amber-300 border-amber-500/30' : 'text-emerald-400 border-emerald-500/30');
-                    attEl.className = 'text-sm font-black font-mono bg-slate-900/60 px-2 py-0.5 rounded-lg border ' + color;
+                    el.className = 'text-sm font-black font-mono bg-slate-900/60 px-2 py-0.5 rounded-lg border ' + color;
                 }
             }
+            renderCycleAttempt('live-cycle-attempt-bcm1', last.bcm1_cycle_attempt);
+            // Indicator/Buzzer شماره‌ی تلاش جداگانه‌ای ندارند؛ چون در همین جعبه‌ی
+            // BCM2 گروه‌بندی شده‌اند، همان مقدار BCM2 را نشان می‌دهند
+            renderCycleAttempt('live-cycle-attempt-bcm2', last.bcm2_cycle_attempt);
 
             // Indicator (GPIO34): OK -> چراغ چشمک‌زن سبز، NOK -> چراغ خاموش
             const indLed = document.getElementById('indicator-led');

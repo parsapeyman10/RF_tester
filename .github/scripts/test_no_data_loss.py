@@ -123,9 +123,9 @@ row = master_first(num_value=1000)
 check(row is not None and row.temp == "0", "temp=nan به مقدار پیش‌فرض 0 تبدیل شد")
 
 print("\n[5] فایل .dat با انتهای خراب — رکوردهای کامل نجات می‌یابند")
-# فرمت فعلی (۲۸ بایتی): CycleAttempt + Indicator + Buzzer در انتها
-rec1 = struct.pack('<iff????iBBBBBB??', 2001, 24.5, 40.0, 1, 0, 1, 0, 2026, 5, 2, 9, 0, 0, 1, True, False)
-rec2 = struct.pack('<iff????iBBBBBB??', 2002, 24.6, 41.0, 0, 1, 0, 1, 2026, 5, 2, 9, 0, 1, 1, False, True)
+# فرمت فعلی (۳۰ بایتی): CycleAttempt + Indicator + Buzzer + BCM1/BCM2_CycleAttempt در انتها
+rec1 = struct.pack('<iff????iBBBBBB??BB', 2001, 24.5, 40.0, 1, 0, 1, 0, 2026, 5, 2, 9, 0, 0, 1, True, False, 1, 1)
+rec2 = struct.pack('<iff????iBBBBBB??BB', 2002, 24.6, 41.0, 0, 1, 0, 1, 2026, 5, 2, 9, 0, 1, 1, False, True, 2, 3)
 blob = rec1 + rec2 + b"\x01\x02\x03"   # دو رکورد سالمِ متمایز + ۳ بایت خراب
 before = master_count()
 r = client.post('/upload_dat',
@@ -136,8 +136,8 @@ check(r['processed'] == 2 and r.get('partial_files') == 1,
 check(master_count() == before + 2, "هر دو رکورد در master ثبت شد")
 
 print("\n[6] شکست ثبتِ دسته‌ای — فال‌بک تک‌به‌تک همه را نجات می‌دهد")
-blob2 = struct.pack('<iff????iBBBBBB??', 3001, 24.5, 40.0, 1, 1, 1, 1, 2026, 5, 3, 8, 0, 0, 1, True, True) \
-      + struct.pack('<iff????iBBBBBB??', 3002, 24.5, 40.0, 0, 0, 0, 0, 2026, 5, 3, 8, 0, 1, 1, False, False)
+blob2 = struct.pack('<iff????iBBBBBB??BB', 3001, 24.5, 40.0, 1, 1, 1, 1, 2026, 5, 3, 8, 0, 0, 1, True, True, 1, 1) \
+      + struct.pack('<iff????iBBBBBB??BB', 3002, 24.5, 40.0, 0, 0, 0, 0, 2026, 5, 3, 8, 0, 1, 1, False, False, 1, 1)
 before = master_count()
 with mock.patch.object(flask_app.db.session, 'bulk_save_objects',
                        side_effect=RuntimeError("db locked")):

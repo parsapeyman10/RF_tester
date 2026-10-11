@@ -536,25 +536,41 @@
             });
 
             // تعداد تلاش‌هایی که هر BCM به‌طور *مستقل* برای این سیکل طول
-            // کشید (۱، ۲ یا ۳) — فیلدهای BCM1_Cycle=/BCM2_Cycle=. رنگ‌بندی:
-            // ۱=سبز (بار اول موفق)، ۲=زرد (بار دوم)، ۳=قرمز (بعد از ۳ تلاش هم ناقص)
-            function renderCycleAttempt(elId, att) {
+            // کشید (۱، ۲ یا ۳) — فیلدهای BCM1_Cycle=/BCM2_Cycle=. رنگ‌بندی
+            // بر اساس قبولی نهایی (bcm_results[...].ok)، نه صرفاً شماره‌ی
+            // تلاش (چون «۳» هم می‌تواند یعنی «موفق در تلاش سوم» باشد و هم
+            // «حتی بعد از ۳ تلاش هم ناموفق» — این دو باید رنگ متفاوت داشته
+            // باشند):
+            //   قبول در تلاش ۱  -> سبزِ پررنگ
+            //   قبول در تلاش ۲  -> سبزِ کم‌رنگ‌تر
+            //   قبول در تلاش ۳  -> سبزِ خیلی کم‌رنگ‌تر
+            //   رد شده (حتی بعد از ۳ تلاش قبول نشد) -> قرمز
+            function renderCycleAttempt(elId, att, ok) {
                 const el = document.getElementById(elId);
                 if (!el) return;
                 if (att === null || att === undefined) {
                     el.textContent = '--/3';
                     el.className = 'text-sm font-black font-mono text-slate-500 bg-slate-900/60 px-2 py-0.5 rounded-lg border border-slate-700';
-                } else {
-                    el.textContent = att + '/3';
-                    const color = att >= 3 ? 'text-red-400 border-red-500/30'
-                                : (att === 2 ? 'text-amber-300 border-amber-500/30' : 'text-emerald-400 border-emerald-500/30');
-                    el.className = 'text-sm font-black font-mono bg-slate-900/60 px-2 py-0.5 rounded-lg border ' + color;
+                    return;
                 }
+                el.textContent = att + '/3';
+                let color;
+                if (!ok) {
+                    color = 'text-red-400 bg-red-500/10 border-red-500/30';
+                } else if (att === 1) {
+                    color = 'text-green-300 bg-green-500/30 border-green-500/50';
+                } else if (att === 2) {
+                    color = 'text-green-400 bg-green-500/15 border-green-500/30';
+                } else {
+                    color = 'text-green-500 bg-green-500/5 border-green-500/20';
+                }
+                el.className = 'text-sm font-black font-mono px-2 py-0.5 rounded-lg border ' + color;
             }
-            renderCycleAttempt('live-cycle-attempt-bcm1', last.bcm1_cycle_attempt);
+            const bcmRes = last.bcm_results || {};
+            renderCycleAttempt('live-cycle-attempt-bcm1', last.bcm1_cycle_attempt, bcmRes.BCM1 && bcmRes.BCM1.ok);
             // Indicator/Buzzer شماره‌ی تلاش جداگانه‌ای ندارند؛ چون در همین جعبه‌ی
             // BCM2 گروه‌بندی شده‌اند، همان مقدار BCM2 را نشان می‌دهند
-            renderCycleAttempt('live-cycle-attempt-bcm2', last.bcm2_cycle_attempt);
+            renderCycleAttempt('live-cycle-attempt-bcm2', last.bcm2_cycle_attempt, bcmRes.BCM2 && bcmRes.BCM2.ok);
 
             // Indicator (GPIO34): OK -> چراغ چشمک‌زن سبز، NOK -> چراغ خاموش
             const indLed = document.getElementById('indicator-led');

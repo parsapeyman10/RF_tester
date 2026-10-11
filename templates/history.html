@@ -218,31 +218,35 @@
 
                             <td class="p-5 text-center">
                                 {% set att = r.bcm1_cycle_attempt if (r.bcm1_cycle_attempt is defined and r.bcm1_cycle_attempt is not none) else none %}
-                                {% if att == 1 %}
-                                <span class="bg-emerald-500/10 text-emerald-300 px-3 py-1 rounded-lg font-bold border border-emerald-500/30 text-xs font-mono">{{ att }}/3</span>
-                                {% elif att == 2 %}
-                                <span class="bg-amber-500/10 text-amber-300 px-3 py-1 rounded-lg font-bold border border-amber-500/30 text-xs font-mono">{{ att }}/3</span>
-                                {% elif att == 3 %}
-                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/30 text-xs font-mono">{{ att }}/3</span>
-                                {% elif att %}
-                                <span class="bg-slate-500/10 text-slate-300 px-3 py-1 rounded-lg font-bold border border-slate-500/30 text-xs font-mono">{{ att }}/3</span>
-                                {% else %}
+                                {% set okres = bcm_results(r.nbcm_selected) if bcm_results else None %}
+                                {% set ok1 = okres and okres['BCM1']['ok'] %}
+                                {% if att is none %}
                                 <span class="text-slate-600 text-xs">—</span>
+                                {% elif not ok1 %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% elif att == 1 %}
+                                <span class="bg-green-500/30 text-green-300 px-3 py-1 rounded-lg font-bold border border-green-500/50 text-xs font-mono">{{ att }}/3</span>
+                                {% elif att == 2 %}
+                                <span class="bg-green-500/15 text-green-400 px-3 py-1 rounded-lg font-bold border border-green-500/30 text-xs font-mono">{{ att }}/3</span>
+                                {% else %}
+                                <span class="bg-green-500/5 text-green-500 px-3 py-1 rounded-lg font-bold border border-green-500/20 text-xs font-mono">{{ att }}/3</span>
                                 {% endif %}
                             </td>
 
                             <td class="p-5 text-center">
                                 {% set att2 = r.bcm2_cycle_attempt if (r.bcm2_cycle_attempt is defined and r.bcm2_cycle_attempt is not none) else none %}
-                                {% if att2 == 1 %}
-                                <span class="bg-emerald-500/10 text-emerald-300 px-3 py-1 rounded-lg font-bold border border-emerald-500/30 text-xs font-mono">{{ att2 }}/3</span>
-                                {% elif att2 == 2 %}
-                                <span class="bg-amber-500/10 text-amber-300 px-3 py-1 rounded-lg font-bold border border-amber-500/30 text-xs font-mono">{{ att2 }}/3</span>
-                                {% elif att2 == 3 %}
-                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/30 text-xs font-mono">{{ att2 }}/3</span>
-                                {% elif att2 %}
-                                <span class="bg-slate-500/10 text-slate-300 px-3 py-1 rounded-lg font-bold border border-slate-500/30 text-xs font-mono">{{ att2 }}/3</span>
-                                {% else %}
+                                {% set okres2 = bcm_results(r.nbcm_selected) if bcm_results else None %}
+                                {% set ok2 = okres2 and okres2['BCM2']['ok'] %}
+                                {% if att2 is none %}
                                 <span class="text-slate-600 text-xs">—</span>
+                                {% elif not ok2 %}
+                                <span class="bg-red-500/10 text-red-400 px-3 py-1 rounded-lg font-bold border border-red-500/30 text-xs font-mono">{{ att2 }}/3</span>
+                                {% elif att2 == 1 %}
+                                <span class="bg-green-500/30 text-green-300 px-3 py-1 rounded-lg font-bold border border-green-500/50 text-xs font-mono">{{ att2 }}/3</span>
+                                {% elif att2 == 2 %}
+                                <span class="bg-green-500/15 text-green-400 px-3 py-1 rounded-lg font-bold border border-green-500/30 text-xs font-mono">{{ att2 }}/3</span>
+                                {% else %}
+                                <span class="bg-green-500/5 text-green-500 px-3 py-1 rounded-lg font-bold border border-green-500/20 text-xs font-mono">{{ att2 }}/3</span>
                                 {% endif %}
                             </td>
 

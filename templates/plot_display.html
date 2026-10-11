@@ -229,19 +229,25 @@
                 };
 
                 // 1. نمودار دما و رطوبت
+                // خط با shape:'spline' رسم می‌شود تا با وجود رند شدن مقادیر
+                // به عدد صحیح، نمودار شکسته/پله‌ای دیده نشود و منحنی نرم و
+                // پیوسته (حسِ واقعی‌تر) داشته باشد؛ خودِ داده (y) همچنان
+                // همان مقدار رند‌شده است، فقط رسمِ خط بین نقاط نرم می‌شود.
                 const envTraces = [
                     { 
                         x: xLabels, y: temps, name: 'دما (C°)', 
-                        line: {color: '#f97316', width: 2}, type: 'scatter',
+                        line: {color: '#f97316', width: 2.5, shape: 'spline', smoothing: 1.3},
+                        mode: 'lines', type: 'scatter',
                         visible: showTemp // اعمال وضعیت چک باکس
                     },
                     { 
                         x: xLabels, y: hums, name: 'رطوبت (%)', 
-                        line: {color: '#06b6d4', width: 2}, type: 'scatter',
+                        line: {color: '#06b6d4', width: 2.5, shape: 'spline', smoothing: 1.3},
+                        mode: 'lines', type: 'scatter',
                         visible: showHum // اعمال وضعیت چک باکس
                     }
                 ];
-                
+
                 // افزودن تایتل داینامیک بر اساس تاریخ
                 const uniqueDates = [...new Set(data.map(d => d.date))];
                 const chartTitle = uniqueDates.length === 1 ? `روند تغییرات - ${uniqueDates[0]}` : 'روند تغییرات محیطی';

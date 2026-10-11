@@ -214,8 +214,34 @@
                 // می‌شوند (نمایش‌های دیگر — داشبورد زنده، تاریخچه، API —
                 // همچنان اعشاری باقی می‌مانند و دست‌نخورده‌اند).
                 const roundOrKeep = v => (v === null || v === undefined) ? v : Math.round(v);
-                const temps = data.map(d => roundOrKeep(d.temp));
-                const hums = data.map(d => roundOrKeep(d.humidity));
+                const tempsRaw = data.map(d => roundOrKeep(d.temp));
+                const humsRaw = data.map(d => roundOrKeep(d.humidity));
+
+                // هموارسازی برای رسم: یک میانگین متحرک (moving average) با
+                // پنجره‌ی ۷تایی، دو بار پشت‌سرهم اعمال می‌شود تا هر تغییر
+                // پله‌ای/ناگهانی بین دو نقطه‌ی متوالی به یک شیب تدریجی و
+                // نرم تبدیل شود. این فقط روی *خطِ رسم‌شده* اثر می‌گذارد؛
+                // مقدار واقعیِ رندشده (tempsRaw/humsRaw) برای Hover و بقیه‌ی
+                // صفحات دست‌نخورده باقی می‌ماند.
+                function movingAverage(arr, windowSize) {
+                    const half = Math.floor(windowSize / 2);
+                    return arr.map((_, i) => {
+                        let sum = 0, count = 0;
+                        for (let j = i - half; j <= i + half; j++) {
+                            const v = arr[j];
+                            if (j >= 0 && j < arr.length && v !== null && v !== undefined && !isNaN(v)) {
+                                sum += v;
+                                count++;
+                            }
+                        }
+                        return count ? sum / count : arr[i];
+                    });
+                }
+                function smoothForPlot(arr) {
+                    return movingAverage(movingAverage(arr, 7), 5);
+                }
+                const temps = smoothForPlot(tempsRaw);
+                const hums = smoothForPlot(humsRaw);
 
                 // تنظیمات کلی نمودار
                 const layoutBase = {
@@ -229,21 +255,24 @@
                 };
 
                 // 1. نمودار دما و رطوبت
-                // خط با shape:'spline' رسم می‌شود تا با وجود رند شدن مقادیر
-                // به عدد صحیح، نمودار شکسته/پله‌ای دیده نشود و منحنی نرم و
-                // پیوسته (حسِ واقعی‌تر) داشته باشد؛ خودِ داده (y) همچنان
-                // همان مقدار رند‌شده است، فقط رسمِ خط بین نقاط نرم می‌شود.
+                // خط با shape:'spline' روی داده‌ی هموارشده (moving average)
+                // رسم می‌شود تا هیچ تغییر ناگهانی/پله‌ای دیده نشود و کاملاً
+                // نرم و پیوسته (حسِ واقعی‌تر) به‌نظر برسد. روی Hover، عدد
+                // واقعیِ رندشده (customdata) نشان داده می‌شود، نه مقدار
+                // هموارشده‌ی صرفاً بصری.
                 const envTraces = [
                     { 
-                        x: xLabels, y: temps, name: 'دما (C°)', 
+                        x: xLabels, y: temps, customdata: tempsRaw, name: 'دما (C°)', 
                         line: {color: '#f97316', width: 2.5, shape: 'spline', smoothing: 1.3},
                         mode: 'lines', type: 'scatter',
+                        hovertemplate: 'دما: %{customdata}°C<extra></extra>',
                         visible: showTemp // اعمال وضعیت چک باکس
                     },
                     { 
-                        x: xLabels, y: hums, name: 'رطوبت (%)', 
+                        x: xLabels, y: hums, customdata: humsRaw, name: 'رطوبت (%)', 
                         line: {color: '#06b6d4', width: 2.5, shape: 'spline', smoothing: 1.3},
                         mode: 'lines', type: 'scatter',
+                        hovertemplate: 'رطوبت: %{customdata}%<extra></extra>',
                         visible: showHum // اعمال وضعیت چک باکس
                     }
                 ];

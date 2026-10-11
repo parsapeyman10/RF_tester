@@ -342,8 +342,41 @@ check("void probeSdCard()" in esp32, "[ESP32] بعد از جا زدن کارت،
 check("copyFileToSd" in esp32, "[ESP32] داده‌های حافظه‌ی داخلی به کارت منتقل می‌شوند")
 check(esp32.count("SD.open(") <= 1,
       "[ESP32] دسترسی مستقیم به SD باقی نمانده (همه از gFs رد می‌شوند)")
-check("mountInternalFs()" in esp32.split("void saveRecord(")[2][:1800],
+check("mountInternalFs()" in esp32.split("bool saveRecord(")[2][:1800],
       "[ESP32] اگر کارت وسط کار قطع شود، روی حافظه‌ی داخلی ادامه می‌دهد")
+
+# ------------------------- عدم ازدست‌رفتن رکورد هنگام ری‌استارت (شکاف NUM)
+# باگ قبلی: شماره‌ی رکورد (last_id.txt) بلافاصله بعد از enqueue/تلاش ذخیره
+# پایدار می‌شد، نه بعد از تایید واقعیِ نوشتن روی SD. نتیجه: اگر برد وسط راه
+# (مثلاً بعد از قطعی طولانی شبکه/سرور -> LINK_DOWN_RESET_MS) ری‌استارت
+# می‌شد، رکوردهای هنوز در صفِ RAM بدون ذخیره از بین می‌رفتند ولی شماره‌شان
+# از قبل مصرف شده بود -> شکاف دائمی و غیرقابل ردیابی در توالی NUM سمت سرور.
+check("bool saveRecord(const WifiData &data);" in esp32,
+      "[ESP32] saveRecord نتیجه‌ی موفقیت را برمی‌گرداند (نه void)")
+check(re.search(r"bool\s+saveRecord\(const WifiData &data\)\s*\{", esp32) is not None,
+      "[ESP32] تعریف saveRecord هم bool برمی‌گرداند")
+
+_cycle_block_full = esp32[esp32.find("void TaskRelayControl(void *pv) {"):esp32.find("void TaskDigitalRead(void *pv) {")]
+check(bool(_cycle_block_full), "[ESP32] بدنه‌ی TaskRelayControl پیدا شد")
+if _cycle_block_full:
+    # در مسیر «صف پر -> نوشتن مستقیم»، saveNextPersistentID فقط زیر شرط
+    # موفقیتِ saveRecord صدا زده شود (نه بی‌قید و شرط بعد از تلاش)
+    check("if (stored) saveNextPersistentID(currentGlobalID);" in _cycle_block_full,
+          "[ESP32] شماره‌ی رکورد فقط بعد از تایید واقعیِ نوشتن مستقیم روی SD پایدار می‌شود")
+    check("currentGlobalID--;" in _cycle_block_full,
+          "[ESP32] اگر رکورد کاملاً گم شود، شماره برای دور بعد برگردانده می‌شود (بدون شکاف)")
+    check("DIRECT_SAVE_RETRY_COUNT" in _cycle_block_full and "DIRECT_SAVE_RETRY_WAIT_MS" in _cycle_block_full,
+          "[ESP32] قفل SD چند بار با فاصله امتحان می‌شود (نه فقط یک تلاش کوتاه)")
+
+_upload_case = esp32[esp32.find("case MODE_CLIENT_UPLOAD:"):esp32.find("case MODE_HOTSPOT_VIEW:")]
+check(bool(_upload_case), "[ESP32] بدنه‌ی MODE_CLIENT_UPLOAD پیدا شد")
+if _upload_case:
+    # مصرف‌کننده‌ی صف (که واقعاً رکورد را از RAM به SD منتقل می‌کند) باید
+    # خودش، فقط بعد از موفقیتِ saveRecord، شماره را پایدار کند
+    check("saveNextPersistentID(q.NUM);" in _upload_case,
+          "[ESP32] مصرف‌کننده‌ی صف بعد از ذخیره‌ی واقعی، شماره را پایدار می‌کند")
+    check("bool stored = saveRecord(q);" in _upload_case,
+          "[ESP32] نتیجه‌ی ذخیره‌سازی رکوردهای صف چک می‌شود")
 
 # ------------------------- پاک‌سازی کارت حافظه
 check("EraseResult eraseStorage()" in esp32, "[ESP32] تابع پاک‌سازی کارت وجود دارد")

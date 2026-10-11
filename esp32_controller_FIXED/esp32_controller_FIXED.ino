@@ -481,6 +481,12 @@ volatile uint8_t lastDropReason = 0;   // آخرین دلیل قطعی
 const char *relayPhaseText = "بوت";    // الان در چه مرحله‌ای هستیم
 volatile uint32_t writeFailures = 0; // شکست‌های پیاپی نوشتن روی SD
 const uint32_t WRITE_FAIL_LIMIT = 5;      // بعد از این تعداد، ری‌استارت
+// وقتی صفِ RAM بین TaskRelayControl و TaskNetwork پر باشد (مصرف‌کننده
+// عقب افتاده)، رکورد مستقیماً روی SD نوشته می‌شود؛ اگر قفل SD موقتاً دست
+// تسک دیگری باشد (مثلاً در حال نوشتن/خواندن پنجره‌ی آپلود)، به‌جای یک
+// تلاش‌ِ تک و کوتاه، چند بار با فاصله امتحان می‌کنیم تا رکورد گم نشود.
+const uint8_t DIRECT_SAVE_RETRY_COUNT = 3;
+const uint32_t DIRECT_SAVE_RETRY_WAIT_MS = 2000;
 uint32_t lastTxMillis = 0;             // آخرین باری که چیزی روی سوکت فرستادیم
 
 // Prototypes
@@ -504,7 +510,7 @@ static const char *wifiReasonText(uint8_t reason);
 static bool mountInternalFs();
 bool initStorage();
 void probeSdCard();
-void saveRecord(const WifiData &data);
+bool saveRecord(const WifiData &data);
 
 /** نتیجه‌ی پاک‌سازی کارت حافظه */
 struct EraseResult {
@@ -1870,16 +1876,48 @@ void TaskRelayControl(void *pv) {
                    snapshot.Hour, snapshot.Minute, snapshot.Second);
 
       if (xQueueSend(xDataQueue, (void *)&snapshot, pdMS_TO_TICKS(100)) != pdPASS) {
-        // صف پر است -> همین‌جا مستقیم روی SD بنویس تا رکورد گم نشود
+        // صف پر است -> همین‌جا مستقیم روی SD بنویس تا رکورد گم نشود.
+        // قفل SD را چند بار با فاصله امتحان می‌کنیم؛ چون momentarily ممکن
+        // است دست تسک شبکه باشد (در حال نوشتن/خواندن پنجره‌ی آپلود یا
+        // تخلیه‌ی همین صف) و یک تلاش‌ِ تک و کوتاه کافی نیست.
         DEBUG_PRINTLN("[CYCLE] صف پر بود؛ ذخیره‌ی مستقیم روی SD");
-        if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
-          saveRecord(snapshot);
-          xSemaphoreGive(xSDMutex);
-        } else {
+        bool stored = false;
+        for (uint8_t attempt = 0; attempt < DIRECT_SAVE_RETRY_COUNT && !stored; attempt++) {
+          if (attempt > 0) vTaskDelay(pdMS_TO_TICKS(300));
+          if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(DIRECT_SAVE_RETRY_WAIT_MS))) {
+            stored = saveRecord(snapshot);
+            // شماره‌ی رکورد را فقط *بعد از* تایید واقعیِ نوشتن روی حافظه‌ی
+            // پایدار می‌کنیم (همین‌جا، زیر همان قفل SD). اگر این کار را
+            // بدون شرط و زودتر انجام می‌دادیم (نسخه‌ی قبلی)، با هر
+            // ری‌استارتِ برد (مثلاً بعد از قطعی طولانی شبکه/سرور —
+            // LINK_DOWN_RESET_MS)، رکوردهای هنوز معلق مانده بدون ذخیره از
+            // بین می‌رفتند ولی شماره‌شان قبلاً در last_id.txt مصرف شده
+            // بود -> شکاف دائمی و غیرقابل ردیابی در توالی NUM (دقیقاً
+            // همان چیزی که باعث می‌شود شماره‌ها در دیتابیس سرور ناگهان
+            // جهش کنند، مثلاً از ۳۹ به ۶۸).
+            if (stored) saveNextPersistentID(currentGlobalID);
+            xSemaphoreGive(xSDMutex);
+          }
+        }
+        if (!stored) {
+          // بعد از همه‌ی تلاش‌ها هم نشد: این رکورد واقعاً گم شد (مثلاً
+          // کارت حافظه از دسترس خارج شده). برای اینکه توالی NUM توی
+          // دیتابیس بدون توضیح «شکاف» نخورد، شماره را به عقب برمی‌گردانیم
+          // تا سیکل بعد همین شماره را دوباره استفاده کند — داده‌ی همین یک
+          // دور طبیعتاً غیرقابل بازیابی است، اما حداقل شماره‌گذاری گمراه‌
+          // کننده نمی‌شود. writeFailures هم بالا می‌رود تا اگر این وضعیت
+          // مکرر شود، ناظر سلامت طبق WRITE_FAIL_LIMIT برد را ری‌استارت کند.
           writeFailures++;
+          DEBUG_PRINTF("[CYCLE] بحرانی: رکورد #%d کاملاً گم شد؛ شماره برای دور بعد برگردانده شد\n",
+                       currentGlobalID);
+          currentGlobalID--;
         }
       }
-      saveNextPersistentID(currentGlobalID);
+      // توجه: اگر xQueueSend موفق بود (حالت معمول)، شماره را اینجا پایدار
+      // نمی‌کنیم — چون رکورد هنوز فقط در صف RAM است، نه روی حافظه‌ی
+      // غیرفرار. این کار را مصرف‌کننده‌ی صف (TaskNetwork، بخش
+      // MODE_CLIENT_UPLOAD) فقط *بعد* از نوشتن واقعیِ رکورد روی SD انجام
+      // می‌دهد؛ همان جایی که رکورد واقعاً از RAM به حافظه‌ی پایدار می‌رود.
     } else {
       DEBUG_PRINTLN("[CYCLE] Error: state mutex busy, record skipped.");
     }
@@ -2332,13 +2370,13 @@ EraseResult eraseStorage() {
   return res;
 }
 
-void saveRecord(const WifiData &data) {
+bool saveRecord(const WifiData &data) {
   if (gFs == nullptr) {
     // هیچ حافظه‌ای سوار نیست؛ آخرین تلاش برای سوار کردن
     if (!initStorage()) {
       writeFailures++;
       DEBUG_PRINTLN("[STORE] رکورد ذخیره نشد: حافظه‌ای در دسترس نیست");
-      return;
+      return false;
     }
   }
 
@@ -2356,7 +2394,7 @@ void saveRecord(const WifiData &data) {
       if (written == REC_SIZE) {
         writeFailures = 0;
         VERBOSE_PRINTF("[STORE] ذخیره شد #%d -> %s\n", data.NUM, path.c_str());
-        return;
+        return true;
       }
       DEBUG_PRINTF("[STORE] نوشتن ناقص بود (%u از %u بایت)\n",
                    (unsigned)written, (unsigned)REC_SIZE);
@@ -2383,6 +2421,7 @@ void saveRecord(const WifiData &data) {
   writeFailures++;
   DEBUG_PRINTF("[STORE] بحرانی: رکورد #%d ذخیره نشد (شکست پیاپی: %u)\n",
                data.NUM, (unsigned)writeFailures);
+  return false;
 }
 
 /**
@@ -2472,11 +2511,25 @@ void TaskInternalWiFiConnection(void *pv) {
         //      در صف می‌ماندند.)
         while (xQueueReceive(xDataQueue, &q, pdMS_TO_TICKS(10)) == pdPASS) {
           if (xSemaphoreTake(xSDMutex, pdMS_TO_TICKS(2000))) {
-            saveRecord(q);
+            bool stored = saveRecord(q);
+            // شماره‌ی رکورد را فقط *بعد* از تایید واقعیِ نوشتن روی SD
+            // پایدار می‌کنیم — همین‌جا دقیقاً جایی است که رکورد از صفِ
+            // موقتِ RAM به حافظه‌ی غیرفرار منتقل می‌شود. اگر این کار
+            // زودتر (در TaskRelayControl، بلافاصله بعد از enqueue) انجام
+            // می‌شد، با هر ری‌استارتِ برد وسط راه، رکوردهای هنوز روی صف
+            // مانده بدون ذخیره از بین می‌رفتند ولی شماره‌شان از قبل در
+            // last_id.txt مصرف شده بود -> شکاف دائمی در توالی NUM.
+            if (stored) {
+              saveNextPersistentID(q.NUM);
+            } else {
+              DEBUG_PRINTF("[STORE] رکورد #%d از صف گم شد (نوشتن ناموفق)\n", q.NUM);
+            }
             xSemaphoreGive(xSDMutex);
           } else {
             // نتوانستیم قفل بگیریم؛ رکورد را برمی‌گردانیم تا گم نشود
-            xQueueSendToFront(xDataQueue, (void *)&q, pdMS_TO_TICKS(100));
+            if (xQueueSendToFront(xDataQueue, (void *)&q, pdMS_TO_TICKS(100)) != pdPASS) {
+              DEBUG_PRINTF("[STORE] بحرانی: رکورد #%d حتی به صف هم برنگشت؛ گم شد\n", q.NUM);
+            }
             DEBUG_PRINTLN("[STORE] قفل آزاد نشد؛ رکورد در صف ماند");
             break;
           }

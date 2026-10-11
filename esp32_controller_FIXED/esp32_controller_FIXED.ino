@@ -1029,9 +1029,23 @@ void runSetupPortal(bool timeAlreadyValid) {
   uint32_t lastTick = 0;
   uint32_t firstClientMs = 0;   // اولین باری که گوشی وصل شد
   bool clientSeen = false;
+  // سقفِ مطلق: از همین لحظه (باز شدن پورتال) حساب می‌شود و با قطع‌ووصل
+  // مکررِ گوشی (مثلاً به‌خاطر مدیریت مصرف باتری یا رومینگ) هرگز ریست
+  // نمی‌شود. بدون این سقف، اگر گوشی هر چند دقیقه یک‌بار قطع/وصل شود،
+  // firstClientMs هر بار صفر می‌شود و شمارش ۱۵ دقیقه‌ایِ زیر هیچ‌وقت به
+  // واقع نمی‌رسد -> پورتال می‌تواند عملاً بی‌نهایت قفل بماند.
+  const uint32_t portalAbsoluteStart = millis();
 
   for (;;) {
     setupServer.handleClient();
+
+    // ---- سقفِ مطلقِ ایمنی: صرف‌نظر از رفتار گوشی (وصل/قطع مکرر) ----
+    if (SETUP_PORTAL_MAX_WITH_CLIENT_MS > 0 &&
+        (millis() - portalAbsoluteStart) >= SETUP_PORTAL_MAX_WITH_CLIENT_MS) {
+      DEBUG_PRINTLN("[PORTAL] سقفِ مطلقِ انتظار (از لحظه‌ی باز شدن پورتال) رسید؛ "
+                    "صرف‌نظر از قطع‌ووصل‌های گوشی -> ادامه‌ی خودکار");
+      break;
+    }
 
     // ---- خروج فقط با فشردن دکمه‌ی حالت کاری روی گوشی ----
     if (portalTimeSet && portalModeChosen) {

@@ -378,6 +378,22 @@ if _upload_case:
     check("bool stored = saveRecord(q);" in _upload_case,
           "[ESP32] نتیجه‌ی ذخیره‌سازی رکوردهای صف چک می‌شود")
 
+# ------------------------- پورتال راه‌اندازی (سقفِ مطلقِ انتظار گوشی)
+# باگ قبلی: شمارش SETUP_PORTAL_MAX_WITH_CLIENT_MS (۱۵ دقیقه) از لحظه‌ی
+# firstClientMs حساب می‌شد؛ اگر گوشی به‌خاطر مدیریت مصرف باتری/رومینگ
+# لحظه‌ای قطع و دوباره وصل می‌شد، firstClientMs دوباره صفر می‌شد و سقفِ
+# ۱۵ دقیقه‌ای هیچ‌وقت واقعاً نمی‌رسید -> پورتال می‌توانست عملاً بی‌نهایت
+# قفل بماند (دقیقاً رفتار مشاهده‌شده: ۱۵ دقیقه، بعد ۲۱ دقیقه و هنوز قفل).
+_portal_fn = esp32[esp32.find("void runSetupPortal(bool timeAlreadyValid) {"):
+                    esp32.find("struct LinkStats {")]
+check(bool(_portal_fn), "[ESP32] بدنه‌ی runSetupPortal پیدا شد")
+if _portal_fn:
+    check("portalAbsoluteStart" in _portal_fn,
+          "[ESP32] یک سقفِ مطلقِ زمانی (مستقل از قطع‌ووصل گوشی) برای پورتال وجود دارد")
+    check(re.search(r"millis\(\)\s*-\s*portalAbsoluteStart\)\s*>=\s*SETUP_PORTAL_MAX_WITH_CLIENT_MS",
+                     _portal_fn) is not None,
+          "[ESP32] سقفِ مطلق با قطع‌ووصل مکررِ گوشی ریست نمی‌شود")
+
 # ------------------------- پاک‌سازی کارت حافظه
 check("EraseResult eraseStorage()" in esp32, "[ESP32] تابع پاک‌سازی کارت وجود دارد")
 check('setupServer.on("/formatsd"' in esp32, "[ESP32] پاک‌سازی از پورتال در دسترس است")

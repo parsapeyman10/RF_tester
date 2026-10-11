@@ -210,7 +210,10 @@
                 }
 
                 const xLabels = data.map(d => d.timestamp);
-                const temps = data.map(d => d.temp);
+                // دما فقط در همین نمودار به نزدیک‌ترین عدد صحیح رند می‌شود
+                // (نمایش‌های دیگر — داشبورد زنده، تاریخچه، API — همچنان
+                // اعشاری باقی می‌مانند و دست‌نخورده‌اند).
+                const temps = data.map(d => (d.temp === null || d.temp === undefined) ? d.temp : Math.round(d.temp));
                 const hums = data.map(d => d.humidity);
 
                 // تنظیمات کلی نمودار

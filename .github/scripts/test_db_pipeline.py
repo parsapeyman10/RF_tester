@@ -161,14 +161,17 @@ check(half["BCM2"]["close"] and not half["BCM2"]["open"] and not half["BCM2"]["o
 none = flask_app.build_bcm_results("")
 check(none["BCM1"] == {"open": False, "close": False, "ok": False}, "بدون فیدبک همه NOK")
 
-print("\n[7c] مرجع زمان، RTC دستگاه است (نه ساعت سرور)")
+print("\n[7c] date/time از RTC دستگاه، timestamp (زمان ثبت) از ساعت سرور")
 _blob = struct.pack("<iff????iBBBBB", 777, 22.00, 43.00,
                     True, True, True, False, 2026, 3, 9, 7, 45, 12)
 import io as _io
+import datetime as _dt
+_before_upload = _dt.datetime.now(flask_app.TEHRAN_TZ).replace(tzinfo=None)
 _resp = _c_dat = flask_app.app.test_client().post(
     "/upload_dat",
     data={"folder_upload": (_io.BytesIO(_blob), "20260309.dat")},
     content_type="multipart/form-data")
+_after_upload = _dt.datetime.now(flask_app.TEHRAN_TZ).replace(tzinfo=None)
 check(_resp.status_code == 200, f"/upload_dat -> {_resp.status_code}")
 with flask_app.app.app_context():
     rec = flask_app.db.session.query(flask_app.MasterReading).filter_by(num_value=777).first()
@@ -176,8 +179,8 @@ check(rec is not None, "رکورد آپلودشده ثبت شد")
 if rec:
     check(rec.date == "2026-03-09" and rec.time == "07:45:12",
           f"تاریخ و ساعت از RTC خوانده شد ({rec.date} {rec.time})")
-    check(rec.timestamp.strftime("%Y-%m-%d %H:%M:%S") == "2026-03-09 07:45:12",
-          f"timestamp هم زمان RTC است نه زمان آپلود سرور ({rec.timestamp})")
+    check(_before_upload <= rec.timestamp <= _after_upload,
+          f"timestamp (زمان ثبت) همان لحظه‌ی ساعت سرور است، نه RTC دستگاه ({rec.timestamp})")
     _r = flask_app.build_bcm_results(rec.nbcm_selected)
     check(_r["BCM1"]["ok"] and _r["BCM2"]["open"] and not _r["BCM2"]["close"],
           f"چهار نتیجه از فایل باینری درست خوانده شد ({rec.nbcm_selected})")
@@ -254,6 +257,43 @@ r2 = _c.post("/api/ingest", data="\n".join(_lines), content_type="text/plain")
 j2 = r2.get_json()
 check(j2["saved"] == 0 and j2["duplicates"] == 2, f"ارسال دوباره تکراری شمرده شد ({j2})")
 check(daily_count("2026-01-07") == 2, "رکورد تکراری اضافه نشد")
+
+print("\n[8h] /api/master_data (نمودارها): بدون فیلتر باید *همه‌ی* رکوردها را برگرداند")
+# قبلاً وقتی فیلتر تاریخ زده نشده بود، فقط ۱۰۰۰ رکورد آخر برگردانده
+# می‌شد (limit(1000)) که یعنی با دیتابیس بزرگ‌تر، بخشی از نمودار همیشه
+# ناقص بود. طبق درخواست کاربر، الان باید کل دیتابیس برگردد و فیلتر کردن
+# (در صورت نیاز، برای سرعت) کاملاً اختیاری و با start_date/end_date باشد.
+with flask_app.app.app_context():
+    _total_before = flask_app.MasterReading.query.count()
+    _bulk = []
+    import datetime as _dt2
+    _base = _dt2.datetime(2020, 1, 1)
+    for i in range(1100):
+        ts = _base + _dt2.timedelta(minutes=i)
+        _bulk.append(flask_app.MasterReading(
+            num_value=800000 + i, temp="21.0", humidity="40.0",
+            date=ts.strftime("%Y-%m-%d"), time=ts.strftime("%H:%M:%S"), timestamp=ts,
+            nbcm_selected="BCM1_OPEN,BCM1_CLOSE,BCM2_OPEN,BCM2_CLOSE", cycle=True))
+    flask_app.db.session.bulk_save_objects(_bulk)
+    flask_app.db.session.commit()
+    _total_after = flask_app.MasterReading.query.count()
+check(_total_after - _total_before == 1100, "۱۱۰۰ رکورد تستی برای این سناریو اضافه شد")
+
+_c3 = flask_app.app.test_client()
+_md_all = _c3.get("/api/master_data").get_json()
+check(len(_md_all) == _total_after,
+      f"بدون فیلتر، تعداد رکوردهای /api/master_data برابر کل دیتابیس است "
+      f"({len(_md_all)} از {_total_after}، نه محدود به ۱۰۰۰ رکورد)")
+
+_md_filtered = _c3.get("/api/master_data?start_date=2020-01-01&end_date=2020-01-01").get_json()
+check(0 < len(_md_filtered) < len(_md_all),
+      f"فیلتر تاریخ هم‌چنان کار می‌کند و زیرمجموعه‌ای برمی‌گرداند ({len(_md_filtered)})")
+
+with flask_app.app.app_context():
+    flask_app.MasterReading.query.filter(
+        flask_app.MasterReading.num_value >= 800000,
+        flask_app.MasterReading.num_value < 801100).delete(synchronize_session=False)
+    flask_app.db.session.commit()
 
 print("\n[8b] صفحه‌ی افزودن دستی: متن خام کپی‌شده از مانیتور سریال")
 _paste = """```

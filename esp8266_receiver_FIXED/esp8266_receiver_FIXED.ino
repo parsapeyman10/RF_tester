@@ -91,6 +91,22 @@ struct WifiData {
     bool     BCM1_OPEN, BCM1_CLOSE, BCM2_OPEN, BCM2_CLOSE;
     uint16_t Year;
     uint8_t  Month, Day, Hour, Minute, Second;
+    // تعداد تلاش‌هایی که ESP32 برای این سیکل طول کشید (۱، ۲ یا ۳)؛
+    // از فیلد «cycle=» خط دریافتی می‌آید و عیناً فوروارد می‌شود
+    uint8_t  CycleAttempt;
+    // دو سیگنال دیجیتال اضافی (GPIO34=Indicator, GPIO35=Buzzer روی ESP32)؛
+    // از فیلدهای «Indicator=» و «Buzzer=» خط دریافتی می‌آیند و عیناً
+    // فوروارد می‌شوند. اگر فریمور فرستنده قدیمی‌تر باشد و این فیلدها را
+    // نفرستد، مقدار پیش‌فرض NOK/false در نظر گرفته می‌شود.
+    bool     Indicator;
+    bool     Buzzer;
+    // تعداد تلاش‌هایی که هر BCM به‌طور مستقل برای این سیکل طول کشید
+    // (۱، ۲ یا ۳)؛ از فیلدهای «BCM1_Cycle=»/«BCM2_Cycle=» خط دریافتی
+    // می‌آیند و عیناً فوروارد می‌شوند. اگر فریمور فرستنده قدیمی‌تر باشد
+    // و این دو فیلد را نفرستد، همان مقدار CycleAttempt مشترک به‌عنوان
+    // پیش‌فرض استفاده می‌شود.
+    uint8_t  BCM1_CycleAttempt;
+    uint8_t  BCM2_CycleAttempt;
 };
 
 WifiData WData;
@@ -439,16 +455,30 @@ bool strToBool(const char* str) {
 bool parseData(char* inputBuffer) {
   char bcm1[10], bcm2[10], bcm3[10], bcm4[10];
   char tStr[15], hStr[15];
+  char indStr[10] = "NOK", buzStr[10] = "NOK";  // اگر فریمور قدیمی‌تر این دو فیلد را نفرستد
   int num, yr, mon, day, hr, min, sec;
+  int cyc = 1;   // اگر ESP32 قدیمی بدون فیلد cycle= باشد، پیش‌فرض ۱
+  // اگر فریمور قدیمی‌تر BCM1_Cycle=/BCM2_Cycle= را نفرستد، -1 می‌ماند و
+  // پایین‌تر با همان مقدار مشترک cyc پر می‌شود (سازگاری به‌عقب)
+  int bcm1Cyc = -1, bcm2Cyc = -1;
 
-  // تطابق کامل با فرمت snprintf ارسالی شما
+  // تطابق کامل با فرمت snprintf ارسالی شما (فیلدهای cycle=، Indicator=/
+  // Buzzer=، و در انتها BCM1_Cycle=/BCM2_Cycle= اضافه شده‌اند). توجه:
+  // چون Buzzer= دیگر آخرین فیلدِ خط نیست، اسکن‌ستش به‌جای %9[^,\r\n]
+  // (که فقط تا آخر خط متوقف می‌شد) به %9[^,] برگردانده شده است.
   int itemsParsed = sscanf(inputBuffer, 
     "NUM=%d,BCM1_OPEN=%9[^,],BCM1_CLOSE=%9[^,],BCM2_OPEN=%9[^,],BCM2_CLOSE=%9[^,],"
-    "Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d",
-    &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec
+    "Temp=%14[^,],Humidity=%14[^,],Date=%d-%d-%d,Time=%d:%d:%d,cycle=%d,"
+    "Indicator=%9[^,],Buzzer=%9[^,],BCM1_Cycle=%d,BCM2_Cycle=%d",
+    &num, bcm1, bcm2, bcm3, bcm4, tStr, hStr, &yr, &mon, &day, &hr, &min, &sec, &cyc,
+    indStr, buzStr, &bcm1Cyc, &bcm2Cyc
   );
 
-  if (itemsParsed == 13) {
+  // ۱۳ = فریمور خیلی قدیمی (نه cycle، نه Indicator/Buzzer)
+  // ۱۴ = فریمور میانی (فقط cycle=، بدون Indicator/Buzzer)
+  // ۱۶ = فریمور قبلی (cycle= + Indicator= + Buzzer=، بدون BCM1/2_Cycle)
+  // ۱۸ = فریمور فعلی (+ BCM1_Cycle= + BCM2_Cycle=)
+  if (itemsParsed == 13 || itemsParsed == 14 || itemsParsed == 16 || itemsParsed == 18) {
     WData.NUM = num;
     WData.BCM1_OPEN  = strToBool(bcm1);
     WData.BCM1_CLOSE = strToBool(bcm2);
@@ -458,6 +488,19 @@ bool parseData(char* inputBuffer) {
     WData.Hum = atof(hStr);
     WData.Year = yr; WData.Month = mon; WData.Day = day;
     WData.Hour = hr; WData.Minute = min; WData.Second = sec;
+    if (cyc < 1) cyc = 1;
+    if (cyc > 3) cyc = 3;
+    WData.CycleAttempt = (uint8_t)cyc;
+    WData.Indicator = strToBool(indStr);
+    WData.Buzzer = strToBool(buzStr);
+
+    // اگر فریمور فرستنده قدیمی‌تر بود و BCM1_Cycle=/BCM2_Cycle= را
+    // نفرستاده بود (bcm1Cyc/bcm2Cyc == -1)، از همان مقدار مشترک cyc
+    // به‌عنوان پیش‌فرض استفاده می‌کنیم.
+    if (bcm1Cyc < 1 || bcm1Cyc > 3) bcm1Cyc = cyc;
+    if (bcm2Cyc < 1 || bcm2Cyc > 3) bcm2Cyc = cyc;
+    WData.BCM1_CycleAttempt = (uint8_t)bcm1Cyc;
+    WData.BCM2_CycleAttempt = (uint8_t)bcm2Cyc;
     return true;
   }
   return false;
@@ -475,7 +518,8 @@ bool parseData(char* inputBuffer) {
 void sendDataToComputer() {
   Serial.printf(
     "NUM=%d,BCM1_OPEN=%s,BCM1_CLOSE=%s,BCM2_OPEN=%s,BCM2_CLOSE=%s,"
-    "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d\n",
+    "Temp=%.2f,Humidity=%.2f,Date=%04d-%02d-%02d,Time=%02d:%02d:%02d,"
+    "cycle=%u,Indicator=%s,Buzzer=%s,BCM1_Cycle=%u,BCM2_Cycle=%u\n",
     WData.NUM,
     WData.BCM1_OPEN ? "OK" : "NOK",
     WData.BCM1_CLOSE ? "OK" : "NOK",
@@ -483,7 +527,12 @@ void sendDataToComputer() {
     WData.BCM2_CLOSE ? "OK" : "NOK",
     WData.Temp, WData.Hum,
     WData.Year, WData.Month, WData.Day,
-    WData.Hour, WData.Minute, WData.Second
+    WData.Hour, WData.Minute, WData.Second,
+    (unsigned)WData.CycleAttempt,
+    WData.Indicator ? "OK" : "NOK",
+    WData.Buzzer ? "OK" : "NOK",
+    (unsigned)WData.BCM1_CycleAttempt,
+    (unsigned)WData.BCM2_CycleAttempt
   );
 }
 
@@ -519,6 +568,18 @@ void handleServerLine(const char* line) {
   }
   else if (strncmp(line, "SRV_PONG", 8) == 0) {
     lastSrvReadyMs = millis();
+  }
+  else if (strncmp(line, "CFG", 3) == 0) {
+    // کانال عبوری ساده: هر خط «CFG ...» که از سرور می‌آید (مثلاً تنظیم
+    // از‌راه‌دورِ CYCLE_PERIOD_MS / RELAY_RETRY_GAP_MS) عیناً، بدون پردازش
+    // یا اعتبارسنجی محتوا، به ESP32 فوروارد می‌شود. ESP32 خودش قالب و
+    // بازه‌ی مجاز مقادیر را چک می‌کند؛ ESP8266 فقط لوله‌ی انتقال است.
+    if (isClientConnected && currentClient.connected()) {
+      currentClient.printf("%s\n", line);
+      ST_PRINTF("[LINK] پیکربندی به ESP32 فوروارد شد: %s\n", line);
+    } else {
+      ST_PRINTF("[LINK] ESP32 وصل نیست؛ CFG فعلاً رد شد (با SRV_READY بعدی دوباره امتحان می‌شود): %s\n", line);
+    }
   }
   else {
     DBG_PRINTF("[LINK] خط ناشناخته از سرور: %s\n", line);

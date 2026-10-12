@@ -1450,24 +1450,27 @@ def api_bcm_stats():
 
 @app.route('/api/master_data')
 def get_master_data():
+    """
+    دیتای نمودارها (دما/رطوبت/سطح‌های منطقی).
+
+    طبق درخواست کاربر: اگر فیلتر تاریخ زده نشود، باید *همه‌ی* رکوردهای
+    دیتابیس نمایش داده شوند (نه فقط یک تعداد محدود/آخرین‌ها) — فیلتر کردن
+    (برای کم‌کردن حجم، سرعت بیشتر و...) کاملاً اختیاری و به عهده‌ی خودِ
+    کاربر از طریق start_date/end_date روی همین صفحه‌ی نمودار است.
+    """
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
-    
+
     query = MasterReading.query
-    
-    # اگر فیلتر تاریخ نداشتیم، به جای 1 روز، 1000 رکورد آخر را بیاور (برای سرعت و پر بودن نمودار)
-    if not start_date and not end_date:
-        # دریافت 1000 رکورد آخر بر اساس زمان سنسور
-        readings = MasterReading.query.order_by(*device_clock_order()).limit(1000).all()
-        # چون limit دیتای آخر را می‌آورد، باید لیست را برعکس کنیم تا در نمودار از چپ به راست باشد
-        readings = readings[::-1]
-    else:
-        # اگر فیلتر داشت، طبق فیلتر عمل کن
-        if start_date:
-            query = query.filter(MasterReading.date >= start_date)
-        if end_date:
-            query = query.filter(MasterReading.date <= end_date)
-        readings = query.order_by(*device_clock_order(newest_first=False)).all()
+    if start_date:
+        query = query.filter(MasterReading.date >= start_date)
+    if end_date:
+        query = query.filter(MasterReading.date <= end_date)
+
+    # بدون هیچ limit‌ای: تمام رکوردهای منطبق با فیلتر (یا کل دیتابیس اگر
+    # فیلتری زده نشده) برگردانده می‌شود، از قدیم به جدید (برای رسم درستِ
+    # نمودار از چپ به راست).
+    readings = query.order_by(*device_clock_order(newest_first=False)).all()
     
     output = []
     for r in readings:
